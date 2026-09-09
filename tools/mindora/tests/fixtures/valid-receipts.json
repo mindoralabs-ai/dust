@@ -1,0 +1,29 @@
+[
+  {
+    "source_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+    "patch_sha": "1111111111111111111111111111111111111111",
+    "role": "front_api",
+    "dockerfile": "dockerfiles/front.Dockerfile",
+    "target": "front-api",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "migration_command": null
+  },
+  {
+    "source_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+    "patch_sha": "1111111111111111111111111111111111111111",
+    "role": "front_workers",
+    "dockerfile": "dockerfiles/front.Dockerfile",
+    "target": "workers",
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "migration_command": null
+  },
+  {
+    "source_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+    "patch_sha": "1111111111111111111111111111111111111111",
+    "role": "core_api",
+    "dockerfile": "dockerfiles/core.Dockerfile",
+    "target": "core",
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "migration_command": null
+  }
+]

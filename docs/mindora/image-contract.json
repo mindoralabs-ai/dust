@@ -1,0 +1,47 @@
+{
+  "dust_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+  "components": {
+    "front_api": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/front.Dockerfile",
+      "target": "front-api",
+      "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute && node ../scripts/db/run-migrate.cjs --command post-deploy --execute"
+    },
+    "front_spa": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/front-spa.Dockerfile",
+      "target": "front-spa",
+      "migration_command": null
+    },
+    "front_workers": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/front.Dockerfile",
+      "target": "workers",
+      "migration_command": null
+    },
+    "core_api": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/core.Dockerfile",
+      "target": "core",
+      "migration_command": null
+    },
+    "sqlite_worker": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/core.Dockerfile",
+      "target": "core",
+      "migration_command": null
+    },
+    "viz_renderer": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/viz.Dockerfile",
+      "target": "viz",
+      "migration_command": null
+    },
+    "egress_proxy": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/egress-proxy.Dockerfile",
+      "target": "egress-proxy",
+      "migration_command": null
+    }
+  }
+}

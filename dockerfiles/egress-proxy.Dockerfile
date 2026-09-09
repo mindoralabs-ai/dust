@@ -1,4 +1,4 @@
-FROM rust:1.85.0 AS egress-proxy
+FROM rust:1.85.0@sha256:0ff31c9ffa641a62e48d543fb00b4960955ea375f40776f40f585b89e654cc5e AS egress-proxy
 
 RUN apt-get update && apt-get install -y cmake
 
