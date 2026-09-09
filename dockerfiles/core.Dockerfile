@@ -9,9 +9,10 @@ WORKDIR /app
 
 COPY /core/ .
 
+ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,id=core-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=core-cargo-git,target=/usr/local/cargo/git \
-    cargo build --release --bin core-api --bin sqlite-worker --bin check_table
+    cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin core-api --bin sqlite-worker --bin check_table
 
 # Runtime stage — only the compiled binaries + minimal system libs
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS core

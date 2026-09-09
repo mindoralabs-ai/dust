@@ -47,7 +47,9 @@ The front image generator accepts `front/custom-models.json`. For this POC the
 input is exactly `{"models":[]}` and no custom model ID is enabled. If that file
 is absent, the upstream script tries private GCS before falling back; local and
 CI builds should create the empty input in the build context so they never make
-that private lookup. Provider IDs and model defaults are unchanged.
+that private lookup. Provider IDs and model defaults are unchanged. The Rust
+Dockerfiles default `CARGO_BUILD_JOBS` to `2` to keep core and egress
+compilation within the local 8 GiB qualification host.
 
 Build a role without publishing:
 

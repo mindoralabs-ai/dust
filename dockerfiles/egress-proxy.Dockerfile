@@ -8,7 +8,8 @@ COPY /egress-proxy/ .
 
 # TODO(sandbox-egress): Switch to a smaller runtime image once the service deployment path
 # is stable. Existing Rust service Dockerfiles currently run from the Rust image.
-RUN cargo build --release --bin egress-proxy
+ARG CARGO_BUILD_JOBS=2
+RUN cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin egress-proxy
 
 ARG COMMIT_HASH
 ARG COMMIT_HASH_LONG
