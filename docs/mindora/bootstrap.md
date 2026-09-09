@@ -54,17 +54,22 @@ Build a role without publishing:
 ```sh
 docker build --platform linux/amd64 \
   --target front-api \
-  --build-arg COMMIT_HASH=2036fc2 \
-  --build-arg COMMIT_HASH_LONG=2036fc2ff982bf1385e252e9fa3d430d9c05379e \
+  --build-arg COMMIT_HASH="$(git rev-parse --short=8 HEAD)" \
+  --build-arg COMMIT_HASH_LONG="$(git rev-parse HEAD)" \
   --build-arg NEXT_PUBLIC_DUST_APP_URL=http://localhost:8080 \
   -f dockerfiles/front.Dockerfile \
-  -t mindora-dust-front-api:2036fc2 .
+  -t "mindora-dust-front-api:$(git rev-parse HEAD)" .
 ```
 
 The CI workflow verifies that its checkout equals `GITHUB_SHA` and that the
-pinned Dust source is an ancestor before building. It records the local image
-ID as build evidence. A Docker image ID is not a registry manifest digest and
-must never be copied into a deployment receipt.
+pinned Dust source is an ancestor before building. Runtime commit metadata uses
+that actual patched `GITHUB_SHA`; `DUST_SOURCE_SHA` remains separate upstream
+source evidence. Identical Dockerfile/target pairs build once, so core API and
+SQLite worker share one build while receiving separate role evidence. Pull
+requests build automatically; `workflow_dispatch` supports an explicit rerun
+without duplicating the same work on every branch push. The workflow records
+the local image ID as build evidence. A Docker image ID is not a registry
+manifest digest and must never be copied into a deployment receipt.
 
 ## Publication receipts
 

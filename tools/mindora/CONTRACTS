@@ -3,3 +3,6 @@ The image verifier must require an explicit expected patch commit and reject rec
 
 @cc [owner:jchen0824,label:security] local-validation-only
 Mindora build tooling must not authenticate to a registry or publish an image until an approved immutable registry target is recorded outside this source tree.
+
+@cc [owner:jchen0824,label:testing] patched-build-metadata
+Every local build must record the exact patched checkout in runtime commit metadata and evidence while preserving the pinned upstream Dust commit as a separate source field; CI must build each unique Dockerfile/target pair at most once per run.
