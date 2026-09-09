@@ -4,8 +4,15 @@ on:
   pull_request:
     paths:
       - ".github/workflows/mindora-build.yml"
+      - ".dockerignore"
+      - "LICENSE"
+      - "package.json"
+      - "package-lock.json"
       - "dockerfiles/**"
       - "docs/mindora/image-contract.json"
+      - "sdks/js/**"
+      - "sparkle/**"
+      - "scripts/db/**"
       - "front/**"
       - "front-api/**"
       - "front-spa/**"
@@ -34,7 +41,12 @@ jobs:
           git cat-file -e "${DUST_SOURCE_SHA}^{commit}"
           git merge-base --is-ancestor "$DUST_SOURCE_SHA" "$GITHUB_SHA"
       - name: Test receipt verifier
-        run: python3 -m unittest tools/mindora/tests/test_verify_image_contract.py
+        run: >-
+          python3 -m unittest
+          tools/mindora/tests/test_verify_image_contract.py
+          tools/mindora/tests/test_source_build_contract.py
+      - name: Test SPA shell routing in nginx
+        run: bash tools/mindora/tests/test_front_spa_nginx_routing.sh
       - name: Prove invalid fixture is rejected
         run: |
           ! python3 tools/mindora/verify-image-contract.py \
