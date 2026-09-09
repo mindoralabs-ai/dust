@@ -87,11 +87,13 @@ Validate a complete receipt array before deployment consumes it:
 
 ```sh
 python3 tools/mindora/verify-image-contract.py \
-  docs/mindora/image-contract.json receipts.json
+  docs/mindora/image-contract.json receipts.json "$EXPECTED_PATCH_SHA"
 ```
 
-The verifier rejects missing or duplicate enabled roles, mutable tags, source
-or patch SHA errors, and Dockerfile, target, or migration drift. It does not
+`EXPECTED_PATCH_SHA` is the reviewed 40-character commit that publication built.
+The verifier requires every receipt to match it and rejects unknown, missing, or
+duplicate roles, mutable tags, source or patch SHA errors, and Dockerfile,
+target, or migration drift. It does not
 publish, inspect a registry, or prove that an entry point can connect to its
 dependencies.
 

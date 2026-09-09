@@ -33,8 +33,12 @@ def _enabled_roles(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def validate(manifest: Any, receipts: Any) -> list[str]:
+def validate(manifest: Any, receipts: Any, expected_patch_sha: str) -> list[str]:
     errors: list[str] = []
+    if not isinstance(expected_patch_sha, str) or not SHA_PATTERN.fullmatch(
+        expected_patch_sha
+    ):
+        errors.append("expected patch SHA must be a lowercase 40-character Git SHA")
     if not isinstance(manifest, dict):
         return ["manifest must be a JSON object"]
     source_sha = manifest.get("dust_sha")
@@ -72,6 +76,8 @@ def validate(manifest: Any, receipts: Any) -> list[str]:
         patch_sha = receipt.get("patch_sha")
         if not isinstance(patch_sha, str) or not SHA_PATTERN.fullmatch(patch_sha):
             errors.append(f"role {role} patch_sha must be a lowercase 40-character Git SHA")
+        elif patch_sha != expected_patch_sha:
+            errors.append(f"role {role} patch_sha does not match expected patch SHA")
         digest = receipt.get("digest")
         if not isinstance(digest, str) or not DIGEST_PATTERN.fullmatch(digest):
             errors.append(f"role {role} digest must be an immutable sha256 digest")
@@ -89,6 +95,8 @@ def validate(manifest: Any, receipts: Any) -> list[str]:
             errors.append(f"role {role} migration_command does not match manifest")
 
     for role, matching in receipts_by_role.items():
+        if role not in roles:
+            errors.append(f"receipt role {role} is not an enabled manifest role")
         if len(matching) > 1:
             errors.append(f"role {role} has duplicate receipts")
 
@@ -104,8 +112,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=pathlib.Path)
     parser.add_argument("receipts", type=pathlib.Path)
+    parser.add_argument("expected_patch_sha")
     args = parser.parse_args()
-    errors = validate(_read_json(args.manifest), _read_json(args.receipts))
+    errors = validate(
+        _read_json(args.manifest), _read_json(args.receipts), args.expected_patch_sha
+    )
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

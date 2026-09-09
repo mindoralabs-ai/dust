@@ -1,5 +1,5 @@
 @cc [owner:jchen0824,label:security;testing] immutable-image-receipts
-The image verifier must reject missing or duplicate enabled roles, source SHA mismatches, mutable image references, and receipts whose Dockerfile or target differs from the manifest.
+The image verifier must require an explicit expected patch commit and reject receipts with a different patch SHA, unknown, missing, or duplicate enabled roles, source SHA mismatches, mutable image references, and receipts whose Dockerfile, target, or migration command differs from the manifest.
 
 @cc [owner:jchen0824,label:security] local-validation-only
 Mindora build tooling must not authenticate to a registry or publish an image until an approved immutable registry target is recorded outside this source tree.

@@ -41,7 +41,8 @@ jobs:
         run: |
           ! python3 tools/mindora/verify-image-contract.py \
             tools/mindora/tests/fixtures/manifest.json \
-            tools/mindora/tests/fixtures/invalid-receipts.json
+            tools/mindora/tests/fixtures/invalid-receipts.json \
+            1111111111111111111111111111111111111111
 
   inventory:
     runs-on: ubuntu-latest
