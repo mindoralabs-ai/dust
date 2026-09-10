@@ -37,20 +37,23 @@ Core API or SQLite worker:
 
 ```sh
 docker run --rm \
-  -e CORE_DATABASE_URI='postgresql://dust:<password>@<postgres-host>:5432/dust_core' \
+  -e CORE_DATABASE_URI \
   '<core-image>@sha256:<registry-digest>' \
   init_db
 ```
 
-For this POC, do not set `OAUTH_DATABASE_URI`; the OAuth schema is outside the
-selected runtime scope. The command is an operator-controlled bootstrap step.
-The image does not run it automatically at startup, and the normal `core-api`
-entry point remains unchanged.
+Provide `CORE_DATABASE_URI` to the invoking environment through the deployment's
+secret-aware mechanism; do not put database credentials directly on the command
+line. For this POC, do not set `OAUTH_DATABASE_URI`; the OAuth schema is outside
+the selected runtime scope. The command is an operator-controlled bootstrap
+step. The image does not run it automatically at startup, and the normal
+`core-api` entry point remains unchanged.
 
-Files under `core/bin/migrations/` are historic, one-off data or schema deltas.
-They are not an ordered migration chain and must not be replayed as database
-bootstrap. The database-store used by the selected POC remains GCS-backed; it
-does not require a separate PostgreSQL initializer.
+SQL files under `core/src/stores/migrations/` and executables under
+`core/bin/migrations/` are historic, one-off data or schema deltas. They are not
+an ordered migration chain and must not be replayed as database bootstrap. The
+database-store used by the selected POC remains GCS-backed; it does not require
+a separate PostgreSQL initializer.
 
 The front worker deployment must override the image default, which starts
 almost every registered worker, with this bounded command:
