@@ -5,6 +5,7 @@ import {
   ALL_WORKERS_BUT_RELOCATION,
   workerFunctions,
 } from "@app/temporal/worker_registry";
+import { getWorkerRuntimeOptions } from "@app/temporal/worker_runtime_options";
 import { setupGlobalErrorHandler } from "@app/types/shared/utils/global_error_handler";
 import type { Logger, LogLevel } from "@temporalio/common/lib/logger";
 import { Runtime } from "@temporalio/worker/lib/runtime";
@@ -35,15 +36,7 @@ const pinoAdapter: Logger = {
 };
 
 // Install once per process — before creating Worker/Client.
-Runtime.install({
-  logger: pinoAdapter,
-  telemetryOptions: {
-    metrics: {
-      // Datadog Agent OTLP gRPC (4317).
-      otel: { url: "grpc://datadog-agent.default.svc.cluster.local:4317" },
-    },
-  },
-});
+Runtime.install(getWorkerRuntimeOptions(pinoAdapter));
 
 async function runWorkers(workers: WorkerName[]) {
   for (const worker of workers) {
