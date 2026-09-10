@@ -26,6 +26,10 @@ vi.mock("fs-extra", () => ({
   default: { readFile },
 }));
 
+// The global test setup mocks this module for most front tests. This file verifies
+// the module itself, while retaining the Temporal SDK and filesystem mocks above.
+vi.unmock("@app/lib/temporal");
+
 import {
   getConnectionOptions,
   getTemporalClientForNamespace,
