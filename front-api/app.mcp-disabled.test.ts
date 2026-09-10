@@ -31,16 +31,17 @@ describe("external MCP server startup opt-out", () => {
       honoApp.request("/.well-known/oauth-protected-resource"),
       honoApp.request("/.well-known/oauth-authorization-server"),
       honoApp.request("/oauth2/token", { method: "POST" }),
+      honoApp.request("/oauth2/register", { method: "POST" }),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      404, 404, 404, 404, 404,
+      404, 404, 404, 404, 404, 404,
     ]);
     expect(
-      externalMcpConfiguration.getMcpResourceServerUrl,
+      externalMcpConfiguration.getMcpResourceServerUrl
     ).not.toHaveBeenCalled();
     expect(
-      externalMcpConfiguration.getWorkOSAuthKitDomain,
+      externalMcpConfiguration.getWorkOSAuthKitDomain
     ).not.toHaveBeenCalled();
   });
 });
