@@ -22,7 +22,8 @@ function getConfiguredFrameAncestors(value, { allowHttp }) {
         url.origin !== origin ||
         url.username ||
         url.password ||
-        url.hostname.includes("*")
+        url.hostname.includes("*") ||
+        origin.includes(";")
       ) {
         throw new Error(
           `ALLOWED_VISUALIZATION_ORIGIN must contain exact ${

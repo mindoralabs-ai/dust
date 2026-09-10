@@ -62,6 +62,7 @@ for (const invalidOrigin of [
   "https://growth.example.com/path",
   "https://growth.example.com/",
   "https://user@example.com",
+  "https://example.com;script-src",
   "'self'",
 ]) {
   test(`production config rejects ${invalidOrigin}`, async () => {
