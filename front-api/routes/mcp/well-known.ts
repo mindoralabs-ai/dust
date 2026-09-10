@@ -12,28 +12,21 @@ import {
 import { createHono } from "@front-api/lib/hono";
 import type { Context } from "hono";
 
-const WORKOS_AUTHKIT_DOMAIN = getWorkOSAuthKitDomain();
-const DUST_MCP_SERVER_URL = getMcpResourceServerUrl();
-const protectedResourcePath = getMcpProtectedResourcePath(DUST_MCP_SERVER_URL);
-const authorizationServerMetadataUrl = new URL(
-  "/.well-known/oauth-authorization-server",
-  WORKOS_AUTHKIT_DOMAIN
-);
-
-function getProtectedResourceMetadata() {
+function getProtectedResourceMetadata(dustMcpServerUrl: string) {
   return {
-    resource: DUST_MCP_SERVER_URL,
+    resource: dustMcpServerUrl,
     authorization_servers: getMcpAuthorizationServers(),
     bearer_methods_supported: ["header"],
   } as const;
 }
 
-export const mcpWellKnownApp = createHono();
-
-function serveProtectedResourceMetadata(c: {
-  json: (body: unknown) => Response;
-}) {
-  return c.json(getProtectedResourceMetadata());
+function serveProtectedResourceMetadata(
+  c: {
+    json: (body: unknown) => Response;
+  },
+  dustMcpServerUrl: string,
+) {
+  return c.json(getProtectedResourceMetadata(dustMcpServerUrl));
 }
 
 type OAuthAuthorizationServerMetadata = {
@@ -43,7 +36,7 @@ type OAuthAuthorizationServerMetadata = {
 };
 
 function rewriteAuthorizationServerMetadataForBrowserClients(
-  metadata: OAuthAuthorizationServerMetadata
+  metadata: OAuthAuthorizationServerMetadata,
 ): OAuthAuthorizationServerMetadata {
   const mcpAuthorizationServerUrl = getMcpAuthorizationServerUrl();
   return {
@@ -57,9 +50,10 @@ function rewriteAuthorizationServerMetadataForBrowserClients(
   };
 }
 
-async function serveAuthorizationServerMetadata(c: {
-  json: (body: unknown, status?: number) => Response;
-}) {
+async function serveAuthorizationServerMetadata(
+  c: { json: (body: unknown, status?: number) => Response },
+  authorizationServerMetadataUrl: URL,
+) {
   const response = await fetch(authorizationServerMetadataUrl);
   const metadata = (await response.json()) as OAuthAuthorizationServerMetadata;
 
@@ -76,7 +70,7 @@ async function serveAuthorizationServerMetadata(c: {
 
 async function proxyOAuthPostRequest(
   c: Context,
-  upstreamUrl: string
+  upstreamUrl: string,
 ): Promise<Response> {
   const headers = new Headers();
   const contentType = c.req.header("content-type");
@@ -109,30 +103,44 @@ async function proxyOAuthPostRequest(
   });
 }
 
-// Path-aware discovery for → /.well-known/oauth-protected-resource/mcp
-mcpWellKnownApp.get(protectedResourcePath, serveProtectedResourceMetadata);
-
-// RFC 9728 root fallback used by some clients and WorkOS docs examples.
-mcpWellKnownApp.get(
-  "/.well-known/oauth-protected-resource",
-  serveProtectedResourceMetadata
-);
-
-// Compatibility fallback for clients that look for Authorization Server
-// Metadata on the MCP host instead of following the protected resource metadata.
-mcpWellKnownApp.get(
-  "/.well-known/oauth-authorization-server",
-  serveAuthorizationServerMetadata
-);
-
-// Browser MCP clients in local dev exchange authorization codes via fetch;
-// proxy token/registration endpoints so CORS is handled by Dust instead of AuthKit.
-if (shouldUseProxy()) {
-  mcpWellKnownApp.post("/oauth2/token", async (c) =>
-    proxyOAuthPostRequest(c, getWorkOSAuthKitOAuthTokenUrl())
+/** Build external MCP discovery routes only after startup configuration enables them. */
+export function createMcpWellKnownApp() {
+  const app = createHono();
+  const workOSAuthKitDomain = getWorkOSAuthKitDomain();
+  const dustMcpServerUrl = getMcpResourceServerUrl();
+  const protectedResourcePath = getMcpProtectedResourcePath(dustMcpServerUrl);
+  const authorizationServerMetadataUrl = new URL(
+    "/.well-known/oauth-authorization-server",
+    workOSAuthKitDomain,
   );
 
-  mcpWellKnownApp.post("/oauth2/register", async (c) =>
-    proxyOAuthPostRequest(c, getWorkOSAuthKitOAuthRegistrationUrl())
+  // Path-aware discovery for → /.well-known/oauth-protected-resource/mcp
+  app.get(protectedResourcePath, (c) =>
+    serveProtectedResourceMetadata(c, dustMcpServerUrl),
   );
+
+  // RFC 9728 root fallback used by some clients and WorkOS docs examples.
+  app.get("/.well-known/oauth-protected-resource", (c) =>
+    serveProtectedResourceMetadata(c, dustMcpServerUrl),
+  );
+
+  // Compatibility fallback for clients that look for Authorization Server
+  // Metadata on the MCP host instead of following the protected resource metadata.
+  app.get("/.well-known/oauth-authorization-server", (c) =>
+    serveAuthorizationServerMetadata(c, authorizationServerMetadataUrl),
+  );
+
+  // Browser MCP clients in local dev exchange authorization codes via fetch;
+  // proxy token/registration endpoints so CORS is handled by Dust instead of AuthKit.
+  if (shouldUseProxy()) {
+    app.post("/oauth2/token", async (c) =>
+      proxyOAuthPostRequest(c, getWorkOSAuthKitOAuthTokenUrl()),
+    );
+
+    app.post("/oauth2/register", async (c) =>
+      proxyOAuthPostRequest(c, getWorkOSAuthKitOAuthRegistrationUrl()),
+    );
+  }
+
+  return app;
 }

@@ -24,14 +24,26 @@ type McpServerAuthVariables = {
   mcpAuth: WorkOSWorkspaceAuthenticator;
 };
 
-const WORKOS_AUTHKIT_DOMAIN = getWorkOSAuthKitDomain();
-const DUST_MCP_SERVER_URL = getMcpResourceServerUrl();
-const resourceMetadataUrl = getMcpResourceMetadataUrl(DUST_MCP_SERVER_URL);
+let mcpAuthConfiguration:
+  ReturnType<typeof createMcpAuthConfiguration> | undefined;
 
-// WorkOS Connect MCP access tokens — see https://workos.com/docs/authkit/mcp
-const JWKS = createRemoteJWKSet(
-  new URL(`${WORKOS_AUTHKIT_DOMAIN}/oauth2/jwks`)
-);
+function createMcpAuthConfiguration() {
+  const workOSAuthKitDomain = getWorkOSAuthKitDomain();
+  const dustMcpServerUrl = getMcpResourceServerUrl();
+
+  return {
+    workOSAuthKitDomain,
+    dustMcpServerUrl,
+    resourceMetadataUrl: getMcpResourceMetadataUrl(dustMcpServerUrl),
+    // WorkOS Connect MCP access tokens — see https://workos.com/docs/authkit/mcp
+    jwks: createRemoteJWKSet(new URL(`${workOSAuthKitDomain}/oauth2/jwks`)),
+  };
+}
+
+function getMcpAuthConfiguration() {
+  mcpAuthConfiguration ??= createMcpAuthConfiguration();
+  return mcpAuthConfiguration;
+}
 
 function extractBearerToken(authHeader: string | undefined): string | null {
   const match = authHeader?.match(/^Bearer\s+(.+)$/i);
@@ -45,12 +57,12 @@ function isJwtFormat(token: string): boolean {
 
 function tokenAudienceMatchesResource(
   aud: JWTPayload["aud"],
-  expectedResource: string
+  expectedResource: string,
 ): boolean {
   const audiences =
     aud === undefined ? [] : Array.isArray(aud) ? aud : [String(aud)];
   return audiences.some(
-    (value) => normalizeOAuthUrl(String(value)) === expectedResource
+    (value) => normalizeOAuthUrl(String(value)) === expectedResource,
   );
 }
 
@@ -59,7 +71,7 @@ function forbiddenResponse(
   {
     error = "forbidden",
     description = "Access denied",
-  }: { error?: string; description?: string } = {}
+  }: { error?: string; description?: string } = {},
 ) {
   return c.json({ error, error_description: description }, 403);
 }
@@ -67,10 +79,11 @@ function forbiddenResponse(
 /** RFC 9728 challenge — must be present on every 401 so MCP clients start OAuth. */
 function unauthorizedResponse(
   c: Context,
+  resourceMetadataUrl: URL,
   {
     error = "unauthorized",
     description = "Authorization needed",
-  }: { error?: string; description?: string } = {}
+  }: { error?: string; description?: string } = {},
 ) {
   return c.json({ error }, 401, {
     "WWW-Authenticate": [
@@ -84,10 +97,12 @@ function unauthorizedResponse(
 export const mcpServerAuthMiddleware = createMiddleware<{
   Variables: McpServerAuthVariables;
 }>(async (c, next) => {
+  const { workOSAuthKitDomain, dustMcpServerUrl, resourceMetadataUrl, jwks } =
+    getMcpAuthConfiguration();
   const token = extractBearerToken(c.req.header("Authorization"));
 
   if (!token) {
-    return unauthorizedResponse(c);
+    return unauthorizedResponse(c, resourceMetadataUrl);
   }
 
   if (!isJwtFormat(token)) {
@@ -96,20 +111,20 @@ export const mcpServerAuthMiddleware = createMiddleware<{
         tokenLength: token.length,
         looksLikeInspectorProxyToken: /^[0-9a-f]{64}$/i.test(token),
       },
-      "[dust-mcp-server] Bearer token is not a JWT — returning 401 challenge so the client can start OAuth. If using MCP Inspector: disable any custom Authorization header in the sidebar and clear stored OAuth tokens for this server URL."
+      "[dust-mcp-server] Bearer token is not a JWT — returning 401 challenge so the client can start OAuth. If using MCP Inspector: disable any custom Authorization header in the sidebar and clear stored OAuth tokens for this server URL.",
     );
-    return unauthorizedResponse(c, {
+    return unauthorizedResponse(c, resourceMetadataUrl, {
       error: "invalid_token",
       description: "Access token is not a valid WorkOS JWT",
     });
   }
 
   try {
-    const { payload } = await jwtVerify(token, JWKS, {
+    const { payload } = await jwtVerify(token, jwks, {
       clockTolerance: 30,
     });
 
-    if (normalizeOAuthUrl(String(payload.iss)) !== WORKOS_AUTHKIT_DOMAIN) {
+    if (normalizeOAuthUrl(String(payload.iss)) !== workOSAuthKitDomain) {
       throw new Error("Token issuer does not match WorkOS AuthKit domain");
     }
 
@@ -117,25 +132,25 @@ export const mcpServerAuthMiddleware = createMiddleware<{
       throw new Error("Token missing sub claim");
     }
 
-    if (!tokenAudienceMatchesResource(payload.aud, DUST_MCP_SERVER_URL)) {
+    if (!tokenAudienceMatchesResource(payload.aud, dustMcpServerUrl)) {
       logger.info(
         { aud: payload.aud },
-        "Token audience does not match MCP resource URL, falling back to application:client_id claim"
+        "Token audience does not match MCP resource URL, falling back to application:client_id claim",
       );
 
       const clientId = payload["application:client_id"];
       if (typeof clientId !== "string" || !clientId.trim()) {
         throw new Error(
-          "Access token with mismatched audience: missing application:client_id claim"
+          "Access token with mismatched audience: missing application:client_id claim",
         );
       }
 
       const applicationResult = await getWorkOSConnectApplication(
-        clientId.trim()
+        clientId.trim(),
       );
       if (applicationResult.isErr()) {
         throw new Error(
-          "Access token with mismatched audience: failed to fetch WorkOS Connect application"
+          "Access token with mismatched audience: failed to fetch WorkOS Connect application",
         );
       }
 
@@ -153,7 +168,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
         application.client_id === config.getWorkOSClientId()
       ) {
         throw new Error(
-          "Access token with mismatched audience: invalid application"
+          "Access token with mismatched audience: invalid application",
         );
       }
     }
@@ -178,7 +193,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
             org_id: payload.org_id,
           },
         },
-        "[dust-mcp-server] Failed to build workspace-scoped authenticator"
+        "[dust-mcp-server] Failed to build workspace-scoped authenticator",
       );
 
       return unauthorizedResponse(c, {
@@ -194,7 +209,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
     if (!isDustMcpServerEnabled(workspaceMetadata)) {
       logger.warn(
         { workspaceId: workspace.sId },
-        "[dust-mcp-server] MCP server is disabled for workspace"
+        "[dust-mcp-server] MCP server is disabled for workspace",
       );
       return forbiddenResponse(c, {
         description: "MCP server is disabled for this workspace",
@@ -206,7 +221,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
       if (typeof clientId !== "string" || !clientId.trim()) {
         logger.warn(
           { workspaceId: workspace.sId },
-          "[dust-mcp-server] Access token missing application:client_id claim"
+          "[dust-mcp-server] Access token missing application:client_id claim",
         );
         return forbiddenResponse(c, {
           description:
@@ -215,7 +230,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
       }
 
       const applicationResult = await getWorkOSConnectApplication(
-        clientId.trim()
+        clientId.trim(),
       );
       if (applicationResult.isErr()) {
         logger.warn(
@@ -224,7 +239,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
             clientId: clientId.trim(),
             err: applicationResult.error,
           },
-          "[dust-mcp-server] Failed to fetch WorkOS Connect application"
+          "[dust-mcp-server] Failed to fetch WorkOS Connect application",
         );
         return forbiddenResponse(c, {
           description: "Failed to validate Connect application redirect URIs",
@@ -247,7 +262,7 @@ export const mcpServerAuthMiddleware = createMiddleware<{
             redirectUris,
             allowedPatterns,
           },
-          "[dust-mcp-server] Connect application redirect URIs are not allowed"
+          "[dust-mcp-server] Connect application redirect URIs are not allowed",
         );
         return forbiddenResponse(c, {
           description:
@@ -278,14 +293,14 @@ export const mcpServerAuthMiddleware = createMiddleware<{
             }
           : undefined,
         expected: {
-          issuer: WORKOS_AUTHKIT_DOMAIN,
-          audience: DUST_MCP_SERVER_URL,
+          issuer: workOSAuthKitDomain,
+          audience: dustMcpServerUrl,
         },
       },
-      "[dust-mcp-server] Token validation failed"
+      "[dust-mcp-server] Token validation failed",
     );
 
-    return unauthorizedResponse(c, {
+    return unauthorizedResponse(c, resourceMetadataUrl, {
       error: "invalid_token",
       description: "Access token validation failed",
     });

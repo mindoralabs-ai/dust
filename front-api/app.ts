@@ -23,7 +23,7 @@ import privateLoginApp from "./routes/login";
 import lookupApp from "./routes/lookup";
 import marketingApp from "./routes/marketing";
 import { mcpApp } from "./routes/mcp/index";
-import { mcpWellKnownApp } from "./routes/mcp/well-known";
+import { createMcpWellKnownApp } from "./routes/mcp/well-known";
 import metronomeApp from "./routes/metronome";
 import novuApp from "./routes/novu";
 import oauthApp from "./routes/oauth";
@@ -86,6 +86,16 @@ apiApp.route("/v1/w/:wId", publicWorkspaceApp);
 // above.
 apiApp.route("/:preStopSecret", preStopApp);
 
+/**
+ * @cc [owner:jchen0824,label:api;mcp] external-mcp-server-opt-out
+ * `DISABLE_EXTERNAL_MCP_SERVER=true` MUST leave the root `/mcp` and OAuth discovery routes
+ * unmounted and MUST NOT read external MCP or WorkOS AuthKit configuration. Other values preserve
+ * the existing enabled behavior.
+ */
+export function isExternalMcpServerEnabled(): boolean {
+  return process.env.DISABLE_EXTERNAL_MCP_SERVER !== "true";
+}
+
 configureHonoRequestStorage();
 export const honoApp = createHono();
 honoApp.use(contextStorage());
@@ -93,10 +103,12 @@ honoApp.use("*", requestInstrumentation);
 honoApp.use("*", cors);
 honoApp.use("*", spaRedirect);
 
-// Dust as MCP Server — inbound from remote clients (Inspector, Cursor, etc.).
-// Mounted at root level so /.well-known/* and /mcp are not under /api/.
-honoApp.route("/mcp", mcpApp);
-honoApp.route("/", mcpWellKnownApp);
+if (isExternalMcpServerEnabled()) {
+  // Dust as MCP Server — inbound from remote clients (Inspector, Cursor, etc.).
+  // Mounted at root level so /.well-known/* and /mcp are not under /api/.
+  honoApp.route("/mcp", mcpApp);
+  honoApp.route("/", createMcpWellKnownApp());
+}
 honoApp.route("/api", apiApp);
 // PostHog reverse proxy lives at the domain root (not under /api), matching
 // the `/subtle1` rewrites in front/next.config.js.
