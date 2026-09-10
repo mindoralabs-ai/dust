@@ -5,7 +5,7 @@
       "enabled": true,
       "dockerfile": "dockerfiles/front.Dockerfile",
       "target": "front-api",
-      "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute && node ../scripts/db/run-migrate.cjs --command post-deploy --execute"
+      "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute"
     },
     "front_spa": {
       "enabled": true,

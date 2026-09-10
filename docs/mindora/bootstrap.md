@@ -15,7 +15,7 @@ It enables these roles:
 
 | Role | Dockerfile target | Runtime command | Migration command |
 |---|---|---|---|
-| `front_api` | `dockerfiles/front.Dockerfile` / `front-api` | `node --enable-source-maps --require dd-trace/init dist/server.js` | front pre-deploy, then front post-deploy |
+| `front_api` | `dockerfiles/front.Dockerfile` / `front-api` | `node --enable-source-maps --require dd-trace/init dist/server.js` | front pre-deploy before rollout; run post-deploy separately as described below |
 | `front_spa` | `dockerfiles/front-spa.Dockerfile` / `front-spa` | nginx on port 8080 | none |
 | `front_workers` | `dockerfiles/front.Dockerfile` / `workers` | command below | none |
 | `core_api` | `dockerfiles/core.Dockerfile` / `core` | `core-api` | none recorded |
@@ -39,7 +39,7 @@ Core API or SQLite worker:
 docker run --rm \
   -e CORE_DATABASE_URI \
   '<core-image>@sha256:<registry-digest>' \
-  init_db
+  sh -ec ': "${CORE_DATABASE_URI:?CORE_DATABASE_URI is required}"; exec init_db'
 ```
 
 Provide `CORE_DATABASE_URI` to the invoking environment through the deployment's
@@ -54,6 +54,27 @@ SQL files under `core/src/stores/migrations/` and executables under
 an ordered migration chain and must not be replayed as database bootstrap. The
 database-store used by the selected POC remains GCS-backed; it does not require
 a separate PostgreSQL initializer.
+
+### Run Front migrations around the rollout
+
+Run the Front migration phases as separate lifecycle steps. Before deploying a
+new Front release, run:
+
+```sh
+node ../scripts/db/run-migrate.cjs --command pre-deploy --execute
+```
+
+Deploy the new Front API and worker images, wait until every old API and worker
+pod has been replaced, and only then run:
+
+```sh
+node ../scripts/db/run-migrate.cjs --command post-deploy --execute
+```
+
+Use the same order for a fresh installation: pre-deploy migrations, the complete
+Front API and worker rollout, then post-deploy migrations. Never combine the two
+migration commands into one bootstrap job because post-deploy migrations may
+remove schema that old pods still require.
 
 The front worker deployment must override the image default, which starts
 almost every registered worker, with this bounded command:
@@ -112,7 +133,7 @@ one JSON receipt with these fields:
   "dockerfile": "dockerfiles/front.Dockerfile",
   "target": "front-api",
   "digest": "sha256:<64 lowercase hex characters>",
-  "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute && node ../scripts/db/run-migrate.cjs --command post-deploy --execute"
+  "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute"
 }
 ```
 
