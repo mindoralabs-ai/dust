@@ -602,6 +602,18 @@ const config = {
   getLangfuseUiBaseUrl: () => {
     return EnvironmentConfig.getOptionalEnvVariable("LANGFUSE_UI_BASE_URL");
   },
+  /**
+   * @cc [owner:jchen0824,label:logging] temporal-metrics-configuration
+   * Only the exact value `false` MUST disable worker metrics; missing or other values MUST keep
+   * the upstream exporter enabled.
+   */
+  getTemporalDatadogMetricsEnabled: (): boolean => {
+    return (
+      EnvironmentConfig.getOptionalEnvVariable(
+        "TEMPORAL_DATADOG_METRICS_ENABLED"
+      ) !== "false"
+    );
+  },
   getTemporalConnectorsNamespace: () => {
     return EnvironmentConfig.getOptionalEnvVariable(
       "TEMPORAL_CONNECTORS_NAMESPACE"

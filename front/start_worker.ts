@@ -1,3 +1,4 @@
+import config from "@app/lib/api/config";
 import logger from "@app/logger/logger";
 import type { WorkerName } from "@app/temporal/worker_registry";
 import {
@@ -36,7 +37,12 @@ const pinoAdapter: Logger = {
 };
 
 // Install once per process — before creating Worker/Client.
-Runtime.install(getWorkerRuntimeOptions(pinoAdapter));
+Runtime.install(
+  getWorkerRuntimeOptions(
+    pinoAdapter,
+    config.getTemporalDatadogMetricsEnabled()
+  )
+);
 
 async function runWorkers(workers: WorkerName[]) {
   for (const worker of workers) {

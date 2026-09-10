@@ -3,13 +3,16 @@ import type { RuntimeOptions } from "@temporalio/worker";
 
 const DATADOG_OTLP_URL = "grpc://datadog-agent.default.svc.cluster.local:4317";
 
-type WorkerRuntimeEnvironment = Readonly<Record<string, string | undefined>>;
-
+/**
+ * @cc [owner:jchen0824,label:logging] worker-metrics-opt-out
+ * Metrics MUST retain the upstream exporter unless explicitly disabled. The logger MUST always
+ * be retained, including when the metrics exporter is omitted.
+ */
 export function getWorkerRuntimeOptions(
   logger: Logger,
-  environment: WorkerRuntimeEnvironment = process.env
+  metricsEnabled = true
 ): RuntimeOptions {
-  if (environment.TEMPORAL_DATADOG_METRICS_ENABLED === "false") {
+  if (!metricsEnabled) {
     return { logger };
   }
 
