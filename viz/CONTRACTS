@@ -1,5 +1,7 @@
 @cc [label:security] allowed-visualization-origins
 `ALLOWED_VISUALIZATION_ORIGIN` is the comma-separated list of front origins allowed to embed viz.
-The content page must reject `postMessage` events from any other origin, and in development the
-`frame-ancestors` CSP directive must include these origins. The production `frame-ancestors` list
-is fixed in `next.config.mjs` and must not depend on the variable.
+The content page must reject `postMessage` events from any other origin, and the `frame-ancestors`
+CSP directive must include the configured exact origins in development and production. Production
+configuration must accept only HTTPS origins; development may also accept HTTP origins. Invalid,
+non-origin, credential-bearing, or wildcard values must fail config evaluation. Existing Dust and
+browser-extension ancestors remain allowed independently of this variable.
