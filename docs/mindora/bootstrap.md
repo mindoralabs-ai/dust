@@ -29,6 +29,29 @@ sandbox, not another Dust-built service image. E2B and the Temporal, Redis,
 Qdrant, and Elasticsearch images are separate qualification inputs and are not
 silently substituted by this build.
 
+### Initialize a fresh Core database
+
+The shared Core image includes Dust's existing `init_db` binary. Run it once,
+explicitly, against a fresh, dedicated PostgreSQL database before starting the
+Core API or SQLite worker:
+
+```sh
+docker run --rm \
+  -e CORE_DATABASE_URI='postgresql://dust:<password>@<postgres-host>:5432/dust_core' \
+  '<core-image>@sha256:<registry-digest>' \
+  init_db
+```
+
+For this POC, do not set `OAUTH_DATABASE_URI`; the OAuth schema is outside the
+selected runtime scope. The command is an operator-controlled bootstrap step.
+The image does not run it automatically at startup, and the normal `core-api`
+entry point remains unchanged.
+
+Files under `core/bin/migrations/` are historic, one-off data or schema deltas.
+They are not an ordered migration chain and must not be replayed as database
+bootstrap. The database-store used by the selected POC remains GCS-backed; it
+does not require a separate PostgreSQL initializer.
+
 The front worker deployment must override the image default, which starts
 almost every registered worker, with this bounded command:
 

@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/mindora-build.yml"
 SPA_DOCKERFILE = ROOT / "dockerfiles/front-spa.Dockerfile"
+CORE_DOCKERFILE = ROOT / "dockerfiles/core.Dockerfile"
 
 
 def pull_request_paths(workflow: str) -> list[str]:
@@ -61,6 +62,22 @@ class SourceBuildContractTest(unittest.TestCase):
         self.assertIn("ARG COMMIT_HASH_LONG\n", runtime_stage)
         self.assertIn("ENV NEXT_PUBLIC_COMMIT_HASH=${COMMIT_HASH}\n", runtime_stage)
         self.assertIn("ENV DD_GIT_COMMIT_SHA=${DD_GIT_COMMIT_SHA}\n", runtime_stage)
+
+    def test_core_image_builds_and_packages_database_initializer(self) -> None:
+        dockerfile = CORE_DOCKERFILE.read_text(encoding="utf-8")
+        build_stage, runtime_stage = dockerfile.split(
+            "\nFROM debian:bookworm-slim", maxsplit=1
+        )
+
+        self.assertRegex(
+            build_stage,
+            r"(?s)cargo build .*--release .*--bin init_db",
+        )
+        self.assertIn(
+            "COPY --from=builder /app/target/release/init_db /usr/local/bin/init_db",
+            runtime_stage,
+        )
+        self.assertIn('CMD ["core-api"]', runtime_stage)
 
 
 if __name__ == "__main__":

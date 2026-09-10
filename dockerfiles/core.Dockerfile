@@ -12,7 +12,7 @@ COPY /core/ .
 ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,id=core-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=core-cargo-git,target=/usr/local/cargo/git \
-    cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin core-api --bin sqlite-worker --bin check_table
+    cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin core-api --bin sqlite-worker --bin check_table --bin init_db
 
 # Runtime stage — only the compiled binaries + minimal system libs
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS core
@@ -26,6 +26,7 @@ RUN apt-get update && \
 COPY --from=builder /app/target/release/core-api /usr/local/bin/core-api
 COPY --from=builder /app/target/release/sqlite-worker /usr/local/bin/sqlite-worker
 COPY --from=builder /app/target/release/check_table /usr/local/bin/check_table
+COPY --from=builder /app/target/release/init_db /usr/local/bin/init_db
 
 ARG COMMIT_HASH
 ARG COMMIT_HASH_LONG
