@@ -77,16 +77,29 @@ migration commands into one bootstrap job because post-deploy migrations may
 remove schema that old pods still require.
 
 The front worker deployment must override the image default, which starts
-almost every registered worker, with this bounded command:
+almost every registered worker. The following is the earlier application-flow candidate:
 
 ```text
 node --enable-source-maps --require dd-trace/init dist/start_worker.js --workers agent_loop_interactive agent_loop_programmatic agent_loop_schedules agent_schedule sandbox_reaper remote_tools_sync upsert_queue upsert_table_queue
 ```
 
-This excludes billing/credit alerts, WorkOS events, email/notification and
-invitation paths, retention, labs, poke, and other maintenance groups. The list
-is an explicit POC scope, not proof that the minimum queue set has passed live
-runtime acceptance.
+This candidate excludes billing/credit alerts, WorkOS events, email/notification and
+invitation paths, retention, labs, poke, and other maintenance groups. Under the
+2026-09-12 WorkOS-first decision, it is **not a qualified complete worker list**.
+Audit native WorkOS login, provisioning, organization membership and revocation
+paths and include any required event queues before deployment. Qualify the
+invitation/authentication email paths actually used; disabling all auth-related
+workers or notifications is no longer an accepted blanket POC assumption.
+
+The capability POC retains hosted WorkOS authentication and native Dust permissions.
+Configure its callbacks, secrets and controlled tester memberships; record stable
+Mindora employee/Dust user/WorkOS user and tenant/workspace/organization mappings.
+Custom Mindora login and automatic Mindora-to-Dust revocation move to the later
+identity migration. Operators manage POC Dust access separately. The external
+MCP opt-out in the runtime PR does not disable employee login.
+
+This packaging PR creates images; it does not prove the selected WorkOS environment,
+worker queues, session revocation or full runtime have been configured or tested.
 
 ## Deterministic inputs and local builds
 
