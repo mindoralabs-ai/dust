@@ -1,4 +1,4 @@
-FROM rust:1.85.0 AS egress-proxy
+FROM rust:1.85.0@sha256:0ff31c9ffa641a62e48d543fb00b4960955ea375f40776f40f585b89e654cc5e AS egress-proxy
 
 RUN apt-get update && apt-get install -y cmake
 
@@ -8,7 +8,8 @@ COPY /egress-proxy/ .
 
 # TODO(sandbox-egress): Switch to a smaller runtime image once the service deployment path
 # is stable. Existing Rust service Dockerfiles currently run from the Rust image.
-RUN cargo build --release --bin egress-proxy
+ARG CARGO_BUILD_JOBS=2
+RUN cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin egress-proxy
 
 ARG COMMIT_HASH
 ARG COMMIT_HASH_LONG

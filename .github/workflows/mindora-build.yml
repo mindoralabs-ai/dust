@@ -1,0 +1,159 @@
+name: Mindora image contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/mindora-build.yml"
+      - ".dockerignore"
+      - "LICENSE"
+      - "package.json"
+      - "package-lock.json"
+      - "dockerfiles/**"
+      - "docs/mindora/image-contract.json"
+      - "sdks/js/**"
+      - "sparkle/**"
+      - "scripts/db/**"
+      - "front/**"
+      - "front-api/**"
+      - "front-spa/**"
+      - "core/**"
+      - "viz/**"
+      - "egress-proxy/**"
+      - "tools/mindora/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DUST_SOURCE_SHA: 2036fc2ff982bf1385e252e9fa3d430d9c05379e
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Verify exact checkout and source ancestry
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git cat-file -e "${DUST_SOURCE_SHA}^{commit}"
+          git merge-base --is-ancestor "$DUST_SOURCE_SHA" "$GITHUB_SHA"
+      - name: Test receipt verifier
+        run: >-
+          python3 -m unittest
+          tools/mindora/tests/test_verify_image_contract.py
+          tools/mindora/tests/test_source_build_contract.py
+      - name: Test SPA shell routing in nginx
+        run: bash tools/mindora/tests/test_front_spa_nginx_routing.sh
+      - name: Prove invalid fixture is rejected
+        run: |
+          ! python3 tools/mindora/verify-image-contract.py \
+            tools/mindora/tests/fixtures/manifest.json \
+            tools/mindora/tests/fixtures/invalid-receipts.json \
+            1111111111111111111111111111111111111111
+
+  inventory:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.inventory.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: inventory
+        name: Generate build matrix from the image contract
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          manifest = json.load(open("docs/mindora/image-contract.json", encoding="utf-8"))
+          builds = {}
+          for role, component in manifest["components"].items():
+              if component.get("enabled") is not True:
+                  continue
+              key = (component["dockerfile"], component["target"])
+              build = builds.setdefault(
+                  key,
+                  {
+                      "build_key": role,
+                      "dockerfile": component["dockerfile"],
+                      "target": component["target"],
+                      "roles": [],
+                  },
+              )
+              build["roles"].append(
+                  {"role": role, "migration_command": component["migration_command"]}
+              )
+          include = list(builds.values())
+          print("matrix=" + json.dumps({"include": include}, separators=(",", ":")))
+          PY
+
+  build:
+    needs: [contract, inventory]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Build Linux amd64 image without publishing
+        env:
+          BUILD_KEY: ${{ matrix.build_key }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          printf '%s\n' '{"models":[]}' > front/custom-models.json
+          docker build --platform linux/amd64 \
+            --file "$DOCKERFILE" \
+            --target "$TARGET" \
+            --build-arg "COMMIT_HASH=${GITHUB_SHA:0:8}" \
+            --build-arg "COMMIT_HASH_LONG=$GITHUB_SHA" \
+            --build-arg NEXT_PUBLIC_DUST_API_URL=http://localhost:3000 \
+            --build-arg NEXT_PUBLIC_DUST_APP_URL=http://localhost:8080 \
+            --tag "mindora-dust-${BUILD_KEY}:${GITHUB_SHA}" .
+      - name: Record local build evidence
+        env:
+          BUILD_KEY: ${{ matrix.build_key }}
+          ROLES_JSON: ${{ toJSON(matrix.roles) }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import hashlib
+          import os
+          import subprocess
+          local_image_id = subprocess.check_output(
+              ["docker", "image", "inspect", "--format", "{{.Id}}", f"mindora-dust-{os.environ['BUILD_KEY']}:{os.environ['GITHUB_SHA']}"],
+              text=True,
+          ).strip()
+          for component in json.loads(os.environ["ROLES_JSON"]):
+              role = component["role"]
+              evidence = {
+                  "source_sha": os.environ["DUST_SOURCE_SHA"],
+                  "patch_sha": os.environ["GITHUB_SHA"],
+                  "role": role,
+                  "dockerfile": os.environ["DOCKERFILE"],
+                  "target": os.environ["TARGET"],
+                  "local_image_id": local_image_id,
+                  "dockerfile_sha256": hashlib.sha256(
+                      open(os.environ["DOCKERFILE"], "rb").read()
+                  ).hexdigest(),
+                  "custom_models_sha256": hashlib.sha256(
+                      open("front/custom-models.json", "rb").read()
+                  ).hexdigest(),
+                  "migration_command": component["migration_command"],
+                  "published": False,
+              }
+              with open(f"build-evidence-{role}.json", "w", encoding="utf-8") as stream:
+                  json.dump(evidence, stream, indent=2)
+                  stream.write("\n")
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-evidence-${{ matrix.build_key }}
+          path: build-evidence-*.json

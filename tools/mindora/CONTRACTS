@@ -1,0 +1,14 @@
+@cc [owner:jchen0824,label:security;testing] immutable-image-receipts
+The image verifier must require an explicit expected patch commit and reject receipts with a different patch SHA, unknown, missing, or duplicate enabled roles, source SHA mismatches, mutable image references, and receipts whose Dockerfile, target, or migration command differs from the manifest.
+
+@cc [owner:jchen0824,label:security] local-validation-only
+Mindora build tooling must not authenticate to a registry or publish an image until an approved immutable registry target is recorded outside this source tree.
+
+@cc [owner:jchen0824,label:testing] patched-build-metadata
+Every local build must record the exact patched checkout in runtime commit metadata and evidence, and the SPA build must compile that checkout into `VITE_COMMIT_HASH`, while preserving the pinned upstream Dust commit as a separate source field; CI must build each unique Dockerfile/target pair at most once per run.
+
+@cc [owner:jchen0824,label:testing] source-build-trigger-coverage
+The Mindora source-image workflow must run when any file copied by an enabled image build changes.
+
+@cc [owner:jchen0824,label:testing] spa-shell-routing
+The nginx SPA runtime must serve the Share, OAuth, workspace OAuth, and Email entry shells for the same route families as `front-spa/worker/app.ts`, serve the main shell for ordinary app routes, and return 404 for missing assets.

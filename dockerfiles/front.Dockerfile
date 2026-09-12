@@ -1,5 +1,5 @@
 # Base dependencies stage (shared by workers and front-api)
-FROM node:24.16.0-slim AS base-deps
+FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS base-deps
 
 RUN apt-get update && \
   apt-get install -y libjemalloc2 libjemalloc-dev
@@ -87,7 +87,7 @@ RUN if [ -n "$DATADOG_API_KEY" ] && [ -n "$NEXT_PUBLIC_DATADOG_SERVICE" ]; then 
   fi
 
 # Workers image (Full Node.js environment) for front-workers deployment
-FROM node:24.16.0-slim AS workers
+FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS workers
 
 RUN apt-get update && \
   apt-get install -y redis-tools postgresql-client libjemalloc2 curl procps && \
@@ -122,6 +122,8 @@ COPY --from=base-deps /app/sparkle/dist /app/sparkle/dist
 COPY --from=base-deps /app/sparkle/package.json /app/sparkle/package.json
 
 # Re-declare build arg needed at runtime
+ARG COMMIT_HASH
+ARG COMMIT_HASH_LONG
 ARG NEXT_PUBLIC_DUST_APP_URL
 ARG NEXT_PUBLIC_GTM_TRACKING_ID
 ARG NEXT_PUBLIC_DATADOG_CLIENT_TOKEN
@@ -141,8 +143,6 @@ ENV NEXT_PUBLIC_VIRTUOSO_LICENSE_KEY=$NEXT_PUBLIC_VIRTUOSO_LICENSE_KEY
 # Preload jemalloc for all processes:
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
-ARG COMMIT_HASH
-ARG COMMIT_HASH_LONG
 ARG DD_GIT_REPOSITORY_URL=https://github.com/dust-tt/dust
 ARG DD_GIT_COMMIT_SHA=${COMMIT_HASH_LONG}
 ENV DD_VERSION=${COMMIT_HASH}
@@ -202,7 +202,7 @@ RUN npm run build && \
   fi
 
 # Front-api runtime image — Hono server.
-FROM node:24.16.0-slim AS front-api
+FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS front-api
 
 RUN apt-get update && \
   apt-get install -y redis-tools postgresql-client libjemalloc2 curl procps && \

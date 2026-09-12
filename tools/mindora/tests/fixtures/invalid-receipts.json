@@ -1,0 +1,20 @@
+[
+  {
+    "source_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+    "patch_sha": "1111111111111111111111111111111111111111",
+    "role": "front_api",
+    "dockerfile": "dockerfiles/front.Dockerfile",
+    "target": "front-api",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute"
+  },
+  {
+    "source_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+    "patch_sha": "1111111111111111111111111111111111111111",
+    "role": "front_workers",
+    "dockerfile": "dockerfiles/front.Dockerfile",
+    "target": "workers",
+    "digest": "mindora/front-workers:latest",
+    "migration_command": null
+  }
+]

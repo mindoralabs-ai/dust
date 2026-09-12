@@ -1,0 +1,8 @@
+{
+  "dust_sha": "2036fc2ff982bf1385e252e9fa3d430d9c05379e",
+  "components": {
+    "front_api": {"enabled": true, "dockerfile": "dockerfiles/front.Dockerfile", "target": "front-api"},
+    "front_workers": {"enabled": true, "dockerfile": "dockerfiles/front.Dockerfile", "target": "workers"},
+    "core_api": {"enabled": true, "dockerfile": "dockerfiles/core.Dockerfile", "target": "core"}
+  }
+}
