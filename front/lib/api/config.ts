@@ -58,6 +58,14 @@ const config = {
     return durationSeconds * 1_000;
   },
 
+  isExternalMcpServerDisabled: (): boolean => {
+    return (
+      EnvironmentConfig.getOptionalEnvVariable(
+        "DISABLE_EXTERNAL_MCP_SERVER"
+      ) === "true"
+    );
+  },
+
   // Dynamic API base URL: uses a custom resolver when set (SPA region switching),
   // otherwise falls back to getClientFacingUrl().
   getApiBaseUrl: (): string => {
@@ -601,6 +609,18 @@ const config = {
   },
   getLangfuseUiBaseUrl: () => {
     return EnvironmentConfig.getOptionalEnvVariable("LANGFUSE_UI_BASE_URL");
+  },
+  /**
+   * @cc [owner:jchen0824,label:logging] temporal-metrics-configuration
+   * Only the exact value `false` MUST disable worker metrics; missing or other values MUST keep
+   * the upstream exporter enabled.
+   */
+  getTemporalDatadogMetricsEnabled: (): boolean => {
+    return (
+      EnvironmentConfig.getOptionalEnvVariable(
+        "TEMPORAL_DATADOG_METRICS_ENABLED"
+      ) !== "false"
+    );
   },
   getTemporalConnectorsNamespace: () => {
     return EnvironmentConfig.getOptionalEnvVariable(
