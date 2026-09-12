@@ -1,3 +1,4 @@
+import config from "@app/lib/api/config";
 import { createHono } from "@front-api/lib/hono";
 import { configureHonoRequestStorage } from "@front-api/lib/request_context";
 import { contextStorage } from "hono/context-storage";
@@ -93,7 +94,7 @@ apiApp.route("/:preStopSecret", preStopApp);
  * the existing enabled behavior.
  */
 export function isExternalMcpServerEnabled(): boolean {
-  return process.env.DISABLE_EXTERNAL_MCP_SERVER !== "true";
+  return !config.isExternalMcpServerDisabled();
 }
 
 configureHonoRequestStorage();

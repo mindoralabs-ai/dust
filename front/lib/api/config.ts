@@ -58,6 +58,14 @@ const config = {
     return durationSeconds * 1_000;
   },
 
+  isExternalMcpServerDisabled: (): boolean => {
+    return (
+      EnvironmentConfig.getOptionalEnvVariable(
+        "DISABLE_EXTERNAL_MCP_SERVER"
+      ) === "true"
+    );
+  },
+
   // Dynamic API base URL: uses a custom resolver when set (SPA region switching),
   // otherwise falls back to getClientFacingUrl().
   getApiBaseUrl: (): string => {
