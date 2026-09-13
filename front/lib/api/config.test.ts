@@ -71,3 +71,25 @@ describe("getOAuthRedirectBaseUrl", () => {
     expect(config.getOAuthRedirectBaseUrl()).toBe("https://oauth.example.com");
   });
 });
+
+describe("getWorkOSApiHostname", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("uses the Dust WorkOS API hostname by default", () => {
+    delete process.env.WORKOS_API_HOSTNAME;
+
+    expect(config.getWorkOSApiHostname()).toBe("auth-api.dust.tt");
+  });
+
+  it("honours a self-hosted WorkOS API hostname", () => {
+    process.env.WORKOS_API_HOSTNAME = "workos-api.internal.example.com";
+
+    expect(config.getWorkOSApiHostname()).toBe(
+      "workos-api.internal.example.com"
+    );
+  });
+});

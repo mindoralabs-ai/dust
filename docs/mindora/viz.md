@@ -12,6 +12,8 @@ wildcard. Invalid values stop Next configuration evaluation. Development also pe
 origins for local frontends.
 
 Next resolves `headers()` while building the visualization app. The variable must therefore be set
-for the visualization image build; changing only the runtime environment of an already-built image
-does not update its Content Security Policy. The embedding page must use the same origins for its
-existing `postMessage` check.
+for the visualization image build, for example with Docker's
+`--build-arg ALLOWED_VISUALIZATION_ORIGIN=https://growth.example.com`; changing only the runtime
+environment of an already-built image does not update its Content Security Policy. When the build
+argument is omitted, the image retains the upstream environment-specific frame-ancestor defaults.
+The embedding page must use the same origins for its existing `postMessage` check.

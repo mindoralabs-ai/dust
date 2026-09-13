@@ -8,6 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/mindora-build.yml"
 SPA_DOCKERFILE = ROOT / "dockerfiles/front-spa.Dockerfile"
 CORE_DOCKERFILE = ROOT / "dockerfiles/core.Dockerfile"
+VIZ_DOCKERFILE = ROOT / "dockerfiles/viz.Dockerfile"
 
 
 def pull_request_paths(workflow: str) -> list[str]:
@@ -78,6 +79,21 @@ class SourceBuildContractTest(unittest.TestCase):
             runtime_stage,
         )
         self.assertIn('CMD ["core-api"]', runtime_stage)
+
+    def test_viz_origin_is_available_during_next_build(self) -> None:
+        dockerfile = VIZ_DOCKERFILE.read_text(encoding="utf-8")
+
+        self.assertIn("ARG ALLOWED_VISUALIZATION_ORIGIN\n", dockerfile)
+        self.assertIn(
+            "ENV ALLOWED_VISUALIZATION_ORIGIN=${ALLOWED_VISUALIZATION_ORIGIN}\n",
+            dockerfile,
+        )
+        self.assertLess(
+            dockerfile.index(
+                "ENV ALLOWED_VISUALIZATION_ORIGIN=${ALLOWED_VISUALIZATION_ORIGIN}"
+            ),
+            dockerfile.index("RUN npm run build"),
+        )
 
 
 if __name__ == "__main__":
