@@ -1,4 +1,5 @@
 import { Authenticator } from "@app/lib/auth";
+import { MembershipResource } from "@app/lib/resources/membership_resource";
 import { ConversationFactory } from "@app/tests/utils/ConversationFactory";
 import { FeatureFlagFactory } from "@app/tests/utils/FeatureFlagFactory";
 import { createPublicApiMockRequest } from "@app/tests/utils/generic_public_api_tests";
@@ -245,6 +246,73 @@ describe("POST /api/v1/w/[wId]/assistant/conversations/[cId]/messages", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.message.user?.sId).toBe(user.sId);
+  });
+
+  it("rejects an unknown x-api-user-email on a system key", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+      systemKey: true,
+    });
+
+    const response = await postMessage(
+      workspace,
+      "conversation_does_not_matter",
+      key,
+      {},
+      { "x-api-user-email": "unknown@example.com" }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "user_not_found",
+        message: "The requested user is not an active workspace member.",
+      },
+    });
+  });
+
+  it("rejects a nonmember x-api-user-email on a system key", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+      systemKey: true,
+    });
+    const nonmember = await UserFactory.basic();
+
+    const response = await postMessage(
+      workspace,
+      "conversation_does_not_matter",
+      key,
+      {},
+      { "x-api-user-email": nonmember.email }
+    );
+
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.type).toBe("user_not_found");
+  });
+
+  it("rejects a revoked member x-api-user-email on a system key", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+      systemKey: true,
+    });
+    const revokedUser = await UserFactory.basic();
+    await MembershipFactory.associate(workspace, revokedUser, { role: "user" });
+    const revokeResult = await MembershipResource.revokeMembership({
+      user: revokedUser,
+      workspace,
+    });
+    expect(revokeResult.isOk()).toBe(true);
+
+    const response = await postMessage(
+      workspace,
+      "conversation_does_not_matter",
+      key,
+      {},
+      { "x-api-user-email": revokedUser.email }
+    );
+
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.type).toBe("user_not_found");
   });
 
   it("leaves the posting user unattributed without x-api-user-email", async () => {

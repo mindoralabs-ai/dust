@@ -2,6 +2,11 @@
 
 The capability POC uses hosted WorkOS for employee login (decision: 2026-09-12). Retain Dust's native session, user, organization and membership paths. Custom Mindora login and synchronized Mindora revocation are deferred until after the POC, before real business-data integration or customer rollout.
 
+`WORKOS_API_HOSTNAME` selects the WorkOS API hostname used by both the general and session-auth
+clients. It defaults to `auth-api.dust.tt`; set the hostname without a URL scheme when a compatible
+self-hosted endpoint is required. This setting is independent from `WORKOS_ISSUER_URL` and does not
+change either client's bounded request timeout.
+
 External MCP access is independent of employee login. When external MCP clients are outside the selected POC scope, set:
 
 ```sh

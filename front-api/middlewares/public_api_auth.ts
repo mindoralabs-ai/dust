@@ -93,6 +93,11 @@ function applyClientIp(auth: Authenticator, headers: HeaderRecord): void {
 }
 
 /**
+ * @cc [owner:jchen0824,label:api;security] explicit-user-impersonation
+ * A system-key request with `x-api-user-email` MUST authenticate as an active member matching that
+ * email or return `user_not_found`; it MUST NOT retain workspace/system authority on lookup failure.
+ */
+/**
  * Authenticates a public-API request (Authorization header required:
  * sandbox token, OAuth bearer, or API key) and stashes the resolved
  * `Authenticator` on the Hono context under `auth`. Mirrors
@@ -201,15 +206,24 @@ export const publicApiAuth = createMiddleware<PublicApiCtx>(
 
     // x-api-user-email: system-key-only impersonation.
     const userEmailFromHeader = getUserEmailFromHeaders(headers);
-    if (userEmailFromHeader) {
-      workspaceAuth =
-        (await workspaceAuth.exchangeSystemKeyForUserAuthByEmail(
-          workspaceAuth,
-          {
-            userEmail: userEmailFromHeader,
-            requestedRole,
-          }
-        )) ?? workspaceAuth;
+    if (userEmailFromHeader && workspaceAuth.isSystemKey()) {
+      const userAuth = await workspaceAuth.exchangeSystemKeyForUserAuthByEmail(
+        workspaceAuth,
+        {
+          userEmail: userEmailFromHeader,
+          requestedRole,
+        }
+      );
+      if (!userAuth) {
+        return apiError(ctx, {
+          status_code: 401,
+          api_error: {
+            type: "user_not_found",
+            message: "The requested user is not an active workspace member.",
+          },
+        });
+      }
+      workspaceAuth = userAuth;
     }
 
     // x-api-key-name: system-key-only key name override (for analytics).

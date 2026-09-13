@@ -493,6 +493,12 @@ const config = {
   getWorkOSClientId: (): string => {
     return EnvironmentConfig.getEnvVariable("WORKOS_CLIENT_ID");
   },
+  getWorkOSApiHostname: (): string => {
+    return (
+      EnvironmentConfig.getOptionalEnvVariable("WORKOS_API_HOSTNAME") ??
+      "auth-api.dust.tt"
+    );
+  },
   getWorkOSCookiePassword: (): string => {
     return EnvironmentConfig.getEnvVariable("WORKOS_COOKIE_PASSWORD");
   },
