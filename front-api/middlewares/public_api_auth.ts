@@ -206,7 +206,7 @@ export const publicApiAuth = createMiddleware<PublicApiCtx>(
 
     // x-api-user-email: system-key-only impersonation.
     const userEmailFromHeader = getUserEmailFromHeaders(headers);
-    if (userEmailFromHeader && workspaceAuth.isSystemKey()) {
+    if (workspaceAuth.isSystemKey() && userEmailFromHeader !== undefined) {
       const userAuth = await workspaceAuth.exchangeSystemKeyForUserAuthByEmail(
         workspaceAuth,
         {

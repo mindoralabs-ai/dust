@@ -271,6 +271,24 @@ describe("POST /api/v1/w/[wId]/assistant/conversations/[cId]/messages", () => {
     });
   });
 
+  it("rejects an empty x-api-user-email on a system key", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+      systemKey: true,
+    });
+
+    const response = await postMessage(
+      workspace,
+      "conversation_does_not_matter",
+      key,
+      {},
+      { "x-api-user-email": "" }
+    );
+
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.type).toBe("user_not_found");
+  });
+
   it("rejects a nonmember x-api-user-email on a system key", async () => {
     const { workspace, key } = await createPublicApiMockRequest({
       method: "POST",
