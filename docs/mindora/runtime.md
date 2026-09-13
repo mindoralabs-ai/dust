@@ -7,6 +7,10 @@ clients. It defaults to `auth-api.dust.tt`; set the hostname without a URL schem
 self-hosted endpoint is required. This setting is independent from `WORKOS_ISSUER_URL` and does not
 change either client's bounded request timeout.
 
+The internal `x-api-user-email` impersonation header is accepted only with a system API key and an
+active member email. Requests that supply it with an ordinary API key are rejected; ordinary keys
+without the header retain their normal API access.
+
 External MCP access is independent of employee login. When external MCP clients are outside the selected POC scope, set:
 
 ```sh

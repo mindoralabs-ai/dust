@@ -289,6 +289,59 @@ describe("POST /api/v1/w/[wId]/assistant/conversations/[cId]/messages", () => {
     expect((await response.json()).error.type).toBe("user_not_found");
   });
 
+  it("rejects x-api-user-email on an ordinary API key", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+    });
+    const member = await UserFactory.basic();
+    await MembershipFactory.associate(workspace, member, { role: "user" });
+
+    const response = await postMessage(
+      workspace,
+      "conversation_does_not_matter",
+      key,
+      {},
+      { "x-api-user-email": member.email }
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "workspace_auth_error",
+        message: "User impersonation requires a system API key.",
+      },
+    });
+  });
+
+  it("allows a header-free ordinary API key without attributing a user", async () => {
+    const { workspace, key } = await createPublicApiMockRequest({
+      method: "POST",
+    });
+    const member = await UserFactory.basic();
+    await MembershipFactory.associate(workspace, member, { role: "admin" });
+    const memberAuth = await Authenticator.fromUserIdAndWorkspaceId(
+      member.sId,
+      workspace.sId
+    );
+    const conversation = await ConversationFactory.create(memberAuth, {
+      agentConfigurationId: GLOBAL_AGENTS_SID.DUST,
+      messagesCreatedAt: [new Date()],
+    });
+
+    const response = await postMessage(workspace, conversation.sId, key, {
+      content: "Hello",
+      mentions: [],
+      context: {
+        username: "api-key",
+        timezone: "Europe/Paris",
+        origin: "api",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).message.user).toBeNull();
+  });
+
   it("rejects a nonmember x-api-user-email on a system key", async () => {
     const { workspace, key } = await createPublicApiMockRequest({
       method: "POST",

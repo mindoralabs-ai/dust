@@ -96,6 +96,7 @@ function applyClientIp(auth: Authenticator, headers: HeaderRecord): void {
  * @cc [owner:jchen0824,label:api;security] explicit-user-impersonation
  * A system-key request with `x-api-user-email` MUST authenticate as an active member matching that
  * email or return `user_not_found`; it MUST NOT retain workspace/system authority on lookup failure.
+ * A non-system API key supplying this header MUST be rejected without impersonating the user.
  */
 /**
  * Authenticates a public-API request (Authorization header required:
@@ -206,7 +207,16 @@ export const publicApiAuth = createMiddleware<PublicApiCtx>(
 
     // x-api-user-email: system-key-only impersonation.
     const userEmailFromHeader = getUserEmailFromHeaders(headers);
-    if (workspaceAuth.isSystemKey() && userEmailFromHeader !== undefined) {
+    if (userEmailFromHeader !== undefined) {
+      if (!workspaceAuth.isSystemKey()) {
+        return apiError(ctx, {
+          status_code: 401,
+          api_error: {
+            type: "workspace_auth_error",
+            message: "User impersonation requires a system API key.",
+          },
+        });
+      }
       const userAuth = await workspaceAuth.exchangeSystemKeyForUserAuthByEmail(
         workspaceAuth,
         {
