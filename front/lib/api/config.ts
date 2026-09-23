@@ -54,6 +54,12 @@ const config = {
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_KEY_ID"),
   getDustFrontRegistryPublicKeyBase64: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_PUBLIC_KEY_BASE64"),
+  getDustFrontRegistryNextKeyId: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_FRONT_REGISTRY_NEXT_KEY_ID"),
+  getDustFrontRegistryNextPublicKeyBase64: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_FRONT_REGISTRY_NEXT_PUBLIC_KEY_BASE64"
+    ),
   getDustFrontVertexProviderIoEnabled: (): boolean =>
     EnvironmentConfig.getOptionalEnvVariable(
       "DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED"

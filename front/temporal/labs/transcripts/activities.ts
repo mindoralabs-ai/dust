@@ -32,6 +32,7 @@ import { isProviderWithDefaultWorkspaceConfiguration } from "@app/types/oauth/li
 import { Err } from "@app/types/shared/result";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import { isEmptyString } from "@app/types/shared/utils/general";
+import { ApplicationFailure } from "@temporalio/common";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 import { UniqueConstraintError } from "sequelize";
@@ -459,6 +460,12 @@ export async function processTranscriptActivity(
     });
 
     if (upsertRes.isErr()) {
+      if (upsertRes.error.code === "ambiguous_provider_effect") {
+        throw ApplicationFailure.nonRetryable(
+          "Transcript embedding outcome is unknown; manual reconciliation required",
+          "ambiguous_provider_effect"
+        );
+      }
       localLogger.error(
         {
           dataSourceViewId: transcriptsConfiguration.dataSourceViewId,

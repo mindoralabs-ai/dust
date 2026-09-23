@@ -173,4 +173,30 @@ describe("isolated Dust POC generation selection", () => {
       new Set(["workspace-a", "workspace-b"])
     );
   });
+
+  it("accepts overlapping current and next signer verifiers", async () => {
+    vi.stubEnv("DUST_FRONT_REGISTRY_NEXT_KEY_ID", "key-2");
+    vi.stubEnv("DUST_FRONT_REGISTRY_NEXT_PUBLIC_KEY_BASE64", "b".repeat(44));
+    const { pocRoutesForMaintenance } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await pocRoutesForMaintenance();
+    expect(Resolver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verifiers: [
+          { keyId: "key-1", publicKeyBase64: "a".repeat(44) },
+          { keyId: "key-2", publicKeyBase64: "b".repeat(44) },
+        ],
+      })
+    );
+  });
+
+  it("rejects an incomplete next signer verifier", async () => {
+    vi.stubEnv("DUST_FRONT_REGISTRY_NEXT_KEY_ID", "key-2");
+    const { pocRoutesForMaintenance } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await expect(pocRoutesForMaintenance()).rejects.toThrow("configuration");
+    expect(Resolver).not.toHaveBeenCalled();
+  });
 });

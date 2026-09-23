@@ -86,15 +86,24 @@ async function initializeRuntime(): Promise<PocRuntime> {
   if (!Number.isSafeInteger(minimumRevision) || minimumRevision < 1) {
     throw new Error("Dust POC runtime configuration unavailable");
   }
+  const nextKeyId = config.getDustFrontRegistryNextKeyId();
+  const nextPublicKey = config.getDustFrontRegistryNextPublicKeyBase64();
+  if (Boolean(nextKeyId) !== Boolean(nextPublicKey)) {
+    throw new Error("Dust POC runtime configuration unavailable");
+  }
+  const verifiers = [
+    {
+      keyId: required(config.getDustFrontRegistryKeyId()),
+      publicKeyBase64: required(config.getDustFrontRegistryPublicKeyBase64()),
+    },
+  ];
+  if (nextKeyId && nextPublicKey) {
+    verifiers.push({ keyId: nextKeyId, publicKeyBase64: nextPublicKey });
+  }
   const resolver = new DustTenantRouteResolver({
     signerUrl: required(config.getDustFrontRegistrySignerUrl()),
     exportCredentialFile: required(config.getDustFrontRegistryExportKeyFile()),
-    verifiers: [
-      {
-        keyId: required(config.getDustFrontRegistryKeyId()),
-        publicKeyBase64: required(config.getDustFrontRegistryPublicKeyBase64()),
-      },
-    ],
+    verifiers,
     minimumRevision,
   });
   await resolver.start();
