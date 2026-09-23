@@ -4,7 +4,6 @@ import {
 } from "@app/lib/api/dust_poc_runtime";
 import { runFrontUsageDeliveryBatch } from "@app/lib/api/usage_delivery";
 import { sendFrontUsageHeartbeat } from "@app/lib/api/usage_heartbeat";
-import { runDustPocUsageReconciler } from "@app/temporal/dust_usage/worker";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@app/lib/api/dust_poc_runtime", () => ({
@@ -25,11 +24,17 @@ const deliver = vi.mocked(runFrontUsageDeliveryBatch);
 const heartbeat = vi.mocked(sendFrontUsageHeartbeat);
 
 describe("Dust POC accounting worker", () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => {
+    vi.resetModules();
+    vi.resetAllMocks();
+  });
   afterEach(() => vi.unstubAllEnvs());
 
   it("does not start on ordinary Dust instances", async () => {
     vi.stubEnv("DUST_POC_MODE", "0");
+    const { runDustPocUsageReconciler } = await import(
+      "@app/temporal/dust_usage/worker"
+    );
     await runDustPocUsageReconciler();
     expect(resolveRoute).not.toHaveBeenCalled();
     expect(deliver).not.toHaveBeenCalled();
@@ -37,6 +42,9 @@ describe("Dust POC accounting worker", () => {
 
   it("runs one bounded accounting batch without a provider switch", async () => {
     vi.stubEnv("DUST_POC_MODE", "1");
+    const { runDustPocUsageReconciler } = await import(
+      "@app/temporal/dust_usage/worker"
+    );
     vi.stubEnv("DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED", "0");
     const controller = new AbortController();
     const resolver = { resolve: vi.fn() } as never;

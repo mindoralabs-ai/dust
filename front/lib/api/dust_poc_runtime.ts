@@ -1,3 +1,4 @@
+import config from "@app/lib/api/config";
 import type { AuthorizedDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
 import { authorizeDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
 import { dustPocMode } from "@app/lib/api/dust_poc_mode";
@@ -48,8 +49,7 @@ export async function pocRoutesForMaintenance(): Promise<
   return runtime.resolver.listActiveRoutesForMaintenance(runtime.workspaces);
 }
 
-function required(name: string): string {
-  const value = process.env[name];
+function required(value: string): string {
   if (!value || value.trim() !== value) {
     throw new Error("Dust POC runtime configuration unavailable");
   }
@@ -57,7 +57,7 @@ function required(name: string): string {
 }
 
 async function initializeRuntime(): Promise<PocRuntime> {
-  const workspaceIds = required("DUST_POC_WORKSPACE_IDS").split(",");
+  const workspaceIds = required(config.getDustPocWorkspaceIds()).split(",");
   if (
     workspaceIds.length !== 2 ||
     new Set(workspaceIds).size !== 2 ||
@@ -65,17 +65,19 @@ async function initializeRuntime(): Promise<PocRuntime> {
   ) {
     throw new Error("Dust POC runtime configuration unavailable");
   }
-  const minimumRevision = Number(required("DUST_FRONT_REGISTRY_MIN_REVISION"));
+  const minimumRevision = Number(
+    required(config.getDustFrontRegistryMinRevision())
+  );
   if (!Number.isSafeInteger(minimumRevision) || minimumRevision < 1) {
     throw new Error("Dust POC runtime configuration unavailable");
   }
   const resolver = new DustTenantRouteResolver({
-    signerUrl: required("DUST_FRONT_REGISTRY_SIGNER_URL"),
-    exportCredentialFile: required("DUST_FRONT_REGISTRY_EXPORT_KEY_FILE"),
+    signerUrl: required(config.getDustFrontRegistrySignerUrl()),
+    exportCredentialFile: required(config.getDustFrontRegistryExportKeyFile()),
     verifiers: [
       {
-        keyId: required("DUST_FRONT_REGISTRY_KEY_ID"),
-        publicKeyBase64: required("DUST_FRONT_REGISTRY_PUBLIC_KEY_BASE64"),
+        keyId: required(config.getDustFrontRegistryKeyId()),
+        publicKeyBase64: required(config.getDustFrontRegistryPublicKeyBase64()),
       },
     ],
     minimumRevision,
@@ -100,7 +102,7 @@ export async function authorizePocGeneration(input: {
 }): Promise<AuthorizedDustGenerationAttempt> {
   if (
     !dustPocMode() ||
-    process.env.DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED !== "1" ||
+    !config.getDustFrontVertexProviderIoEnabled() ||
     input.providerHost !== "agent-platform" ||
     input.providerId !== "google_ai_studio" ||
     input.modelId !== POC_GENERATION_MODEL ||
@@ -140,7 +142,7 @@ export async function selectPocEmbeddingProvider(
     return null;
   }
   if (
-    process.env.DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED !== "1" ||
+    !config.getDustFrontVertexEmbeddingSelectionEnabled() ||
     !identity ||
     identity.workspaceId !== workspaceId
   ) {

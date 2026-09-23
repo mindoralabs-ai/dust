@@ -1,4 +1,5 @@
 import apiConfig from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import {
   computeWorkspaceOverallSizeCached,
   resolveLegacyDataSourceSpaceId,
@@ -695,6 +696,12 @@ app.post(
         lightDocumentOutput: body.light_document_output === true,
         title,
         mimeType,
+        workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
+          {
+            projectId: String(dataSource.dustAPIProjectId),
+            dataSourceId: dataSource.dustAPIDataSourceId,
+          },
+        ]),
       });
 
       if (upsertRes.isErr()) {

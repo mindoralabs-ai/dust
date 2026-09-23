@@ -46,7 +46,10 @@ Runtime.install(
 );
 
 async function runWorkers(workers: WorkerName[]) {
-  void runDustPocUsageReconciler().catch((err) =>
+  const reconcilerAbort = new AbortController();
+  process.once("SIGTERM", () => reconcilerAbort.abort());
+  process.once("SIGINT", () => reconcilerAbort.abort());
+  void runDustPocUsageReconciler(reconcilerAbort.signal).catch((err) =>
     logger.error({ error: err }, "Error running Dust POC usage reconciler.")
   );
   for (const worker of workers) {

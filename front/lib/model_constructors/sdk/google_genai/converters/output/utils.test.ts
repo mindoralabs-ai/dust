@@ -70,6 +70,7 @@ describe("usageToTokenUsageEvent", () => {
         cachedContentTokenCount: 4,
       },
       { promptTokenCount: 2, candidatesTokenCount: 3, totalTokenCount: 4 },
+      { promptTokenCount: 2, candidatesTokenCount: 3, totalTokenCount: 6 },
       {
         promptTokenCount: 2,
         candidatesTokenCount: 3,
@@ -107,7 +108,7 @@ describe("usageToTokenUsageEvent", () => {
         cachedContentTokenCount: 10,
         candidatesTokenCount: 7,
         thoughtsTokenCount: 3,
-        totalTokenCount: 30,
+        totalTokenCount: 35,
       }).content
     ).toMatchObject({
       standardInput: 15,

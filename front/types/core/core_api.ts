@@ -1002,6 +1002,7 @@ export class CoreAPI {
       pairs: { projectId: string; dataSourceId: string }[]
     ) => Promise<string | undefined>
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
+    const workspaceAssertion = await assertionForPairs?.(searches);
     const searchResults = await concurrentExecutor(
       searches,
       async (search) => {
@@ -1016,7 +1017,7 @@ export class CoreAPI {
             fullText: fullText,
             credentials: credentials,
             target_document_tokens: target_document_tokens,
-            workspaceAssertion: await assertionForPairs?.([search]),
+            workspaceAssertion,
           }
         );
 

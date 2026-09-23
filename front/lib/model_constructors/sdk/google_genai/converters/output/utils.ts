@@ -185,10 +185,9 @@ export function usageToTokenUsageEvent(
     Number.isSafeInteger(rawOutput) &&
     Number.isSafeInteger(totalInput + totalOutput) &&
     (cached ?? 0) <= totalInput &&
-    // The reported total can include other modalities. It cannot be less than
-    // the separately reported prompt, candidate, and thought tokens.
-    (reportedTotal === undefined ||
-      reportedTotal >= prompt + candidates + (thoughts ?? 0));
+    // Any unexplained excess may include other modalities that these counts
+    // cannot attribute, so it is not exact billable usage.
+    (reportedTotal === undefined || reportedTotal === totalInput + totalOutput);
 
   // Keep available safe counts for existing consumers when metadata is partial;
   // accountingStatus tells the Dust journal these are not exact billed usage.

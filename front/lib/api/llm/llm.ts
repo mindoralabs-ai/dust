@@ -1034,7 +1034,13 @@ export abstract class LLM<
               counts: exactUsage,
             });
           } else {
-            await markFrontUsageUnknown(pocAttempt.attempt.attemptId);
+            await markFrontUsageUnknown(
+              pocAttempt.attempt.attemptId,
+              providerOperationId &&
+                /^[A-Za-z0-9_.:/-]{1,256}$/.test(providerOperationId)
+                ? providerOperationId
+                : undefined
+            );
           }
         }
       } finally {

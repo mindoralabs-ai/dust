@@ -128,8 +128,11 @@ describe("isolated Dust POC generation selection", () => {
       selectPocEmbeddingProvider(null, "workspace-a")
     ).rejects.toThrow("unavailable");
     vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "0");
+    vi.resetModules();
+    const { selectPocEmbeddingProvider: selectWithDisabledEmbedding } =
+      await import("@app/lib/api/dust_poc_runtime");
     await expect(
-      selectPocEmbeddingProvider(identity, "workspace-a")
+      selectWithDisabledEmbedding(identity, "workspace-a")
     ).rejects.toThrow("unavailable");
   });
 

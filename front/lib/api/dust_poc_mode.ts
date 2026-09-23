@@ -1,6 +1,8 @@
+import config from "@app/lib/api/config";
+
 /** Fail closed on a mistyped isolated-instance mode flag. */
 export function dustPocMode(): boolean {
-  const mode = process.env.DUST_POC_MODE;
+  const mode = config.getDustPocMode();
   if (mode === undefined || mode === "0") {
     return false;
   }
