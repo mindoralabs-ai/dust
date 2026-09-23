@@ -526,7 +526,6 @@ impl Embedder for VertexAIEmbedder {
             .project
             .as_deref()
             .ok_or_else(|| anyhow!("Vertex embedder is not initialized"))?;
-        let token = Arc::new(self.token_source.token().await?);
         let endpoint = format!(
             "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{API_MODEL_ID}:embedContent"
         );
@@ -538,7 +537,7 @@ impl Embedder for VertexAIEmbedder {
             .to_string();
         let owned_inputs = text.into_iter().map(str::to_owned).collect::<Vec<_>>();
         let results = stream::iter(owned_inputs.into_iter().map(|input| {
-            let token = token.clone();
+            let token_source = self.token_source.clone();
             let endpoint = endpoint.clone();
             let client = self.client.clone();
             async move {
@@ -561,6 +560,9 @@ impl Embedder for VertexAIEmbedder {
                         Ok(())
                     },
                     || async move {
+                        // ADC is downstream of the per-attempt journal and CRM
+                        // admission. A denied tenant must not request a token.
+                        let token = token_source.token().await?;
                         Self::request_one(&client, &endpoint, &token, &input, task_type).await
                     },
                 )
