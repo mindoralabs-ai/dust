@@ -142,6 +142,34 @@ mod tests {
     }
 
     #[test]
+    fn caller_extras_cannot_override_verified_workspace() {
+        use crate::providers::embedder::{EmbedderRequest, EmbeddingTaskType};
+        use crate::providers::provider::ProviderID;
+        let secret = "test-secret-".repeat(4);
+        std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
+        let pair = DataSourcePair {
+            project_id: 1,
+            data_source_id: "a".into(),
+        };
+        let future = (crate::utils::now() / 1000 + 60) as usize;
+        let workspace = verify(
+            Some(&token(&secret, AUDIENCE, future, vec![pair.clone()])),
+            &[pair],
+        )
+        .unwrap();
+        let request = EmbedderRequest::new(
+            ProviderID::VertexAI,
+            "gemini-embedding-2-1536",
+            vec!["query"],
+            EmbeddingTaskType::RetrievalQuery,
+            Some(serde_json::json!({"workspace_sid": "forged", "_dust_verified_workspace_sid": "forged"})),
+        ).with_verified_workspace(Some(workspace));
+        assert_eq!(request.verified_workspace_sid(), Some("w-test"));
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert!(serialized.get("verified_workspace").is_none());
+    }
+
+    #[test]
     fn repeated_authorized_pair_is_allowed_but_new_pair_is_not() {
         let secret = "test-secret-".repeat(4);
         std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);

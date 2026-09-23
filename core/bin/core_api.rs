@@ -21,6 +21,7 @@ use dust::{
     databases_store::{self, gcs::GoogleCloudStorageDatabasesStore},
     deno::js_executor::JSExecutor,
     open_telemetry::init_subscribers,
+    providers::vertex_ai::run_core_usage_reconciler,
     search_stores::search_store::{ElasticsearchSearchStore, SearchStore},
     stores::{
         postgres,
@@ -64,6 +65,8 @@ fn main() {
         });
 
         let _guard = init_subscribers()?;
+
+        tokio::task::spawn(run_core_usage_reconciler());
 
         let store: Box<dyn store::Store + Sync + Send> = match std::env::var("CORE_DATABASE_URI") {
             Ok(db_uri) => {

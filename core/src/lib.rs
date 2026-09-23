@@ -72,6 +72,7 @@ pub mod providers {
     pub mod mistral;
     pub mod openai;
     pub mod provider;
+    pub mod vertex_ai;
     pub mod tiktoken {
         pub mod tiktoken;
     }

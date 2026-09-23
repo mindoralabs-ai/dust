@@ -13,6 +13,7 @@ use crate::search_filter::{Filterable, SearchFilter};
 use crate::search_stores::search_store::{Indexable, NodeItem, SearchStore};
 use crate::stores::store::{DocumentCreateParams, Store};
 use crate::utils;
+use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -708,6 +709,7 @@ impl DataSource {
     pub async fn upsert(
         &self,
         credentials: Credentials,
+        workspace: Option<VerifiedWorkspace>,
         store: Box<dyn Store + Sync + Send>,
         qdrant_clients: QdrantClients,
         document_id: &str,
@@ -827,6 +829,7 @@ impl DataSource {
                 &text,
                 // Cache is used for the main collection.
                 true,
+                workspace.clone(),
             )
             .await?;
 
@@ -843,6 +846,7 @@ impl DataSource {
                 &text,
                 // Cache is not used when writing to the shadow collection.
                 false,
+                workspace,
             )
             .await?;
         }
@@ -890,6 +894,7 @@ impl DataSource {
         document_hash: &str,
         text: &Section,
         use_cache: bool,
+        workspace: Option<VerifiedWorkspace>,
     ) -> Result<Document> {
         let qdrant_client = self.main_qdrant_client(qdrant_clients);
 
@@ -1030,8 +1035,10 @@ impl DataSource {
                 embedder_config.provider_id.clone(),
                 &embedder_config.model_id,
                 chunk.iter().map(|ci| ci.text.as_str()).collect::<Vec<_>>(),
+                crate::providers::embedder::EmbeddingTaskType::RetrievalDocument,
                 Some(extras.clone()),
-            );
+            )
+            .with_verified_workspace(workspace.clone());
 
             let v = match r.execute(credentials.clone()).await {
                 Ok(v) => v,
@@ -1244,6 +1251,7 @@ impl DataSource {
     pub async fn search(
         &self,
         credentials: Credentials,
+        workspace: Option<VerifiedWorkspace>,
         store: Box<dyn Store + Sync + Send>,
         qdrant_clients: QdrantClients,
         query: &Option<String>,
@@ -1286,8 +1294,10 @@ impl DataSource {
                     self.embedder_config().provider_id,
                     &self.embedder_config().model_id,
                     vec![&q],
+                    crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
                     self.config.extras.clone(),
-                );
+                )
+                .with_verified_workspace(workspace);
                 let v = r.execute(credentials).await?;
                 if v.len() != 1 {
                     return Err(anyhow!(
