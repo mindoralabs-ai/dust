@@ -19,21 +19,30 @@ export async function runDustPocUsageReconciler(
   if (!dustPocMode()) {
     return;
   }
-  while (!signal?.aborted) {
-    try {
-      const resolver = await pocRouteResolverForMaintenance();
-      await runFrontUsageDeliveryBatch(resolver);
-      const routes = await pocRoutesForMaintenance();
-      await Promise.all(routes.map((route) => sendFrontUsageHeartbeat(route)));
-    } catch {
-      logger.warn("Dust POC usage reconciliation unavailable");
-    }
-    try {
-      await setTimeout(30_000, undefined, { signal });
-    } catch {
-      if (!signal?.aborted) {
-        throw new Error("Dust POC reconciliation timer unavailable");
+  async function runLoop(task: () => Promise<void>, intervalMs: number) {
+    while (!signal?.aborted) {
+      try {
+        await task();
+      } catch {
+        logger.warn("Dust POC usage reconciliation unavailable");
+      }
+      try {
+        await setTimeout(intervalMs, undefined, { signal });
+      } catch {
+        if (!signal?.aborted) {
+          throw new Error("Dust POC reconciliation timer unavailable");
+        }
       }
     }
   }
+  await Promise.all([
+    runLoop(async () => {
+      const resolver = await pocRouteResolverForMaintenance();
+      await runFrontUsageDeliveryBatch(resolver);
+    }, 30_000),
+    runLoop(async () => {
+      const routes = await pocRoutesForMaintenance();
+      await Promise.all(routes.map((route) => sendFrontUsageHeartbeat(route)));
+    }, 10_000),
+  ]);
 }

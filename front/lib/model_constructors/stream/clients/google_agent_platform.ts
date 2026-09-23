@@ -1,3 +1,4 @@
+import { consumeDustProviderPermit } from "@app/lib/api/dust_generation_gate";
 import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { BaseEndpointConfiguration } from "@app/lib/model_constructors/configuration";
 import type { GoogleAiStudioInputConfig } from "@app/lib/model_constructors/providers/google_ai_studio/inputConfig";
@@ -67,11 +68,12 @@ export abstract class GoogleAgentPlatformStream extends WithGoogleGenAIInputConv
    * In isolated POC mode, only the admitted LLM wrapper may arm one provider
    * request. Direct probes and reused permits must fail before SDK I/O.
    */
-  armPocAttempt(attemptId: string): void {
+  armPocAttempt(attemptId: string, providerPermit: object): void {
     if (
       !dustPocMode() ||
       this.pocAttemptId !== null ||
-      !/^[A-Za-z0-9_-]{1,128}$/.test(attemptId)
+      !/^[A-Za-z0-9_-]{1,128}$/.test(attemptId) ||
+      !consumeDustProviderPermit(providerPermit, attemptId)
     ) {
       throw new Error("Dust POC provider request unavailable");
     }

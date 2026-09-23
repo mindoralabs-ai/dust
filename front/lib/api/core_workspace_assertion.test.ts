@@ -1,4 +1,7 @@
-import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
+import {
+  createCoreWorkspaceAssertion,
+  createCoreWorkspaceAssertionsForSingles,
+} from "@app/lib/api/core_workspace_assertion";
 import { Authenticator } from "@app/lib/auth";
 import { DataSourceViewFactory } from "@app/tests/utils/DataSourceViewFactory";
 import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
@@ -65,6 +68,28 @@ describe("Core workspace assertion", () => {
         { project_id: 12, data_source_id: sourceB },
       ],
     });
+  });
+
+  it("signs a distinct exact assertion for each non-bulk search", async () => {
+    const assertions = await createCoreWorkspaceAssertionsForSingles(auth, [
+      { projectId: "11", dataSourceId: sourceA },
+      { projectId: "12", dataSourceId: sourceB },
+    ]);
+    expect(assertions?.size).toBe(2);
+    for (const [key, projectId, dataSourceId] of [
+      [`11:${sourceA}`, 11, sourceA],
+      [`12:${sourceB}`, 12, sourceB],
+    ] as const) {
+      expect(
+        jwt.verify(assertions!.get(key)!, secret, {
+          audience: "dust-core-vertex-embedding",
+          algorithms: ["HS256"],
+        })
+      ).toMatchObject({
+        workspace_sid: workspaceSId,
+        data_sources: [{ project_id: projectId, data_source_id: dataSourceId }],
+      });
+    }
   });
 
   it("rejects a different project paired with an authorized data source", async () => {

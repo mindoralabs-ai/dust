@@ -7,6 +7,7 @@ import type {
   TenantRoute,
 } from "@app/lib/api/tenant_route";
 import { DustTenantRouteResolver } from "@app/lib/api/tenant_route";
+import type { Authenticator } from "@app/lib/auth";
 
 const POC_GENERATION_MODEL = "gemini-3.7-flash";
 
@@ -152,4 +153,26 @@ export async function selectPocEmbeddingProvider(
     throw new Error("Dust POC embedding unavailable");
   }
   return "vertex_ai";
+}
+
+/** Use this boundary for every authenticated Core data-source creation path. */
+export async function selectPocEmbeddingProviderForAuth(
+  auth: Authenticator,
+  workspaceId: string
+): Promise<"vertex_ai" | null> {
+  const workspace = auth.getNonNullableWorkspace();
+  if (workspace.sId !== workspaceId) {
+    throw new Error("Dust workspace mismatch");
+  }
+  const user = auth.user();
+  const identity =
+    user?.workOSUserId && workspace.workOSOrganizationId
+      ? {
+          workspaceId: workspace.sId,
+          workosOrganizationId: workspace.workOSOrganizationId,
+          workosUserId: user.workOSUserId,
+          dustUserId: user.sId,
+        }
+      : null;
+  return selectPocEmbeddingProvider(identity, workspaceId);
 }

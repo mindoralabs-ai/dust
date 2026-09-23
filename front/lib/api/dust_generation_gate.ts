@@ -24,7 +24,22 @@ export class DustGenerationGateUnavailable extends Error {
 
 export type AuthorizedDustGenerationAttempt = Readonly<{
   attempt: Readonly<FrontUsageAttempt>;
+  providerPermit: object;
 }>;
+
+const providerPermits = new WeakMap<object, string>();
+
+/** A permit is issued only after a durable start and successful admission. */
+export function consumeDustProviderPermit(
+  permit: object,
+  attemptId: string
+): boolean {
+  if (providerPermits.get(permit) !== attemptId) {
+    return false;
+  }
+  providerPermits.delete(permit);
+  return true;
+}
 
 export type DustGenerationGateInput = {
   /** Obtained from the authenticated Dust server session, never request JSON. */
@@ -83,8 +98,10 @@ export async function authorizeDustGenerationAttempt({
     routeId: `${route.tenantId}:${route.revision}`,
   });
 
+  let startOutcome: Awaited<ReturnType<typeof startFrontUsageAttempt>>;
   try {
-    if ((await startFrontUsageAttempt(attempt)) !== "created") {
+    startOutcome = await startFrontUsageAttempt(attempt);
+    if (startOutcome !== "created") {
       throw new DustGenerationGateUnavailable();
     }
   } catch {
@@ -96,6 +113,7 @@ export async function authorizeDustGenerationAttempt({
       routeUrl: route.admissionUrl,
       componentKey,
       operationId: attempt.attemptId,
+      startOutcome,
     });
     // Recheck the signed mapping after the network round trip. If a refresh
     // failed or changed the binding, no provider request has been sent yet.
@@ -128,5 +146,7 @@ export async function authorizeDustGenerationAttempt({
     throw new DustGenerationGateUnavailable();
   }
 
-  return Object.freeze({ attempt });
+  const providerPermit = Object.freeze({});
+  providerPermits.set(providerPermit, attempt.attemptId);
+  return Object.freeze({ attempt, providerPermit });
 }

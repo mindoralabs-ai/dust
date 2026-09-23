@@ -912,11 +912,13 @@ export class StreamEndpointTransition extends BaseTransition {
       if (dustPocMode()) {
         if (
           !(this.model instanceof GoogleAgentPlatformStream) ||
-          !this.pocAttemptId
+          !this.pocAttemptId ||
+          !this.pocProviderPermit
         ) {
           throw new Error("Dust POC provider request unavailable");
         }
-        this.model.armPocAttempt(this.pocAttemptId);
+        this.model.armPocAttempt(this.pocAttemptId, this.pocProviderPermit);
+        this.pocProviderPermit = null;
       }
       const rawStream = this.model.streamRaw(payload);
       const newEvents = this.model.rawStreamOutputToEvents(rawStream);

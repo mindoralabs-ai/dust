@@ -1,6 +1,7 @@
 // Okay to use public API types because it's internal stuff mostly.
 
 import { default as config } from "@app/lib/api/config";
+import { selectPocEmbeddingProviderForAuth } from "@app/lib/api/dust_poc_runtime";
 import {
   PROJECT_CONTEXT_FOLDER_ID,
   PROJECT_CONTEXT_FOLDER_NAME,
@@ -66,7 +67,8 @@ export async function createDataSourceAndConnectorForProject(
       }
 
       const dataSourceEmbedder =
-        auth.getNonNullableWorkspace().defaultEmbeddingProvider ??
+        (await selectPocEmbeddingProviderForAuth(auth, workspace.sId)) ??
+        workspace.defaultEmbeddingProvider ??
         DEFAULT_EMBEDDING_PROVIDER_ID;
       const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];
       const coreAPI = new CoreAPI(config.getCoreAPIConfig(), logger);

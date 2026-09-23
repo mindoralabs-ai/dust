@@ -3,7 +3,7 @@
 import { default as apiConfig, default as config } from "@app/lib/api/config";
 import { UNTITLED_TITLE } from "@app/lib/api/content_nodes";
 import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
-import { selectPocEmbeddingProvider } from "@app/lib/api/dust_poc_runtime";
+import { selectPocEmbeddingProviderForAuth } from "@app/lib/api/dust_poc_runtime";
 import { sendGitHubDeletionEmail } from "@app/lib/api/email";
 import {
   getLlmCredentials,
@@ -1139,18 +1139,8 @@ export async function createDataSourceWithoutProvider(
   if (activeWorkspace.sId !== owner.sId) {
     throw new Error("Dust workspace mismatch");
   }
-  const activeUser = auth.user();
-  const pocEmbeddingProvider = await selectPocEmbeddingProvider(
-    activeUser &&
-      activeWorkspace.workOSOrganizationId &&
-      activeUser.workOSUserId
-      ? {
-          workspaceId: activeWorkspace.sId,
-          workosOrganizationId: activeWorkspace.workOSOrganizationId,
-          workosUserId: activeUser.workOSUserId,
-          dustUserId: activeUser.sId,
-        }
-      : null,
+  const pocEmbeddingProvider = await selectPocEmbeddingProviderForAuth(
+    auth,
     owner.sId
   );
 

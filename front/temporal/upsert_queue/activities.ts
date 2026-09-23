@@ -138,6 +138,12 @@ export async function upsertDocumentActivity(
   });
 
   if (upsertRes.isErr()) {
+    if (upsertRes.error.code === "ambiguous_provider_effect") {
+      throw ApplicationFailure.nonRetryable(
+        "Vertex embedding outcome is unknown; manual reconciliation required",
+        "ambiguous_provider_effect"
+      );
+    }
     logger.error(
       {
         error: upsertRes.error,

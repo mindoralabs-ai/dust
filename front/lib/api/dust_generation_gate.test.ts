@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import {
   authorizeDustGenerationAttempt,
+  consumeDustProviderPermit,
   DustGenerationGateUnavailable,
 } from "@app/lib/api/dust_generation_gate";
 import type {
@@ -126,13 +127,23 @@ describe("Dust Front generation gate", () => {
       routeUrl: route("a").admissionUrl,
       componentKey: "a".repeat(40),
       operationId: "attempt-1",
+      startOutcome: "created",
     });
     expect(admit).toHaveBeenNthCalledWith(2, {
       routeUrl: route("b").admissionUrl,
       componentKey: "b".repeat(40),
       operationId: "attempt-2",
+      startOutcome: "created",
     });
-    expect(Object.keys(a)).toEqual(["attempt"]);
+    expect(Object.keys(a)).toEqual(["attempt", "providerPermit"]);
+    expect(consumeDustProviderPermit({}, "attempt-1")).toBe(false);
+    expect(consumeDustProviderPermit(a.providerPermit, "attempt-2")).toBe(
+      false
+    );
+    expect(consumeDustProviderPermit(a.providerPermit, "attempt-1")).toBe(true);
+    expect(consumeDustProviderPermit(a.providerPermit, "attempt-1")).toBe(
+      false
+    );
     expect(a.attempt).toMatchObject({
       attemptId: "attempt-1",
       tenantId: "tenant-a",

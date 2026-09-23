@@ -1,6 +1,11 @@
+import { consumeDustProviderPermit } from "@app/lib/api/dust_generation_gate";
 import { GoogleGeminiThreeDotSevenFlashGlobalAgentPlatformStream } from "@app/lib/model_constructors/stream/endpoints/google_gemini_3_7_flash_global_agent_platform";
 import { GoogleGenAI } from "@google/genai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@app/lib/api/dust_generation_gate", () => ({
+  consumeDustProviderPermit: vi.fn(),
+}));
 
 vi.mock("@google/genai", () => ({
   GoogleGenAI: vi.fn(
@@ -11,6 +16,7 @@ vi.mock("@google/genai", () => ({
 }));
 
 const Google = vi.mocked(GoogleGenAI);
+const consumePermit = vi.mocked(consumeDustProviderPermit);
 
 describe("Dust POC Vertex transport permit", () => {
   beforeEach(() => {
@@ -37,7 +43,14 @@ describe("Dust POC Vertex transport permit", () => {
     }).rejects.toThrow("unavailable");
     expect(call).not.toHaveBeenCalled();
 
-    endpoint.armPocAttempt("attempt-1");
+    const permit = {};
+    consumePermit.mockImplementation(
+      (candidate, id) => candidate === permit && id === "attempt-1"
+    );
+    expect(() => endpoint.armPocAttempt("attempt-1", {})).toThrow(
+      "unavailable"
+    );
+    endpoint.armPocAttempt("attempt-1", permit);
     for await (const _ of endpoint.streamRaw(input)) {
       // The admitted request may reach the SDK exactly once.
     }
@@ -55,7 +68,11 @@ describe("Dust POC Vertex transport permit", () => {
       new GoogleGeminiThreeDotSevenFlashGlobalAgentPlatformStream({
         AGENT_PLATFORM_PROJECT_ID: "poc-project",
       } as never);
-    endpoint.armPocAttempt("attempt-1");
-    expect(() => endpoint.armPocAttempt("attempt-2")).toThrow("unavailable");
+    const permit = {};
+    consumePermit.mockImplementation((candidate) => candidate === permit);
+    endpoint.armPocAttempt("attempt-1", permit);
+    expect(() => endpoint.armPocAttempt("attempt-2", permit)).toThrow(
+      "unavailable"
+    );
   });
 });

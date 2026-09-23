@@ -104,6 +104,7 @@ export abstract class LLM<
   protected readonly getTraceOutput?: LLMTraceCustomization["getTraceOutput"];
   protected generation: LangfuseGeneration | null = null;
   protected pocAttemptId: string | null = null;
+  protected pocProviderPermit: object | null = null;
 
   protected constructor(
     auth: Authenticator,
@@ -977,6 +978,7 @@ export abstract class LLM<
           inferenceRegion: this.metadata.inferenceRegion,
         });
         this.pocAttemptId = pocAttempt.attempt.attemptId;
+        this.pocProviderPermit = pocAttempt.providerPermit;
       }
 
       providerDispatched = true;
@@ -1011,11 +1013,15 @@ export abstract class LLM<
             );
           }
         }
+        if (event.type === "success") {
+          streamCompleted = true;
+        }
         yield event;
       }
       streamCompleted = true;
     } finally {
       this.pocAttemptId = null;
+      this.pocProviderPermit = null;
       try {
         if (pocAttempt) {
           if (!providerDispatched) {
