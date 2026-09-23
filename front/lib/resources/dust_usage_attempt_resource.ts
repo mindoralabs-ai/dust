@@ -1,5 +1,6 @@
 // biome-ignore-all lint/plugin/noRawSql: PostgreSQL atomic insert, row locks, and SKIP LOCKED leases have no Sequelize model equivalent here.
 import { createHash, randomUUID } from "node:crypto";
+import type { TenantRoute } from "@app/lib/api/tenant_route";
 import { frontSequelize } from "@app/lib/resources/storage";
 import type { Transaction } from "sequelize";
 import { QueryTypes } from "sequelize";
@@ -117,25 +118,22 @@ export async function readFrontUsageHealth(tenantId: string): Promise<{
   unresolvedCount: number;
 }> {
   requireIdentity(tenantId);
-  const [[unresolved], [delivery]] = await Promise.all([
-    frontSequelize.query<{ unresolvedCount: string }>(
-      `SELECT COUNT(*) AS "unresolvedCount" FROM "dust_usage_attempts"
-       WHERE "tenantId" = :tenantId
-         AND "state" IN ('started', 'unknown', 'manual_review_required')`,
-      { replacements: { tenantId }, type: QueryTypes.SELECT }
-    ),
-    frontSequelize.query<{ oldestDeliveryAt: string | null }>(
-      `SELECT EXTRACT(EPOCH FROM MIN("createdAt")) AS "oldestDeliveryAt"
-       FROM "dust_usage_attempts" WHERE "tenantId" = :tenantId
-         AND "state" = 'exact' AND "deliveredAt" IS NULL`,
-      { replacements: { tenantId }, type: QueryTypes.SELECT }
-    ),
-  ]);
-  const unresolvedCount = Number(unresolved?.unresolvedCount);
+  const [health] = await frontSequelize.query<{
+    unresolvedCount: string;
+    oldestDeliveryAt: string | null;
+  }>(
+    `SELECT
+       (SELECT COUNT(*) FROM "dust_usage_attempts"
+        WHERE "tenantId" = :tenantId
+          AND "state" IN ('started', 'unknown', 'manual_review_required')) AS "unresolvedCount",
+       (SELECT EXTRACT(EPOCH FROM MIN("createdAt"))
+        FROM "dust_usage_attempts" WHERE "tenantId" = :tenantId
+          AND "state" = 'exact' AND "deliveredAt" IS NULL) AS "oldestDeliveryAt"`,
+    { replacements: { tenantId }, type: QueryTypes.SELECT }
+  );
+  const unresolvedCount = Number(health?.unresolvedCount);
   const oldestDeliveryAt =
-    delivery?.oldestDeliveryAt === null
-      ? 0
-      : Number(delivery?.oldestDeliveryAt);
+    health?.oldestDeliveryAt === null ? 0 : Number(health?.oldestDeliveryAt);
   if (
     !Number.isSafeInteger(unresolvedCount) ||
     unresolvedCount < 0 ||
@@ -197,24 +195,58 @@ export async function startFrontUsageAttempt(
 
 /** An in-process, single-use proof tied to one committed journal insertion. */
 export type FrontUsageStartPermit = Readonly<{ attemptId: string }>;
-const issuedStartPermits = new WeakMap<FrontUsageStartPermit, string>();
+type PermitBinding = Readonly<{
+  attemptId: string;
+  tenantId: string;
+  workspaceId: string;
+  routeId: string;
+  admissionUrl: string;
+  frontCredentialRef: string;
+}>;
+const issuedStartPermits = new WeakMap<FrontUsageStartPermit, PermitBinding>();
 
 export async function startFrontUsageAttemptForAdmission(
-  attempt: FrontUsageAttempt
+  attempt: FrontUsageAttempt,
+  route: TenantRoute
 ): Promise<FrontUsageStartPermit | null> {
+  if (
+    route.tenantId !== attempt.tenantId ||
+    route.workspaceId !== attempt.workspaceId ||
+    `${route.tenantId}:${route.revision}` !== attempt.routeId
+  ) {
+    throw new Error("Dust usage admission route mismatch");
+  }
   if ((await startFrontUsageAttempt(attempt)) !== "created") {
     return null;
   }
   const permit = Object.freeze({ attemptId: attempt.attemptId });
-  issuedStartPermits.set(permit, attempt.attemptId);
+  issuedStartPermits.set(permit, {
+    attemptId: attempt.attemptId,
+    tenantId: attempt.tenantId,
+    workspaceId: attempt.workspaceId,
+    routeId: attempt.routeId,
+    admissionUrl: route.admissionUrl,
+    frontCredentialRef: route.frontCredentialRef,
+  });
   return permit;
 }
 
 export function consumeFrontUsageStartPermit(
   permit: FrontUsageStartPermit | null,
-  attemptId: string
+  attemptId: string,
+  route: TenantRoute
 ): boolean {
-  if (!permit || issuedStartPermits.get(permit) !== attemptId) {
+  const binding = permit && issuedStartPermits.get(permit);
+  if (
+    !permit ||
+    !binding ||
+    binding.attemptId !== attemptId ||
+    binding.tenantId !== route.tenantId ||
+    binding.workspaceId !== route.workspaceId ||
+    binding.routeId !== `${route.tenantId}:${route.revision}` ||
+    binding.admissionUrl !== route.admissionUrl ||
+    binding.frontCredentialRef !== route.frontCredentialRef
+  ) {
     return false;
   }
   issuedStartPermits.delete(permit);

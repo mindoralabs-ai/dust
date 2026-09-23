@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import type { TenantRoute } from "@app/lib/api/tenant_route";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DustAdmissionDeniedError,
   DustAdmissionUnavailableError,
@@ -8,13 +10,26 @@ import {
 vi.mock("@app/lib/api/usage_journal", () => ({
   consumeFrontUsageStartPermit: (
     permit: { attemptId: string } | null,
-    operationId: string
+    operationId: string,
+    _route: TenantRoute
   ) => permit?.attemptId === operationId,
 }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const readFile = vi.fn();
+  return { ...actual, default: { ...actual, readFile }, readFile };
+});
 
 const ROUTE = "https://crm-private.internal/internal/usage/dust/admission";
-const KEY = "front-component-key";
+const KEY = "f".repeat(40);
 const OPERATION_ID = "attempt_01";
+const tenantRoute = {
+  tenantId: "tenant-a",
+  workspaceId: "workspace-a",
+  revision: 1,
+  admissionUrl: ROUTE,
+  frontCredentialRef: "/run/tenant-a-front-key",
+} as TenantRoute;
 
 function admission(allowed = true): object {
   return {
@@ -40,8 +55,7 @@ function fetchReturning(body: unknown, status = 200) {
 
 function options(fetchImpl: typeof fetch) {
   return {
-    routeUrl: ROUTE,
-    componentKey: KEY,
+    route: tenantRoute,
     operationId: OPERATION_ID,
     startPermit: { attemptId: OPERATION_ID },
     fetchImpl,
@@ -49,6 +63,9 @@ function options(fetchImpl: typeof fetch) {
 }
 
 describe("requireDustAdmission", () => {
+  beforeEach(() => {
+    vi.mocked(readFile).mockResolvedValue(KEY);
+  });
   it("posts only the stable attempt ID to the selected private CRM route", async () => {
     const fetchImpl = fetchReturning(admission());
     await requireDustAdmission(options(fetchImpl));
@@ -74,8 +91,12 @@ describe("requireDustAdmission", () => {
     await requireDustAdmission(options(fetchImpl));
     await requireDustAdmission({
       ...options(fetchImpl),
-      routeUrl: "https://other-crm.internal/internal/usage/dust/admission",
-      componentKey: "other-front-key",
+      route: {
+        ...tenantRoute,
+        admissionUrl:
+          "https://other-crm.internal/internal/usage/dust/admission",
+        frontCredentialRef: "/run/tenant-b-front-key",
+      },
       operationId: "attempt_02",
       startPermit: { attemptId: "attempt_02" },
     });
@@ -91,10 +112,7 @@ describe("requireDustAdmission", () => {
       "host",
       "other-crm.internal"
     );
-    expect(fetchImpl.mock.calls[1][1]?.headers).toHaveProperty(
-      "X-Internal-Auth",
-      "other-front-key"
-    );
+    expect(readFile).toHaveBeenCalledWith("/run/tenant-b-front-key", "utf8");
   });
 
   it("rejects an explicit token quota denial", async () => {
@@ -235,7 +253,10 @@ describe("requireDustAdmission", () => {
       `${ROUTE}?tenant=other`,
     ]) {
       await expect(
-        requireDustAdmission({ ...options(fetchImpl), routeUrl })
+        requireDustAdmission({
+          ...options(fetchImpl),
+          route: { ...tenantRoute, admissionUrl: routeUrl },
+        })
       ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
     }
     expect(fetchImpl).not.toHaveBeenCalled();

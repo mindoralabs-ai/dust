@@ -12,6 +12,32 @@ import { z } from "zod";
 
 const MAX_RECEIPT_BYTES = 2048;
 const MAX_ENVELOPE_BYTES = 16384;
+const batchSuccesses = new WeakMap<
+  FrontUsageBatchSuccess,
+  {
+    issuedAt: number;
+    heartbeatedTenants: Set<string>;
+  }
+>();
+
+/** Opaque evidence that this process completed a reconciliation batch. */
+export type FrontUsageBatchSuccess = Readonly<{ processed: number }>;
+
+export function consumeFrontUsageBatchSuccess(
+  success: FrontUsageBatchSuccess,
+  tenantId: string
+): boolean {
+  const issued = batchSuccesses.get(success);
+  if (
+    !issued ||
+    Date.now() - issued.issuedAt > 10_000 ||
+    issued.heartbeatedTenants.has(tenantId)
+  ) {
+    return false;
+  }
+  issued.heartbeatedTenants.add(tenantId);
+  return true;
+}
 
 const deliveryReceiptSchema = z.strictObject({
   stream_id: z.string().regex(/^\d+-\d+$/),
@@ -32,7 +58,7 @@ function validReceipt(value: unknown, expectedHash: string): boolean {
 export async function runFrontUsageDeliveryBatch(
   resolver: DustTenantRouteResolver,
   fetchImpl: typeof fetch = fetch
-): Promise<number> {
+): Promise<FrontUsageBatchSuccess> {
   const claims = await claimFrontUsageWork(`front_${randomUUID()}`, 20);
   let failed = false;
   await concurrentExecutor(
@@ -49,7 +75,12 @@ export async function runFrontUsageDeliveryBatch(
   if (failed) {
     throw new Error("Dust usage reconciliation unavailable");
   }
-  return claims.length;
+  const success = Object.freeze({ processed: claims.length });
+  batchSuccesses.set(success, {
+    issuedAt: Date.now(),
+    heartbeatedTenants: new Set(),
+  });
+  return success;
 }
 
 export async function readBoundedReceipt(response: Response): Promise<unknown> {

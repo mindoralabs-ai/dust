@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
-import type { TenantRoute } from "@app/lib/api/tenant_route";
+import type {
+  DustTenantRouteResolver,
+  TenantRoute,
+} from "@app/lib/api/tenant_route";
+import { runFrontUsageDeliveryBatch } from "@app/lib/api/usage_delivery";
 import { sendFrontUsageHeartbeat } from "@app/lib/api/usage_heartbeat";
-import { readFrontUsageHealth } from "@app/lib/api/usage_journal";
+import {
+  claimFrontUsageWork,
+  readFrontUsageHealth,
+} from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -10,6 +17,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual, default: { ...actual, readFile }, readFile };
 });
 vi.mock("@app/lib/api/usage_journal", () => ({
+  claimFrontUsageWork: vi.fn(),
   readFrontUsageHealth: vi.fn(),
 }));
 
@@ -30,14 +38,23 @@ describe("Dust Front journal heartbeat", () => {
       unresolvedCount: 0,
     });
     key.mockResolvedValue("a".repeat(40));
+    vi.mocked(claimFrontUsageWork).mockResolvedValue([]);
   });
+
+  async function successfulBatch() {
+    return runFrontUsageDeliveryBatch({} as DustTenantRouteResolver);
+  }
 
   it("sends only the signed tenant route and its Front component key", async () => {
     const fetchImpl = vi.fn(
       async (_url: RequestInfo | URL, _init?: RequestInit) =>
         Response.json({ accepted: true, heartbeat_interval_seconds: 15 })
     );
-    await sendFrontUsageHeartbeat(route, fetchImpl as typeof fetch);
+    await sendFrontUsageHeartbeat(
+      route,
+      await successfulBatch(),
+      fetchImpl as typeof fetch
+    );
     expect(health).toHaveBeenCalledWith("tenant-a");
     expect(key).toHaveBeenCalledWith("/run/tenant-a-front-key", "utf8");
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -65,19 +82,56 @@ describe("Dust Front journal heartbeat", () => {
     const fetchImpl = vi.fn();
     health.mockRejectedValueOnce(new Error("journal unavailable"));
     await expect(
-      sendFrontUsageHeartbeat(route, fetchImpl as typeof fetch)
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        fetchImpl as typeof fetch
+      )
     ).rejects.toThrow();
     key.mockResolvedValueOnce("short");
     await expect(
-      sendFrontUsageHeartbeat(route, fetchImpl as typeof fetch)
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        fetchImpl as typeof fetch
+      )
     ).rejects.toThrow();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("cannot report a successful reconciler without a fresh batch", async () => {
+    const fetchImpl = vi.fn();
+    await expect(
+      sendFrontUsageHeartbeat(
+        route,
+        { processed: 0 },
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("unavailable");
+    const success = await successfulBatch();
+    health.mockResolvedValue({
+      checkedAtSeconds: Date.now() / 1000,
+      oldestDeliveryAtSeconds: 0,
+      unresolvedCount: 0,
+    });
+    fetchImpl.mockResolvedValue(
+      Response.json({ accepted: true, heartbeat_interval_seconds: 15 })
+    );
+    await sendFrontUsageHeartbeat(route, success, fetchImpl as typeof fetch);
+    await expect(
+      sendFrontUsageHeartbeat(route, success, fetchImpl as typeof fetch)
+    ).rejects.toThrow("unavailable");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("requires CRM's bounded acknowledgement", async () => {
     const fetchImpl = vi.fn(async () => Response.json({ accepted: false }));
     await expect(
-      sendFrontUsageHeartbeat(route, fetchImpl as typeof fetch)
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        fetchImpl as typeof fetch
+      )
     ).rejects.toThrow("unavailable");
   });
 });

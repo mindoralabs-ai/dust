@@ -1,5 +1,7 @@
 /** Server-side Dust quota admission. The caller must select the tenant route and
  * front component key from a verified, server-controlled workspace mapping. */
+import { readFile } from "node:fs/promises";
+import type { TenantRoute } from "@app/lib/api/tenant_route";
 import type { FrontUsageStartPermit } from "@app/lib/api/usage_journal";
 import { consumeFrontUsageStartPermit } from "@app/lib/api/usage_journal";
 import { z } from "zod";
@@ -46,10 +48,8 @@ export class DustAdmissionUnavailableError extends Error {
 }
 
 type AdmissionOptions = {
-  /** Full private CRM URL selected from the verified tenant mapping. */
-  routeUrl: string;
-  /** Mounted SERVICE_AUTH_KEY_DUST_FRONT_USAGE value for that same tenant. */
-  componentKey: string;
+  /** Signed route selected from the server-controlled workspace mapping. */
+  route: TenantRoute;
   /** Stable ID for one provider attempt; also used as journal attempt_id. */
   operationId: string;
   /** Only a newly committed journal row may authorize provider dispatch. */
@@ -133,8 +133,7 @@ async function readBoundedResponse(response: Response): Promise<unknown> {
 /** Resolve admission once per provider attempt, immediately before provider I/O.
  * This function never retries and returns only when CRM positively allows it. */
 export async function requireDustAdmission({
-  routeUrl,
-  componentKey,
+  route,
   operationId,
   startPermit,
   fetchImpl = fetch,
@@ -142,9 +141,7 @@ export async function requireDustAdmission({
 }: AdmissionOptions): Promise<void> {
   if (
     !OPERATION_ID.test(operationId) ||
-    !consumeFrontUsageStartPermit(startPermit, operationId) ||
-    !componentKey ||
-    componentKey.trim() !== componentKey ||
+    !consumeFrontUsageStartPermit(startPermit, operationId, route) ||
     !Number.isInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > MAX_TIMEOUT_MS
@@ -154,7 +151,7 @@ export async function requireDustAdmission({
 
   let url: URL;
   try {
-    url = new URL(routeUrl);
+    url = new URL(route.admissionUrl);
   } catch {
     throw new DustAdmissionUnavailableError();
   }
@@ -166,6 +163,20 @@ export async function requireDustAdmission({
     url.password ||
     url.search ||
     url.hash
+  ) {
+    throw new DustAdmissionUnavailableError();
+  }
+
+  let componentKey: string;
+  try {
+    componentKey = (await readFile(route.frontCredentialRef, "utf8")).trim();
+  } catch {
+    throw new DustAdmissionUnavailableError();
+  }
+  if (
+    componentKey.length < 32 ||
+    componentKey.length > 4096 ||
+    /[\r\n]/.test(componentKey)
   ) {
     throw new DustAdmissionUnavailableError();
   }

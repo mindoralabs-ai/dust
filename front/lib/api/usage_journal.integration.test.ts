@@ -129,18 +129,33 @@ describe.runIf(enabled)(
         model: "gemini-2.5-flash",
         routeId: "tenant-test-permit:7",
       };
-      const permit = await startFrontUsageAttemptForAdmission(attempt);
+      const route = {
+        tenantId: attempt.tenantId,
+        workspaceId: attempt.workspaceId,
+        revision: 7,
+        admissionUrl: "https://crm.internal/internal/usage/dust/admission",
+        frontCredentialRef: "/run/tenant-test-permit-front-key",
+      } as import("@app/lib/api/tenant_route").TenantRoute;
+      const permit = await startFrontUsageAttemptForAdmission(attempt, route);
       expect(permit).not.toBeNull();
-      expect(consumeFrontUsageStartPermit(permit, "another-attempt")).toBe(
-        false
-      );
-      expect(consumeFrontUsageStartPermit(permit, attempt.attemptId)).toBe(
-        true
-      );
-      expect(consumeFrontUsageStartPermit(permit, attempt.attemptId)).toBe(
-        false
-      );
-      expect(await startFrontUsageAttemptForAdmission(attempt)).toBeNull();
+      expect(
+        consumeFrontUsageStartPermit(permit, "another-attempt", route)
+      ).toBe(false);
+      expect(
+        consumeFrontUsageStartPermit(permit, attempt.attemptId, {
+          ...route,
+          tenantId: "tenant-other",
+        })
+      ).toBe(false);
+      expect(
+        consumeFrontUsageStartPermit(permit, attempt.attemptId, route)
+      ).toBe(true);
+      expect(
+        consumeFrontUsageStartPermit(permit, attempt.attemptId, route)
+      ).toBe(false);
+      expect(
+        await startFrontUsageAttemptForAdmission(attempt, route)
+      ).toBeNull();
     });
 
     it("retains an unresolved attempt for recovery instead of inventing no-charge", async () => {

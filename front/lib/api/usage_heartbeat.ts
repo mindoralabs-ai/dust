@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import type { TenantRoute } from "@app/lib/api/tenant_route";
-import { readBoundedReceipt } from "@app/lib/api/usage_delivery";
+import type { FrontUsageBatchSuccess } from "@app/lib/api/usage_delivery";
+import {
+  consumeFrontUsageBatchSuccess,
+  readBoundedReceipt,
+} from "@app/lib/api/usage_delivery";
 import { readFrontUsageHealth } from "@app/lib/api/usage_journal";
 import { z } from "zod";
 
@@ -17,8 +21,12 @@ const heartbeatReceiptSchema = z.strictObject({
  */
 export async function sendFrontUsageHeartbeat(
   route: TenantRoute,
+  batchSuccess: FrontUsageBatchSuccess,
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
+  if (!consumeFrontUsageBatchSuccess(batchSuccess, route.tenantId)) {
+    throw new Error("Dust Front usage heartbeat unavailable");
+  }
   const health = await readFrontUsageHealth(route.tenantId);
   const observedAtSeconds = Date.now() / 1000;
   const key = (await readFile(route.frontCredentialRef, "utf8")).trim();

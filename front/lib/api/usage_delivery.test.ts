@@ -141,9 +141,9 @@ describe("Dust Front usage delivery", () => {
 
   it("runs a bounded claim batch and returns after its delivery ack", async () => {
     vi.mocked(claimFrontUsageWork).mockResolvedValue([exact]);
-    await expect(runFrontUsageDeliveryBatch(resolver, fetchImpl)).resolves.toBe(
-      1
-    );
+    await expect(
+      runFrontUsageDeliveryBatch(resolver, fetchImpl)
+    ).resolves.toEqual({ processed: 1 });
     expect(claimFrontUsageWork).toHaveBeenCalledWith(
       expect.stringMatching(/^front_[a-f0-9-]+$/),
       20
@@ -183,9 +183,9 @@ describe("Dust Front usage delivery", () => {
         { status: 200 }
       );
     });
-    await expect(runFrontUsageDeliveryBatch(resolver, fetchImpl)).resolves.toBe(
-      20
-    );
+    await expect(
+      runFrontUsageDeliveryBatch(resolver, fetchImpl)
+    ).resolves.toEqual({ processed: 20 });
     expect(maximum).toBeLessThanOrEqual(8);
     expect(maximum).toBeGreaterThan(1);
   });
