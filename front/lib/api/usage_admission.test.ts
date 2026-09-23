@@ -132,6 +132,11 @@ describe("requireDustAdmission", () => {
       name: "malformed denial",
       body: { ...admission(false), denied_dimensions: [] },
     },
+    { name: "missing period", body: { ...admission(), period_start: null } },
+    {
+      name: "inverted period",
+      body: { ...admission(), period_end: "2026-08-01T00:00:00Z" },
+    },
   ])("fails closed for $name", async ({ body }) => {
     await expect(
       requireDustAdmission(options(fetchReturning(body)))
@@ -155,6 +160,15 @@ describe("requireDustAdmission", () => {
       );
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("rejects an oversized streamed response before parsing", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("x".repeat(4097), { status: 200 }));
+    await expect(
+      requireDustAdmission(options(fetchImpl))
+    ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
   });
 
   it("bounds the request and fails closed on an aborted fetch", async () => {

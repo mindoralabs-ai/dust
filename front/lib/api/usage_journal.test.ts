@@ -19,11 +19,11 @@ vi.mock("@app/lib/resources/storage", () => ({
 
 const attempt = {
   attemptId: "attempt-1",
-  tenantId: "tenant-A",
+  tenantId: "tenant-a",
   workspaceId: "workspace-A",
   conversationId: "conversation-1",
   model: "gemini-2.5-flash",
-  routeId: "route-A",
+  routeId: "tenant-a:7",
 };
 const counts = {
   inputTokens: 12,
@@ -48,6 +48,16 @@ describe("Front Dust usage journal", () => {
     expect(newFrontUsageAttemptId()).not.toBe(newFrontUsageAttemptId());
   });
 
+  it("rejects a route that cannot be resolved for its tenant", async () => {
+    await expect(
+      startFrontUsageAttempt({ ...attempt, routeId: "route-a" })
+    ).rejects.toThrow("route identity");
+    await expect(
+      startFrontUsageAttempt({ ...attempt, routeId: "tenant-b:7" })
+    ).rejects.toThrow("route identity");
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
   it("freezes the exact CRM wire envelope without guessed metadata", () => {
     const raw = buildFrontUsageEnvelope({
       attempt,
@@ -58,10 +68,10 @@ describe("Front Dust usage journal", () => {
     // Golden vector for CRM's Python json.dumps(sort_keys=True,
     // ensure_ascii=False, separators=(",", ":")) contract.
     expect(raw).toBe(
-      '{"agent":"dust","attempt_id":"attempt-1","cache_read_tokens":"2","cache_write_tokens":"0","component":"dust-front","conversation_id":"conversation-1","event_type":"token","input_tokens":"12","model":"gemini-2.5-flash","output_tokens":"5","provider_operation_id":"vertex-operation-1","quantity":"0","tenant_id":"tenant-A","ts":"2026-09-23T09:00:00.000Z","workspace_id":"workspace-A"}'
+      '{"agent":"dust","attempt_id":"attempt-1","cache_read_tokens":"2","cache_write_tokens":"0","component":"dust-front","conversation_id":"conversation-1","event_type":"token","input_tokens":"12","model":"gemini-2.5-flash","output_tokens":"5","provider_operation_id":"vertex-operation-1","quantity":"0","tenant_id":"tenant-a","ts":"2026-09-23T09:00:00.000Z","workspace_id":"workspace-A"}'
     );
     expect(JSON.parse(raw)).toMatchObject({
-      tenant_id: "tenant-A",
+      tenant_id: "tenant-a",
       component: "dust-front",
       attempt_id: "attempt-1",
       input_tokens: "12",
@@ -109,7 +119,11 @@ describe("Front Dust usage journal", () => {
     );
     await expect(startFrontUsageAttempt(attempt)).resolves.toBe("duplicate");
     await expect(
-      startFrontUsageAttempt({ ...attempt, tenantId: "tenant-B" })
+      startFrontUsageAttempt({
+        ...attempt,
+        tenantId: "tenant-b",
+        routeId: "tenant-b:7",
+      })
     ).rejects.toThrow("Conflicting");
   });
 

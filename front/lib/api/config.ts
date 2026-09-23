@@ -40,6 +40,12 @@ export function getDefaultInit(): Promise<RequestInit> | null {
 }
 
 const config = {
+  isDustUsageJournalIntegrationTestEnabled: (): boolean =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_USAGE_JOURNAL_INTEGRATION"
+    ) === "1",
+  getFrontDatabaseUriForTest: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("FRONT_DATABASE_URI"),
   getCoreWorkspaceAssertionSecret: (): string | undefined =>
     EnvironmentConfig.getOptionalEnvVariable(
       "DUST_CORE_WORKSPACE_ASSERTION_SECRET"

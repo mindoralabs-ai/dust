@@ -14,7 +14,7 @@ export async function sendFrontUsageHeartbeat(
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   const health = await readFrontUsageHealth(route.tenantId);
-  const observedAt = Date.now() / 1000;
+  const observedAtSeconds = Date.now() / 1000;
   const key = (await readFile(route.frontCredentialRef, "utf8")).trim();
   if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
     throw new Error("Dust Front usage heartbeat unavailable");
@@ -26,10 +26,10 @@ export async function sendFrontUsageHeartbeat(
       headers: { "Content-Type": "application/json", "X-Internal-Auth": key },
       body: JSON.stringify({
         tenant_id: route.tenantId,
-        observed_at: observedAt,
-        journal_checked_at: health.checkedAt,
-        reconciler_heartbeat_at: observedAt,
-        oldest_delivery_at: health.oldestDeliveryAt,
+        observed_at: observedAtSeconds,
+        journal_checked_at: health.checkedAtSeconds,
+        reconciler_heartbeat_at: observedAtSeconds,
+        oldest_delivery_at: health.oldestDeliveryAtSeconds,
         journal_healthy: true,
         unresolved_count: health.unresolvedCount,
       }),

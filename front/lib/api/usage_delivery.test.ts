@@ -152,4 +152,41 @@ describe("Dust Front usage delivery", () => {
       expect.objectContaining({ delivered: true })
     );
   });
+
+  it("never delivers more than eight claimed events concurrently", async () => {
+    const claims = Array.from({ length: 20 }, (_, index) => {
+      const attemptId = `attempt-${index}`;
+      const eventEnvelope = envelope.replace("attempt-1", attemptId);
+      return {
+        ...exact,
+        attemptId,
+        eventEnvelope,
+        eventHash: createHash("sha256").update(eventEnvelope).digest("hex"),
+      };
+    });
+    vi.mocked(claimFrontUsageWork).mockResolvedValue(claims);
+    let active = 0;
+    let maximum = 0;
+    fetchImpl.mockImplementation(async (_url, init) => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active--;
+      return new Response(
+        JSON.stringify({
+          stream_id: "123-0",
+          envelope_sha256: createHash("sha256")
+            .update(String(init.body))
+            .digest("hex"),
+          replayed: false,
+        }),
+        { status: 200 }
+      );
+    });
+    await expect(runFrontUsageDeliveryBatch(resolver, fetchImpl)).resolves.toBe(
+      20
+    );
+    expect(maximum).toBeLessThanOrEqual(8);
+    expect(maximum).toBeGreaterThan(1);
+  });
 });

@@ -25,8 +25,8 @@ describe("Dust Front journal heartbeat", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     health.mockResolvedValue({
-      checkedAt: Date.now() / 1000,
-      oldestDeliveryAt: 0,
+      checkedAtSeconds: Date.now() / 1000,
+      oldestDeliveryAtSeconds: 0,
       unresolvedCount: 0,
     });
     key.mockResolvedValue("a".repeat(40));

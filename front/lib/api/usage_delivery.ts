@@ -36,10 +36,30 @@ export async function runFrontUsageDeliveryBatch(
   fetchImpl: typeof fetch = fetch
 ): Promise<number> {
   const claims = await claimFrontUsageWork(`front_${randomUUID()}`, 20);
-  const results = await Promise.allSettled(
-    claims.map((claim) => deliverFrontUsageClaim(claim, resolver, fetchImpl))
-  );
-  if (results.some((result) => result.status === "rejected")) {
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (next < claims.length) {
+      const claim = claims[next++];
+      try {
+        await deliverFrontUsageClaim(claim, resolver, fetchImpl);
+      } catch {
+        failed = true;
+      }
+    }
+  };
+  // A fixed worker pool bounds both HTTP and journal-settlement concurrency.
+  await Promise.all([
+    worker(),
+    worker(),
+    worker(),
+    worker(),
+    worker(),
+    worker(),
+    worker(),
+    worker(),
+  ]);
+  if (failed) {
     throw new Error("Dust usage reconciliation unavailable");
   }
   return claims.length;

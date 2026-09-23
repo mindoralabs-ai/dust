@@ -25,8 +25,8 @@ CREATE TABLE "dust_usage_attempts" (
   "leaseUntil" TIMESTAMP WITH TIME ZONE,
   "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
   "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-  CHECK (("eventEnvelope" IS NULL AND "eventHash" IS NULL) OR
-         ("state" = 'exact' AND "eventEnvelope" IS NOT NULL AND "eventHash" IS NOT NULL)),
+  CHECK (("state" = 'exact' AND "eventEnvelope" IS NOT NULL AND "eventHash" IS NOT NULL) OR
+         ("state" <> 'exact' AND "eventEnvelope" IS NULL AND "eventHash" IS NULL)),
   CHECK ("deliveredAt" IS NULL OR "state" = 'exact'),
   CHECK ("state" <> 'no_charge' OR
          ("noChargeEvidenceRef" IS NOT NULL AND "noChargeEvidenceHash" IS NOT NULL))
@@ -34,7 +34,9 @@ CREATE TABLE "dust_usage_attempts" (
 
 CREATE INDEX "dust_usage_attempts_reconcile_idx" ON "dust_usage_attempts"
   ("nextRetryAt", "leaseUntil")
-  WHERE "state" IN ('started', 'unknown', 'exact', 'manual_review_required')
+  WHERE "state" IN ('started', 'unknown', 'exact')
     AND "deliveredAt" IS NULL;
+CREATE UNIQUE INDEX "dust_usage_attempts_provider_operation_unique_idx"
+  ON "dust_usage_attempts" ("providerOperationId");
 CREATE INDEX "dust_usage_attempts_tenant_state_idx" ON "dust_usage_attempts"
   ("tenantId", "state", "createdAt");

@@ -1,9 +1,11 @@
 /** Server-side Dust quota admission. The caller must select the tenant route and
  * front component key from a verified, server-controlled workspace mapping. */
+import { z } from "zod";
 
 const ADMISSION_PATH = "/internal/usage/dust/admission";
 const DEFAULT_TIMEOUT_MS = 2_000;
 const MAX_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 4096;
 const OPERATION_ID = /^(?!unknown$)[A-Za-z0-9_-]{1,128}$/;
 
 function isPrivateHost(hostname: string): boolean {
@@ -52,77 +54,81 @@ type AdmissionOptions = {
   timeoutMs?: number;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactlyKeys(
-  value: Record<string, unknown>,
-  keys: string[]
-): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => key in value);
-}
-
-function isPeriod(value: unknown): boolean {
-  return (
-    value === null ||
-    (typeof value === "string" &&
-      /(?:Z|[+-]\d\d:\d\d)$/.test(value) &&
-      !Number.isNaN(Date.parse(value)))
+const periodSchema = z
+  .string()
+  .refine(
+    (value) =>
+      /(?:Z|[+-]\d\d:\d\d)$/.test(value) && !Number.isNaN(Date.parse(value))
   );
-}
+const tokenSchema = z
+  .object({
+    used: z.number().int().nonnegative().safe(),
+    limit: z.number().int().nonnegative().safe().nullable(),
+    allowed: z.boolean(),
+  })
+  .strict();
+const decisionSchema = z
+  .object({
+    enforcement_enabled: z.literal(true),
+    allowed: z.boolean(),
+    period_start: periodSchema,
+    period_end: periodSchema,
+    dimensions: z.object({ tokens: tokenSchema }).strict(),
+    denied_dimensions: z.array(z.literal("tokens")).max(1),
+    code: z.union([z.literal("quota_exceeded"), z.null()]),
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    const tokens = decision.dimensions.tokens;
+    const coherent =
+      Date.parse(decision.period_start) < Date.parse(decision.period_end) &&
+      tokens.allowed ===
+        (tokens.limit === null || tokens.used < tokens.limit) &&
+      tokens.allowed === decision.allowed &&
+      (decision.allowed
+        ? decision.denied_dimensions.length === 0 && decision.code === null
+        : decision.denied_dimensions.length === 1 &&
+          decision.code === "quota_exceeded");
+    if (!coherent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Invalid quota decision",
+      });
+    }
+  });
 
 function decisionFromResponse(value: unknown): "allowed" | "denied" | null {
-  if (
-    !isRecord(value) ||
-    !hasExactlyKeys(value, [
-      "enforcement_enabled",
-      "allowed",
-      "period_start",
-      "period_end",
-      "dimensions",
-      "denied_dimensions",
-      "code",
-    ]) ||
-    value.enforcement_enabled !== true ||
-    typeof value.allowed !== "boolean" ||
-    !isPeriod(value.period_start) ||
-    !isPeriod(value.period_end) ||
-    !isRecord(value.dimensions) ||
-    !hasExactlyKeys(value.dimensions, ["tokens"]) ||
-    !isRecord(value.dimensions.tokens) ||
-    !hasExactlyKeys(value.dimensions.tokens, ["used", "limit", "allowed"])
-  ) {
-    return null;
-  }
-
-  const tokens = value.dimensions.tokens;
-  if (
-    !Number.isSafeInteger(tokens.used) ||
-    (tokens.used as number) < 0 ||
-    (tokens.limit !== null &&
-      (!Number.isSafeInteger(tokens.limit) || (tokens.limit as number) < 0)) ||
-    typeof tokens.allowed !== "boolean" ||
-    tokens.allowed !==
-      (tokens.limit === null ||
-        (tokens.used as number) < (tokens.limit as number)) ||
-    tokens.allowed !== value.allowed ||
-    !Array.isArray(value.denied_dimensions)
-  ) {
-    return null;
-  }
-
-  if (value.allowed) {
-    return value.denied_dimensions.length === 0 && value.code === null
+  const decision = decisionSchema.safeParse(value);
+  return decision.success
+    ? decision.data.allowed
       ? "allowed"
-      : null;
-  }
-  return value.denied_dimensions.length === 1 &&
-    value.denied_dimensions[0] === "tokens" &&
-    value.code === "quota_exceeded"
-    ? "denied"
+      : "denied"
     : null;
+}
+
+async function readBoundedResponse(response: Response): Promise<unknown> {
+  if (!response.body) {
+    throw new DustAdmissionUnavailableError();
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      size += value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        throw new DustAdmissionUnavailableError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
 /** Resolve admission once per provider attempt, immediately before provider I/O.
@@ -187,7 +193,7 @@ export async function requireDustAdmission({
 
   let body: unknown;
   try {
-    body = await response.json();
+    body = await readBoundedResponse(response);
   } catch {
     throw new DustAdmissionUnavailableError();
   }

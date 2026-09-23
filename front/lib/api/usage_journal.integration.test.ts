@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import config from "@app/lib/api/config";
 import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
@@ -17,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 // Run only against a disposable local database. The table is intentionally left
 // in place so a container/database restart can verify recovery independently.
-const enabled = process.env.DUST_USAGE_JOURNAL_INTEGRATION === "1";
+const enabled = config.isDustUsageJournalIntegrationTestEnabled();
 
 describe.runIf(enabled)(
   "Front Dust usage journal PostgreSQL durability",
@@ -25,7 +26,7 @@ describe.runIf(enabled)(
     let observer: Client;
 
     beforeAll(async () => {
-      const uri = process.env.FRONT_DATABASE_URI;
+      const uri = config.getFrontDatabaseUriForTest();
       if (!uri) {
         throw new Error("A disposable journal test database URI is required");
       }
@@ -62,7 +63,7 @@ describe.runIf(enabled)(
         workspaceId: "workspace-test-a",
         conversationId: "conversation-test-a",
         model: "gemini-2.5-flash",
-        routeId: "route-test-a",
+        routeId: "tenant-test-a:7",
       };
       expect(await startFrontUsageAttempt(attempt)).toBe("created");
       const persisted = await observer.query(
@@ -72,7 +73,11 @@ describe.runIf(enabled)(
       expect(persisted.rows[0].state).toBe("started");
       expect(await startFrontUsageAttempt(attempt)).toBe("duplicate");
       await expect(
-        startFrontUsageAttempt({ ...attempt, tenantId: "tenant-test-b" })
+        startFrontUsageAttempt({
+          ...attempt,
+          tenantId: "tenant-test-b",
+          routeId: "tenant-test-b:7",
+        })
       ).rejects.toThrow("Conflicting");
 
       await markFrontUsageUnknown(attempt.attemptId, "vertex-operation-test");
@@ -123,7 +128,7 @@ describe.runIf(enabled)(
         workspaceId: "workspace-test-b",
         conversationId: "conversation-test-b",
         model: "gemini-2.5-flash",
-        routeId: "route-test-b",
+        routeId: "tenant-test-b:7",
       });
       await markFrontUsageUnknown(attemptId, "vertex-unresolved-test");
       const persisted = await observer.query(
@@ -137,6 +142,30 @@ describe.runIf(enabled)(
       expect(persisted.rows[0].firstUnresolvedAt).not.toBeNull();
     });
 
+    it("rejects duplicate provider operations and exact rows without frozen bytes", async () => {
+      const base = {
+        tenantId: "tenant-test-a",
+        workspaceId: "workspace-test-a",
+        conversationId: "conversation-test-a",
+        model: "gemini-2.5-flash",
+        routeId: "tenant-test-a:7",
+      };
+      const first = { ...base, attemptId: newFrontUsageAttemptId() };
+      const second = { ...base, attemptId: newFrontUsageAttemptId() };
+      await startFrontUsageAttempt(first);
+      await startFrontUsageAttempt(second);
+      await markFrontUsageUnknown(first.attemptId, "same-provider-operation");
+      await expect(
+        markFrontUsageUnknown(second.attemptId, "same-provider-operation")
+      ).rejects.toThrow();
+      await expect(
+        observer.query(
+          'UPDATE "dust_usage_attempts" SET "state" = $1 WHERE "attemptId" = $2',
+          ["exact", second.attemptId]
+        )
+      ).rejects.toThrow();
+    });
+
     it("reports tenant-local unresolved work and undelivered exact usage to CRM", async () => {
       const tenantId = "tenant-test-health";
       const base = {
@@ -144,7 +173,7 @@ describe.runIf(enabled)(
         workspaceId: "workspace-test-health",
         conversationId: "conversation-test-health",
         model: "gemini-3.7-flash",
-        routeId: "route-test-health",
+        routeId: "tenant-test-health:7",
       };
       const unresolved = { ...base, attemptId: newFrontUsageAttemptId() };
       const exact = { ...base, attemptId: newFrontUsageAttemptId() };
@@ -162,9 +191,9 @@ describe.runIf(enabled)(
       });
       const pending = await readFrontUsageHealth(tenantId);
       expect(pending.unresolvedCount).toBe(1);
-      expect(pending.oldestDeliveryAt).toBeGreaterThan(0);
-      expect(pending.checkedAt).toBeGreaterThanOrEqual(
-        pending.oldestDeliveryAt
+      expect(pending.oldestDeliveryAtSeconds).toBeGreaterThan(0);
+      expect(pending.checkedAtSeconds).toBeGreaterThanOrEqual(
+        pending.oldestDeliveryAtSeconds
       );
 
       await settleFrontUsageNoCharge(
@@ -182,7 +211,9 @@ describe.runIf(enabled)(
         leaseNonce: work?.leaseNonce ?? "",
         delivered: true,
       });
-      expect((await readFrontUsageHealth(tenantId)).oldestDeliveryAt).toBe(0);
+      expect(
+        (await readFrontUsageHealth(tenantId)).oldestDeliveryAtSeconds
+      ).toBe(0);
     });
   }
 );

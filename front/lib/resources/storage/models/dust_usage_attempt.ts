@@ -92,10 +92,15 @@ DustUsageAttemptModel.init(
     timestamps: false,
     indexes: [
       {
+        name: "dust_usage_attempts_provider_operation_unique_idx",
+        unique: true,
+        fields: ["providerOperationId"],
+      },
+      {
         name: "dust_usage_attempts_reconcile_idx",
         fields: ["nextRetryAt", "leaseUntil"],
         where: {
-          state: ["started", "unknown", "exact", "manual_review_required"],
+          state: ["started", "unknown", "exact"],
           deliveredAt: null,
         },
       },
