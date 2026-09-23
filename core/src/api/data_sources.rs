@@ -440,7 +440,12 @@ pub async fn data_sources_search(
                 None,
             ),
             Some(ds) => {
-                let workspace = if ds.embedder_config().provider_id == ProviderID::VertexAI {
+                let workspace = if ds.embedder_config().provider_id == ProviderID::VertexAI
+                    && payload
+                        .query
+                        .as_ref()
+                        .is_some_and(|query| !query.is_empty())
+                {
                     match workspace_assertion::verify(
                         headers
                             .get(workspace_assertion::HEADER)

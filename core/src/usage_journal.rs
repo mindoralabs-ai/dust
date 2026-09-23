@@ -62,6 +62,17 @@ pub struct EmbeddingUsage {
     pub input_tokens: u32,
 }
 
+#[derive(Debug)]
+pub struct PaidEmbeddingRecoveryRequired;
+
+impl std::fmt::Display for PaidEmbeddingRecoveryRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "paid embedding result requires manual recovery")
+    }
+}
+
+impl std::error::Error for PaidEmbeddingRecoveryRequired {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimedWork {
     pub attempt_id: String,
@@ -468,12 +479,13 @@ impl CoreUsageJournal {
             return Ok(None);
         };
         if created_at_ms < now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS {
-            bail!("paid embedding result expired; manual recovery required");
+            return Err(PaidEmbeddingRecoveryRequired.into());
         }
-        let json = json.ok_or_else(|| anyhow!("paid embedding result requires manual recovery"))?;
-        let vector: Vec<f64> = serde_json::from_str(&json)?;
+        let json = json.ok_or(PaidEmbeddingRecoveryRequired)?;
+        let vector: Vec<f64> =
+            serde_json::from_str(&json).map_err(|_| PaidEmbeddingRecoveryRequired)?;
         if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
-            bail!("invalid retained embedding result");
+            return Err(PaidEmbeddingRecoveryRequired.into());
         }
         Ok(Some(vector))
     }

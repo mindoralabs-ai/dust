@@ -13,11 +13,13 @@ use crate::tenant_route::{
     CoreTenantRoute, CoreTenantRouteResolver, HttpBundleFetcher, PinnedVerifier,
 };
 use crate::usage_delivery::CoreUsageDeliveryClient;
-use crate::usage_journal::{CoreUsageAttempt, CoreUsageJournal, EmbeddingUsage, StartOutcome};
+use crate::usage_journal::{
+    CoreUsageAttempt, CoreUsageJournal, EmbeddingUsage, PaidEmbeddingRecoveryRequired, StartOutcome,
+};
 use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::{stream, stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
@@ -412,6 +414,44 @@ fn finish_embedding_batch(
             })
         })
         .collect()
+}
+
+/// Stop pulling new inputs after an ambiguous paid effect, while allowing
+/// already-started attempts to finish their own journal settlement.
+async fn collect_guarded_embeddings<F, Fut>(
+    inputs: Vec<String>,
+    execute: F,
+) -> Vec<Result<Vec<f64>>>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Vec<f64>>>,
+{
+    let mut source = inputs.into_iter().enumerate().map(|(index, input)| {
+        let future = execute(input);
+        async move { (index, future.await) }
+    });
+    let mut active = FuturesUnordered::new();
+    for _ in 0..MAX_CONCURRENT_REQUESTS {
+        if let Some(future) = source.next() {
+            active.push(future);
+        }
+    }
+    let mut completed = Vec::new();
+    let mut ambiguous = false;
+    while let Some((index, result)) = active.next().await {
+        ambiguous |= result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.downcast_ref::<AmbiguousVertexEffect>().is_some());
+        completed.push((index, result));
+        if !ambiguous {
+            if let Some(future) = source.next() {
+                active.push(future);
+            }
+        }
+    }
+    completed.sort_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, result)| result).collect()
 }
 
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
@@ -813,7 +853,7 @@ impl Embedder for VertexAIEmbedder {
         } else {
             None
         };
-        let results = stream::iter(owned_inputs.into_iter().map(|input| {
+        let results = collect_guarded_embeddings(owned_inputs, |input| {
             let token_source = self.token_source.clone();
             let endpoint = endpoint.clone();
             let client = self.client.clone();
@@ -830,7 +870,18 @@ impl Embedder for VertexAIEmbedder {
                     )
                 });
                 if let Some(hash) = input_hash {
-                    if let Some(vector) = runtime.journal.cached_embedding(&hash)? {
+                    if let Some(vector) =
+                        runtime.journal.cached_embedding(&hash).map_err(|error| {
+                            if error
+                                .downcast_ref::<PaidEmbeddingRecoveryRequired>()
+                                .is_some()
+                            {
+                                anyhow!(AmbiguousVertexEffect)
+                            } else {
+                                error
+                            }
+                        })?
+                    {
                         return Ok(vector);
                     }
                 }
@@ -880,9 +931,7 @@ impl Embedder for VertexAIEmbedder {
                 .await
                 .map(|response| response.vector)
             }
-        }))
-        .buffered(MAX_CONCURRENT_REQUESTS)
-        .collect::<Vec<_>>()
+        })
         .await;
         let unique_vectors = finish_embedding_batch(results, &self.id)?;
         Ok(positions
@@ -950,6 +999,34 @@ mod tests {
         ];
         let error = finish_embedding_batch(results, MODEL_ID).expect_err("ambiguous batch");
         assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_some());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_batch_drains_active_attempts_without_scheduling_more() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let settled = Arc::new(AtomicUsize::new(0));
+        let results =
+            collect_guarded_embeddings((0..12).map(|index| index.to_string()).collect(), |input| {
+                let started = started.clone();
+                let settled = settled.clone();
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    if input == "0" {
+                        return Err(AmbiguousVertexEffect.into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    settled.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![0.0; DIMENSIONS])
+                }
+            })
+            .await;
+        assert_eq!(started.load(Ordering::SeqCst), MAX_CONCURRENT_REQUESTS);
+        assert_eq!(settled.load(Ordering::SeqCst), MAX_CONCURRENT_REQUESTS - 1);
+        assert_eq!(results.len(), MAX_CONCURRENT_REQUESTS);
+        assert!(finish_embedding_batch(results, MODEL_ID)
+            .expect_err("ambiguous batch")
+            .downcast_ref::<AmbiguousVertexEffect>()
+            .is_some());
     }
 
     struct FakeTokenSource(Result<String, &'static str>);
