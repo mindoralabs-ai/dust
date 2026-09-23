@@ -298,11 +298,20 @@ impl CoreUsageJournal {
         match existing.1.as_str() {
             "exact"
                 if existing.2.as_deref() == Some(provider_operation_id)
-                    && existing.3.as_deref() == Some(envelope.as_str()) => {}
+                    && existing.3.as_deref() == Some(envelope.as_str()) =>
+            {
+                tx.execute(
+                    "UPDATE dust_usage_attempts SET manual_review_required = 0,
+                     next_retry_at_ms = ?2, updated_at_ms = ?2
+                     WHERE attempt_id = ?1 AND manual_review_required = 1",
+                    params![attempt.attempt_id, now_ms()],
+                )?;
+            }
             "started" | "unknown" | "manual_review_required" => {
                 tx.execute(
                     "UPDATE dust_usage_attempts SET state = 'exact', provider_operation_id = ?2,
-                     event_envelope = ?3, next_retry_at_ms = ?4, updated_at_ms = ?4
+                     event_envelope = ?3, next_retry_at_ms = ?4,
+                     manual_review_required = 0, updated_at_ms = ?4
                      WHERE attempt_id = ?1",
                     params![
                         attempt.attempt_id,
@@ -756,6 +765,20 @@ mod tests {
             .claim_due("another-worker", 1)
             .expect("test operation failed")
             .is_empty());
+        journal
+            .settle_exact(
+                &attempt,
+                "manual-provider-operation",
+                EmbeddingUsage { input_tokens: 2 },
+            )
+            .expect("test exact evidence failed");
+        assert_eq!(
+            journal
+                .claim_due("evidence-worker", 1)
+                .expect("test claim failed")
+                .len(),
+            1
+        );
     }
 
     #[test]

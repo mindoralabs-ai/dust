@@ -142,7 +142,7 @@ pub struct CoreUsageDeliveryRoute {
 struct SeenRevision {
     revision: u64,
     payload_digest: [u8; 32],
-    tenant_identity: HashMap<String, (String, String)>,
+    tenant_identity: HashMap<String, String>,
 }
 
 pub struct CoreTenantRouteResolver<F> {
@@ -368,16 +368,18 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                     })
             });
         let digest: [u8; 32] = Sha256::digest(canonical_ascii(&stable_payload)?.as_bytes()).into();
-        let tenant_identity: HashMap<String, (String, String)> = payload
+        let tenant_identity: HashMap<String, String> = payload
             .tenants
             .iter()
-            .map(|tenant| {
-                (
-                    tenant.tenant_id.clone(),
-                    (tenant.workspace_id.clone(), tenant.private_route.clone()),
-                )
+            .map(|tenant| -> Result<(String, String)> {
+                let mut value = serde_json::to_value(tenant)?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("invalid Dust tenant identity"))?
+                    .remove("active");
+                Ok((tenant.tenant_id.clone(), canonical_ascii(&value)?))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         {
             let mut seen = self
                 .seen
@@ -1109,6 +1111,17 @@ mod tests {
             Value::String("https://10.1.1.3/internal/usage/events".into());
         assert!(resolver
             .resolve_delivery_bundle(&signed(redirected, &key), &claim, now)
+            .is_err());
+        let mut raised_tenant_revision = payload(now, 8);
+        raised_tenant_revision["tenants"][0]["revision"] = Value::from(8);
+        assert!(resolver
+            .resolve_delivery_bundle(&signed(raised_tenant_revision, &key), &claim, now)
+            .is_err());
+        let mut changed_organization = payload(now, 8);
+        changed_organization["tenants"][0]["workos_organization_id"] =
+            Value::String("org_other".into());
+        assert!(resolver
+            .resolve_delivery_bundle(&signed(changed_organization, &key), &claim, now)
             .is_err());
     }
 }

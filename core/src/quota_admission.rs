@@ -127,7 +127,7 @@ async fn require_with<T: Transport>(
     let key = read_key(Path::new(&route.core_credential_ref))?;
     // Reject whitespace and header-injection characters, including a pasted
     // trailing newline. The mounted secret must be the exact CRM key.
-    if key.is_empty()
+    if key.len() < 32
         || key.len() > 4096
         || key.chars().any(|c| c.is_whitespace() || c.is_control())
     {
@@ -154,7 +154,6 @@ fn validate_route(
         || !identity(&attempt.attempt_id)
         || attempt.tenant_id != route.tenant_id
         || attempt.workspace_id != route.workspace_id
-        || route.revision == 0
         || attempt.route_id != format!("{}:{}", route.tenant_id, route.revision)
         || route.key_id.is_empty()
         || route.journal_target != format!("tenant:{}:dust-usage", route.tenant_id)
@@ -405,7 +404,7 @@ mod tests {
                     path,
                     Path::new("/var/run/secrets/dust/tenants/alpha/dust-core-usage-key")
                 );
-                Ok("core-alpha-key".into())
+                Ok("a".repeat(32))
             },
         )
         .await
@@ -418,7 +417,7 @@ mod tests {
                 .as_slice(),
             &[(
                 "https://crm.alpha.internal/internal/usage/dust/admission".into(),
-                "core-alpha-key".into(),
+                "a".repeat(32),
                 "attempt1".into()
             )]
         );
@@ -448,6 +447,17 @@ mod tests {
                 &attempt(),
                 StartOutcome::Created,
                 |_| Ok("bad\nkey".into())
+            )
+            .await,
+            Err(AdmissionError::Unavailable)
+        );
+        assert_eq!(
+            require_with(
+                &transport,
+                &route(),
+                &attempt(),
+                StartOutcome::Created,
+                |_| Ok("short-key".into())
             )
             .await,
             Err(AdmissionError::Unavailable)
@@ -485,7 +495,7 @@ mod tests {
                     path,
                     Path::new("/var/run/secrets/dust/tenants/beta/dust-core-usage-key")
                 );
-                Ok("core-beta-key".into())
+                Ok("b".repeat(32))
             },
         )
         .await
@@ -498,7 +508,7 @@ mod tests {
                 .as_slice(),
             &[(
                 "https://crm.beta.internal/internal/usage/dust/admission".into(),
-                "core-beta-key".into(),
+                "b".repeat(32),
                 "attempt2".into()
             )]
         );
