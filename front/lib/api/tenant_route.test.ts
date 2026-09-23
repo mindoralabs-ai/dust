@@ -202,7 +202,15 @@ describe("DustTenantRouteResolver", () => {
       "public route",
       () =>
         bundle({
-          tenants: [{ ...tenant, private_route: "https://example.com" }],
+          tenants: [
+            {
+              ...tenant,
+              private_route: "https://example.com",
+              admission_url:
+                "https://example.com/internal/usage/dust/admission",
+              usage_ingest_url: "https://example.com/internal/usage/events",
+            },
+          ],
         }),
     ],
     [
@@ -327,6 +335,50 @@ describe("DustTenantRouteResolver", () => {
     await resolver.refresh();
     now = 1060;
     expect(resolver.resolve(identity).revision).toBe(7);
+  });
+
+  it("accepts a shared user in two tenants and ignores bundle record order", async () => {
+    const secondOrigin = "https://crm-b.internal";
+    const secondTenant = {
+      ...tenant,
+      tenant_id: "beta",
+      workspace_id: "workspace-b",
+      workos_organization_id: "org-b",
+      private_route: secondOrigin,
+      journal_target: "tenant:beta:dust-usage",
+      front_credential_ref:
+        "/var/run/secrets/dust/tenants/beta/dust-front-usage-key",
+      core_credential_ref:
+        "/var/run/secrets/dust/tenants/beta/dust-core-usage-key",
+      admission_url: `${secondOrigin}/internal/usage/dust/admission`,
+      usage_ingest_url: `${secondOrigin}/internal/usage/events`,
+    };
+    const secondMember = {
+      ...member,
+      tenant_id: "beta",
+      employee_id: "employee-b",
+    };
+    responseBody = bundle({
+      tenants: [tenant, secondTenant],
+      memberships: [member, secondMember],
+    });
+    await resolver.start();
+    expect(
+      resolver.resolve({
+        ...identity,
+        workspaceId: "workspace-b",
+        workosOrganizationId: "org-b",
+      }).tenantId
+    ).toBe("beta");
+    now = 1045;
+    responseBody = bundle({
+      issued_at: 1045,
+      expires_at: 1105,
+      tenants: [secondTenant, tenant],
+      memberships: [secondMember, member],
+    });
+    await resolver.refresh();
+    expect(resolver.resolve(identity).tenantId).toBe("alpha");
   });
 
   it.each([

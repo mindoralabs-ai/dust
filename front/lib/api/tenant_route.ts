@@ -1,19 +1,20 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { z } from "zod";
 
 const DOMAIN = Buffer.from("mindora.dust.mapping-bundle.v1\0", "ascii");
 const TENANT_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const MAX_BUNDLE_BYTES = 1024 * 1024;
 const REFRESH_MARGIN_SECONDS = 15;
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function keysAre(value: Record<string, unknown>, expected: string[]): boolean {
-  return Object.keys(value).sort().join("\0") === expected.sort().join("\0");
+  return (
+    Object.keys(value).sort().join("\0") === [...expected].sort().join("\0")
+  );
 }
 
 function nonempty(value: unknown): value is string {
@@ -26,11 +27,11 @@ function integer(value: unknown): value is number {
 
 // Python's json.dumps(sort_keys=True, separators=(',', ':'), ensure_ascii=True)
 // for the bounded bundle schema. All payload numbers are safe integers.
-function canonical(value: Json): string {
+function canonical(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonical).join(",")}]`;
   }
-  if (value !== null && typeof value === "object") {
+  if (record(value)) {
     return `{${Object.keys(value)
       .sort()
       .map((key) => `${canonical(key)}:${canonical(value[key])}`)
@@ -42,7 +43,11 @@ function canonical(value: Json): string {
       (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`
     );
   }
-  return JSON.stringify(value);
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) {
+    throw new TenantRouteUnavailable();
+  }
+  return encoded;
 }
 
 function exactBase64(value: unknown, bytes: number): Buffer | null {
@@ -92,38 +97,46 @@ function privateOrigin(value: unknown): value is string {
   }
 }
 
-interface TenantEntry {
-  tenant_id: string;
-  workspace_id: string;
-  workos_organization_id: string;
-  private_route: string;
-  journal_target: string;
-  revision: number;
-  front_credential_ref: string;
-  core_credential_ref: string;
-  active: boolean;
-  admission_url: string;
-  usage_ingest_url: string;
-}
-
-interface MembershipEntry {
-  tenant_id: string;
-  employee_id: string;
-  authority_namespace: string;
-  dust_user_id: string;
-  workos_user_id: string;
-  active: boolean;
-  revision: number;
-}
-
-interface Payload {
-  schema_version: 2;
-  revision: number;
-  issued_at: number;
-  expires_at: number;
-  tenants: TenantEntry[];
-  memberships: MembershipEntry[];
-}
+const boundedString = z.string().min(1).max(256);
+const revisionSchema = z.number().int().nonnegative().safe();
+const tenantSchema = z
+  .object({
+    tenant_id: z.string().regex(TENANT_ID),
+    workspace_id: boundedString,
+    workos_organization_id: boundedString,
+    private_route: z.string().refine(privateOrigin),
+    journal_target: z.string(),
+    revision: revisionSchema,
+    front_credential_ref: z.string(),
+    core_credential_ref: z.string(),
+    active: z.boolean(),
+    admission_url: z.string(),
+    usage_ingest_url: z.string(),
+  })
+  .strict();
+const membershipSchema = z
+  .object({
+    tenant_id: z.string().regex(TENANT_ID),
+    employee_id: boundedString,
+    authority_namespace: z.literal("control-ui"),
+    dust_user_id: boundedString,
+    workos_user_id: boundedString,
+    active: z.boolean(),
+    revision: revisionSchema,
+  })
+  .strict();
+const payloadSchema = z
+  .object({
+    schema_version: z.literal(2),
+    revision: revisionSchema,
+    issued_at: revisionSchema,
+    expires_at: revisionSchema,
+    tenants: z.array(tenantSchema).min(1).max(1000),
+    memberships: z.array(membershipSchema).min(1).max(1000),
+  })
+  .strict();
+type Payload = z.infer<typeof payloadSchema>;
+type TenantEntry = z.infer<typeof tenantSchema>;
 
 export interface PinnedVerifier {
   keyId: string;
@@ -170,30 +183,16 @@ function parsePayload(
   now: number,
   minimumRevision: number
 ): Payload {
+  const parsed = payloadSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new TenantRouteUnavailable();
+  }
+  const payload = parsed.data;
   if (
-    !record(value) ||
-    !keysAre(value, [
-      "schema_version",
-      "revision",
-      "issued_at",
-      "expires_at",
-      "tenants",
-      "memberships",
-    ]) ||
-    value.schema_version !== 2 ||
-    !integer(value.revision) ||
-    value.revision < minimumRevision ||
-    !integer(value.issued_at) ||
-    !integer(value.expires_at) ||
-    value.expires_at !== value.issued_at + 60 ||
-    value.issued_at > now ||
-    now >= value.expires_at ||
-    !Array.isArray(value.tenants) ||
-    !Array.isArray(value.memberships) ||
-    value.tenants.length < 1 ||
-    value.memberships.length < 1 ||
-    value.tenants.length > 1000 ||
-    value.memberships.length > 1000
+    payload.revision < minimumRevision ||
+    payload.expires_at !== payload.issued_at + 60 ||
+    payload.issued_at > now ||
+    now >= payload.expires_at
   ) {
     throw new TenantRouteUnavailable();
   }
@@ -201,30 +200,9 @@ function parsePayload(
   const workspaceIds = new Set<string>();
   const organizations = new Set<string>();
   const routes = new Set<string>();
-  for (const entry of value.tenants) {
+  for (const entry of payload.tenants) {
     if (
-      !record(entry) ||
-      !keysAre(entry, [
-        "tenant_id",
-        "workspace_id",
-        "workos_organization_id",
-        "private_route",
-        "journal_target",
-        "revision",
-        "front_credential_ref",
-        "core_credential_ref",
-        "active",
-        "admission_url",
-        "usage_ingest_url",
-      ]) ||
-      typeof entry.tenant_id !== "string" ||
-      !TENANT_ID.test(entry.tenant_id) ||
-      !nonempty(entry.workspace_id) ||
-      !nonempty(entry.workos_organization_id) ||
-      !privateOrigin(entry.private_route) ||
-      !integer(entry.revision) ||
-      entry.revision > value.revision ||
-      typeof entry.active !== "boolean" ||
+      entry.revision > payload.revision ||
       entry.journal_target !== `tenant:${entry.tenant_id}:dust-usage` ||
       entry.front_credential_ref !==
         `/var/run/secrets/dust/tenants/${entry.tenant_id}/dust-front-usage-key` ||
@@ -252,43 +230,26 @@ function parsePayload(
   const workosUsers = new Set<string>();
   const activeTenants = new Set<string>();
   const representedTenants = new Set<string>();
-  for (const member of value.memberships) {
+  for (const member of payload.memberships) {
     if (
-      !record(member) ||
-      !keysAre(member, [
-        "tenant_id",
-        "employee_id",
-        "authority_namespace",
-        "dust_user_id",
-        "workos_user_id",
-        "active",
-        "revision",
-      ]) ||
-      typeof member.tenant_id !== "string" ||
       !tenantIds.has(member.tenant_id) ||
-      !nonempty(member.employee_id) ||
-      member.authority_namespace !== "control-ui" ||
-      !nonempty(member.dust_user_id) ||
-      !nonempty(member.workos_user_id) ||
-      typeof member.active !== "boolean" ||
-      !integer(member.revision) ||
-      member.revision > value.revision ||
+      member.revision > payload.revision ||
       memberIds.has(`${member.tenant_id}\0${member.employee_id}`) ||
-      dustUsers.has(member.dust_user_id) ||
-      workosUsers.has(member.workos_user_id)
+      dustUsers.has(`${member.tenant_id}\0${member.dust_user_id}`) ||
+      workosUsers.has(`${member.tenant_id}\0${member.workos_user_id}`)
     ) {
       throw new TenantRouteUnavailable();
     }
     memberIds.add(`${member.tenant_id}\0${member.employee_id}`);
-    dustUsers.add(member.dust_user_id);
-    workosUsers.add(member.workos_user_id);
+    dustUsers.add(`${member.tenant_id}\0${member.dust_user_id}`);
+    workosUsers.add(`${member.tenant_id}\0${member.workos_user_id}`);
     representedTenants.add(member.tenant_id);
     if (member.active) {
       activeTenants.add(member.tenant_id);
     }
   }
   if (
-    value.tenants.some(
+    payload.tenants.some(
       (entry) =>
         !representedTenants.has(entry.tenant_id) ||
         entry.active !== activeTenants.has(entry.tenant_id)
@@ -296,7 +257,7 @@ function parsePayload(
   ) {
     throw new TenantRouteUnavailable();
   }
-  return value as unknown as Payload;
+  return payload;
 }
 
 function buildVerifier(verifier: PinnedVerifier) {
@@ -472,7 +433,7 @@ export class DustTenantRouteResolver {
               canonical({
                 key_id: bundle.key_id,
                 payload: bundle.payload,
-              } as Json),
+              }),
               "ascii"
             ),
           ]),
@@ -498,18 +459,21 @@ export class DustTenantRouteResolver {
       const bindingFingerprint = createHash("sha256")
         .update(
           canonical({
-            tenants: payload.tenants,
-            memberships: payload.memberships,
-          } as unknown as Json)
+            tenants: [...payload.tenants].sort((a, b) =>
+              a.tenant_id.localeCompare(b.tenant_id)
+            ),
+            memberships: [...payload.memberships].sort(
+              (a, b) =>
+                a.tenant_id.localeCompare(b.tenant_id) ||
+                a.employee_id.localeCompare(b.employee_id)
+            ),
+          })
         )
         .digest("hex");
       const tenantIdentities = new Map(
         payload.tenants.map((entry) => {
           const { active: _active, ...immutableFields } = entry;
-          return [
-            entry.tenant_id,
-            canonical(immutableFields as unknown as Json),
-          ];
+          return [entry.tenant_id, canonical(immutableFields)];
         })
       );
       if (
@@ -620,10 +584,13 @@ export class DustTenantRouteResolver {
     ) {
       throw new TenantRouteUnavailable();
     }
+    const activeByWorkspace = new Map(
+      current.payload.tenants
+        .filter((entry) => entry.active)
+        .map((entry) => [entry.workspace_id, entry])
+    );
     return Array.from(workspaceIds, (workspaceId) => {
-      const tenant = current.payload.tenants.find(
-        (entry) => entry.active && entry.workspace_id === workspaceId
-      );
+      const tenant = activeByWorkspace.get(workspaceId);
       if (!tenant) {
         throw new TenantRouteUnavailable();
       }

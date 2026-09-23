@@ -72,7 +72,7 @@ mod tests {
     use jsonwebtoken::{encode, EncodingKey, Header};
 
     fn token(secret: &str, audience: &str, exp: usize, pairs: Vec<DataSourcePair>) -> String {
-        encode(
+        match encode(
             &Header::new(Algorithm::HS256),
             &Claims {
                 aud: audience.into(),
@@ -82,8 +82,10 @@ mod tests {
                 data_sources: pairs,
             },
             &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .unwrap()
+        ) {
+            Ok(token) => token,
+            Err(error) => panic!("test token encoding failed: {error}"),
+        }
     }
 
     #[test]

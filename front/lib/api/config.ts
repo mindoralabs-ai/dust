@@ -40,6 +40,10 @@ export function getDefaultInit(): Promise<RequestInit> | null {
 }
 
 const config = {
+  getCoreWorkspaceAssertionSecret: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_CORE_WORKSPACE_ASSERTION_SECRET"
+    ),
   getPreStopDrainDurationMs: (): number => {
     const value = EnvironmentConfig.getOptionalEnvVariable(
       "PRESTOP_DRAIN_DURATION_SECONDS"

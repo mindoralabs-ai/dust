@@ -1,46 +1,57 @@
 import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
-import type { Authenticator } from "@app/lib/auth";
-import { DataSourceResource } from "@app/lib/resources/data_source_resource";
+import { Authenticator } from "@app/lib/auth";
+import { DataSourceViewFactory } from "@app/tests/utils/DataSourceViewFactory";
+import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
+import { WorkspaceFactory } from "@app/tests/utils/WorkspaceFactory";
 import jwt from "jsonwebtoken";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@app/lib/resources/data_source_resource", () => ({
-  DataSourceResource: { fetchByDustAPIDataSourceIds: vi.fn() },
-}));
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const secret = "a-long-enough-test-secret-for-workspace-assertions";
-const auth = {
-  getNonNullableWorkspace: () => ({ id: 7, sId: "w-test" }),
-} as unknown as Authenticator;
 
 describe("Core workspace assertion", () => {
-  beforeEach(() => {
+  let auth: Authenticator;
+  let sourceA: string;
+  let sourceB: string;
+  let otherTenantSource: string;
+  let workspaceSId: string;
+
+  beforeEach(async () => {
     process.env.DUST_CORE_WORKSPACE_ASSERTION_SECRET = secret;
-    vi.mocked(DataSourceResource.fetchByDustAPIDataSourceIds).mockResolvedValue(
-      [
-        {
-          workspaceId: 7,
-          dustAPIProjectId: "11",
-          dustAPIDataSourceId: "source-a",
-        },
-        {
-          workspaceId: 7,
-          dustAPIProjectId: "12",
-          dustAPIDataSourceId: "source-b",
-        },
-      ] as never
-    );
+    const workspace = await WorkspaceFactory.basic();
+    workspaceSId = workspace.sId;
+    auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+    const space = await SpaceFactory.global(workspace);
+    sourceA = (
+      await DataSourceViewFactory.folder(workspace, space, undefined, {
+        dustAPIProjectId: "11",
+      })
+    ).dataSource.dustAPIDataSourceId;
+    sourceB = (
+      await DataSourceViewFactory.folder(workspace, space, undefined, {
+        dustAPIProjectId: "12",
+      })
+    ).dataSource.dustAPIDataSourceId;
+
+    const otherWorkspace = await WorkspaceFactory.basic();
+    const otherSpace = await SpaceFactory.global(otherWorkspace);
+    otherTenantSource = (
+      await DataSourceViewFactory.folder(
+        otherWorkspace,
+        otherSpace,
+        undefined,
+        { dustAPIProjectId: "13" }
+      )
+    ).dataSource.dustAPIDataSourceId;
   });
 
   afterEach(() => {
     delete process.env.DUST_CORE_WORKSPACE_ASSERTION_SECRET;
-    vi.clearAllMocks();
   });
 
   it("signs only authenticated exact Core pairs", async () => {
     const token = await createCoreWorkspaceAssertion(auth, [
-      { projectId: "11", dataSourceId: "source-a" },
-      { projectId: "12", dataSourceId: "source-b" },
+      { projectId: "11", dataSourceId: sourceA },
+      { projectId: "12", dataSourceId: sourceB },
     ]);
     expect(
       jwt.verify(token!, secret, {
@@ -48,10 +59,10 @@ describe("Core workspace assertion", () => {
         algorithms: ["HS256"],
       })
     ).toMatchObject({
-      workspace_sid: "w-test",
+      workspace_sid: workspaceSId,
       data_sources: [
-        { project_id: 11, data_source_id: "source-a" },
-        { project_id: 12, data_source_id: "source-b" },
+        { project_id: 11, data_source_id: sourceA },
+        { project_id: 12, data_source_id: sourceB },
       ],
     });
   });
@@ -59,24 +70,24 @@ describe("Core workspace assertion", () => {
   it("rejects a different project paired with an authorized data source", async () => {
     await expect(
       createCoreWorkspaceAssertion(auth, [
-        { projectId: "12", dataSourceId: "source-a" },
+        { projectId: "12", dataSourceId: sourceA },
       ])
     ).rejects.toThrow("not bound");
   });
 
-  it("rejects a partial unauthorized bulk request", async () => {
+  it("rejects a partial unauthorized bulk request from another workspace", async () => {
     await expect(
       createCoreWorkspaceAssertion(auth, [
-        { projectId: "11", dataSourceId: "source-a" },
-        { projectId: "13", dataSourceId: "other-tenant-source" },
+        { projectId: "11", dataSourceId: sourceA },
+        { projectId: "13", dataSourceId: otherTenantSource },
       ])
     ).rejects.toThrow("not bound");
   });
 
   it("signs a repeated authorized Core pair once", async () => {
     const token = await createCoreWorkspaceAssertion(auth, [
-      { projectId: "11", dataSourceId: "source-a" },
-      { projectId: "11", dataSourceId: "source-a" },
+      { projectId: "11", dataSourceId: sourceA },
+      { projectId: "11", dataSourceId: sourceA },
     ]);
     expect(
       jwt.verify(token!, secret, {
@@ -84,7 +95,7 @@ describe("Core workspace assertion", () => {
         algorithms: ["HS256"],
       })
     ).toMatchObject({
-      data_sources: [{ project_id: 11, data_source_id: "source-a" }],
+      data_sources: [{ project_id: 11, data_source_id: sourceA }],
     });
   });
 });

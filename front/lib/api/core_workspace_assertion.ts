@@ -1,3 +1,4 @@
+import config from "@app/lib/api/config";
 import type { Authenticator } from "@app/lib/auth";
 import { DataSourceResource } from "@app/lib/resources/data_source_resource";
 import jwt from "jsonwebtoken";
@@ -9,7 +10,7 @@ export async function createCoreWorkspaceAssertion(
   auth: Authenticator,
   pairs: CoreDataSourcePair[]
 ): Promise<string | undefined> {
-  const secret = process.env.DUST_CORE_WORKSPACE_ASSERTION_SECRET;
+  const secret = config.getCoreWorkspaceAssertionSecret();
   if (!secret) {
     // Existing providers do not require this header. Core rejects Vertex without it.
     return undefined;
