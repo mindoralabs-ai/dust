@@ -2,6 +2,8 @@ use std::fmt;
 
 use crate::cached_request::CachedRequest;
 use crate::providers::provider::{provider, with_retryable_back_off, ProviderID};
+use crate::providers::vertex_ai::AmbiguousVertexEffect;
+use crate::quota_admission::AdmissionError;
 use crate::run::Credentials;
 use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
@@ -193,6 +195,13 @@ impl EmbedderRequest {
                     "Success querying"
                 );
                 Ok(c)
+            }
+            Err(e)
+                if self.provider_id == ProviderID::VertexAI
+                    && (e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied)
+                        || e.downcast_ref::<AmbiguousVertexEffect>().is_some()) =>
+            {
+                Err(e)
             }
             Err(e) => Err(anyhow!(
                 "Error querying `{}:{}`: error={}",

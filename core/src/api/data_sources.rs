@@ -16,6 +16,7 @@ use crate::{
     data_sources::data_source::{Chunk, DataSource, Document},
     providers::embedder::EmbedderRequest,
     providers::provider::ProviderID,
+    providers::vertex_ai::AmbiguousVertexEffect,
     quota_admission::AdmissionError,
     workspace_assertion::{self, DataSourcePair, VerifiedWorkspace},
 };
@@ -506,6 +507,14 @@ pub async fn data_sources_search(
                             Some(e),
                         )
                     }
+                    Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ambiguous_provider_effect",
+                            "Vertex provider effect requires accounting review",
+                            Some(e),
+                        )
+                    }
                     Err(e) => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_server_error",
@@ -774,6 +783,14 @@ pub async fn data_sources_search_bulk(
                     StatusCode::TOO_MANY_REQUESTS,
                     "quota_exceeded",
                     "Dust token quota exceeded",
+                    Some(e),
+                );
+            }
+            Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ambiguous_provider_effect",
+                    "Vertex provider effect requires accounting review",
                     Some(e),
                 );
             }
@@ -1207,6 +1224,14 @@ pub async fn data_sources_documents_upsert(
                             StatusCode::TOO_MANY_REQUESTS,
                             "quota_exceeded",
                             "Dust token quota exceeded",
+                            Some(e),
+                        )
+                    }
+                    Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ambiguous_provider_effect",
+                            "Vertex provider effect requires accounting review",
                             Some(e),
                         )
                     }

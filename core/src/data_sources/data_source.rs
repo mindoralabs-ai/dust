@@ -1042,6 +1042,14 @@ impl DataSource {
 
             let v = match r.execute(credentials.clone()).await {
                 Ok(v) => v,
+                Err(e)
+                    if e.downcast_ref::<crate::quota_admission::AdmissionError>()
+                        == Some(&crate::quota_admission::AdmissionError::Denied)
+                        || e.downcast_ref::<crate::providers::vertex_ai::AmbiguousVertexEffect>()
+                            .is_some() =>
+                {
+                    return Err(e);
+                }
                 Err(e) => Err(anyhow!("DataSource chunk embedding error: {}", e))?,
             };
 

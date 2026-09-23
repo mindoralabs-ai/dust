@@ -291,28 +291,56 @@ impl CoreUsageJournal {
     /// A dispatched request with absent or invalid provider usage is unknown,
     /// never a synthetic zero-token charge or a no-charge conclusion.
     pub fn mark_unknown(&self, attempt_id: &str) -> Result<()> {
+        self.mark_unknown_with_operation(attempt_id, None)
+    }
+
+    /// Retain a provider response ID when an ambiguous result supplies one.
+    pub fn mark_unknown_with_operation(
+        &self,
+        attempt_id: &str,
+        provider_operation_id: Option<&str>,
+    ) -> Result<()> {
         validate_identity(attempt_id)?;
+        if let Some(operation_id) = provider_operation_id {
+            validate_reference(operation_id)?;
+        }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state: String = tx
+        let (state, existing_operation): (String, Option<String>) = tx
             .query_row(
-                "SELECT state FROM dust_usage_attempts WHERE attempt_id = ?1",
+                "SELECT state, provider_operation_id FROM dust_usage_attempts WHERE attempt_id = ?1",
                 [attempt_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| anyhow!("Core usage attempt was not durably started"))?;
+        if provider_operation_id.is_some()
+            && existing_operation
+                .as_deref()
+                .is_some_and(|id| Some(id) != provider_operation_id)
+        {
+            bail!("conflicting Core provider operation identity");
+        }
         match state.as_str() {
             "started" => {
                 let now = now_ms();
                 tx.execute(
                     "UPDATE dust_usage_attempts SET state = 'unknown',
+                     provider_operation_id = COALESCE(provider_operation_id, ?3),
                      first_unresolved_at_ms = COALESCE(first_unresolved_at_ms, ?2),
                      next_retry_at_ms = ?2, updated_at_ms = ?2 WHERE attempt_id = ?1",
-                    params![attempt_id, now],
+                    params![attempt_id, now, provider_operation_id],
                 )?;
             }
-            "unknown" | "manual_review_required" => {}
+            "unknown" | "manual_review_required" => {
+                if provider_operation_id.is_some() && existing_operation.is_none() {
+                    tx.execute(
+                        "UPDATE dust_usage_attempts SET provider_operation_id = ?2,
+                         updated_at_ms = ?3 WHERE attempt_id = ?1",
+                        params![attempt_id, provider_operation_id, now_ms()],
+                    )?;
+                }
+            }
             _ => bail!("conflicting Core usage terminal replay"),
         }
         tx.commit()?;

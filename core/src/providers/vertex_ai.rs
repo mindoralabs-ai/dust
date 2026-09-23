@@ -42,6 +42,17 @@ struct AdcTokenSource;
 #[derive(Debug)]
 struct PreDispatchTokenError;
 
+#[derive(Debug)]
+pub struct AmbiguousVertexEffect;
+
+impl std::fmt::Display for AmbiguousVertexEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vertex provider effect requires accounting review")
+    }
+}
+
+impl std::error::Error for AmbiguousVertexEffect {}
+
 impl std::fmt::Display for PreDispatchTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Vertex ADC unavailable before dispatch")
@@ -292,16 +303,18 @@ async fn run_core_heartbeat_loop() {
         let result = async {
             let runtime = core_vertex_runtime()?;
             let client = CoreUsageDeliveryClient::new()?;
-            let routes = runtime
-                .resolver
-                .resolve_maintenance(&runtime.workspaces)
-                .await?;
-            let outcomes = futures::future::join_all(
-                routes
-                    .iter()
-                    .map(|route| client.send_heartbeat(&runtime.journal, route)),
-            )
-            .await;
+            let outcomes =
+                futures::future::join_all(runtime.workspaces.iter().map(|workspace| async {
+                    let routes = runtime
+                        .resolver
+                        .resolve_maintenance(std::slice::from_ref(workspace))
+                        .await?;
+                    for route in routes {
+                        client.send_heartbeat(&runtime.journal, &route).await?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                }))
+                .await;
             if outcomes.iter().any(Result::is_err) {
                 return Err(anyhow!("Dust Core usage heartbeat unavailable"));
             }
@@ -312,6 +325,17 @@ async fn run_core_heartbeat_loop() {
             tracing::warn!("Dust Core usage heartbeat unavailable");
         }
     }
+}
+
+fn same_signed_route(a: &CoreTenantRoute, b: &CoreTenantRoute) -> bool {
+    a.tenant_id == b.tenant_id
+        && a.workspace_id == b.workspace_id
+        && a.private_route == b.private_route
+        && a.admission_url == b.admission_url
+        && a.usage_ingest_url == b.usage_ingest_url
+        && a.core_credential_ref == b.core_credential_ref
+        && a.journal_target == b.journal_target
+        && a.revision == b.revision
 }
 
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
@@ -332,7 +356,7 @@ where
     P: FnOnce() -> PFut,
     PFut: Future<Output = Result<VertexEmbeddingResponse>>,
 {
-    if model != MODEL_ID || route.revision == 0 {
+    if model != MODEL_ID {
         return Err(anyhow!("Vertex embedding route unavailable"));
     }
     let attempt = CoreUsageAttempt {
@@ -364,12 +388,15 @@ where
             )?;
             return Err(anyhow!("Vertex ADC unavailable before dispatch"));
         }
-        Err(_) => {
-            journal.mark_unknown(&attempt.attempt_id)?;
+        Err(error) => {
+            let operation_id = error
+                .downcast_ref::<ModelError>()
+                .and_then(|provider_error| provider_error.request_id.as_deref());
+            journal.mark_unknown_with_operation(&attempt.attempt_id, operation_id)?;
             // Vertex embedContent has no idempotency key. Retrying this
             // ambiguous effect through EmbedderRequest would create a second
             // charged attempt, so do not forward ModelError's retry flag.
-            return Err(anyhow!("Vertex embedding provider result unavailable"));
+            return Err(AmbiguousVertexEffect.into());
         }
     };
     let usage = response
@@ -644,6 +671,9 @@ impl Embedder for VertexAIEmbedder {
             .unwrap_or(&endpoint)
             .to_string();
         let owned_inputs = text.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        if owned_inputs.iter().any(|input| input.trim().is_empty()) {
+            return Err(anyhow!("Vertex embedding input is empty"));
+        }
         let results = stream::iter(owned_inputs.into_iter().map(|input| {
             let token_source = self.token_source.clone();
             let endpoint = endpoint.clone();
@@ -662,7 +692,8 @@ impl Embedder for VertexAIEmbedder {
                             .await
                             .map_err(anyhow::Error::from)?;
                         let current = runtime.resolver.resolve(workspace).await?;
-                        if current != route {
+                        // Signing-key rotation does not change the signed tenant route.
+                        if !same_signed_route(&current, &route) {
                             return Err(anyhow!("Vertex embedding route changed before dispatch"));
                         }
                         Ok(())
@@ -844,6 +875,11 @@ mod tests {
             revision: 23,
             key_id: "pin-a".into(),
         };
+        let mut rotated_key = route.clone();
+        rotated_key.key_id = "pin-b".into();
+        assert!(same_signed_route(&route, &rotated_key));
+        rotated_key.workspace_id = "other-workspace".into();
+        assert!(!same_signed_route(&route, &rotated_key));
         let provider_calls = AtomicUsize::new(0);
         let denied = run_guarded_attempt(
             &journal,
@@ -952,7 +988,7 @@ mod tests {
                         factor: 2,
                         retries: 2,
                     }),
-                    request_id: None,
+                    request_id: Some("abc-123".into()),
                 }))
             },
         )
@@ -966,6 +1002,12 @@ mod tests {
             provider_calls.load(Ordering::SeqCst),
             provider_calls_before + 1
         );
+        let claims = journal
+            .claim_due("provider-id-inspector", 20)
+            .expect("test operation failed");
+        assert!(claims.iter().any(|claim| {
+            claim.state == "unknown" && claim.provider_operation_id.as_deref() == Some("abc-123")
+        }));
     }
 
     #[tokio::test]
