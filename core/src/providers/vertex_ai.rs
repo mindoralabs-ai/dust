@@ -381,7 +381,7 @@ where
         model: model.to_string(),
     };
     let started = journal.start(&attempt)?;
-    if started != StartOutcome::Created {
+    if !matches!(&started, StartOutcome::Created(_)) {
         return Err(anyhow!("Vertex embedding attempt was not new"));
     }
     if let Err(error) = admit(route.clone(), attempt.clone(), started).await {
@@ -422,7 +422,10 @@ where
         .and_then(Value::as_u64)
         .filter(|count| (1..=2_147_483_647).contains(count));
     if response.vector.len() != DIMENSIONS
-        || response.vector.iter().any(|value| !value.is_finite())
+        || response
+            .vector
+            .iter()
+            .any(|value| !value.is_finite() || !(*value as f32).is_finite())
         || usage.is_none()
     {
         if journal.mark_unknown(&attempt.attempt_id).is_err() {
@@ -454,6 +457,7 @@ impl VertexAIEmbedder {
             project: None,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static Vertex client configuration"),
             token_source: Arc::new(AdcTokenSource),
@@ -505,7 +509,11 @@ impl VertexAIEmbedder {
         }
         let vector = values
             .iter()
-            .map(|value| value.as_f64().filter(|v| v.is_finite()))
+            .map(|value| {
+                value
+                    .as_f64()
+                    .filter(|v| v.is_finite() && (*v as f32).is_finite())
+            })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| anyhow!("Vertex embedding response has invalid vector values"))?;
         let usage_metadata = response
@@ -864,7 +872,7 @@ mod tests {
         assert!(VertexAIEmbedder::parse_response(truncated).is_err());
         let without_false_field = json!({"embedding": {"values": vec![0.25; DIMENSIONS]}, "usageMetadata": {"promptTokenCount": 7}});
         assert!(VertexAIEmbedder::parse_response(without_false_field).is_ok());
-        for invalid_value in [json!("NaN"), json!(null)] {
+        for invalid_value in [json!("NaN"), json!(null), json!(1e300)] {
             let mut invalid = json!({"embedding": {"values": vec![0.25; DIMENSIONS]}, "usageMetadata": {"promptTokenCount": 7}});
             invalid["embedding"]["values"][0] = invalid_value;
             assert!(VertexAIEmbedder::parse_response(invalid).is_err());
@@ -938,7 +946,10 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             |_, _, started| async move {
-                assert_eq!(started, crate::usage_journal::StartOutcome::Created);
+                assert!(matches!(
+                    started,
+                    crate::usage_journal::StartOutcome::Created(_)
+                ));
                 Ok(())
             },
             || async {
@@ -1328,6 +1339,44 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "Vertex embedding transport error");
         server.await.expect("test operation failed");
+    }
+
+    #[tokio::test]
+    async fn production_client_does_not_follow_provider_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("test operation failed");
+            let mut buffer = [0u8; 4096];
+            let _ = socket
+                .read(&mut buffer)
+                .await
+                .expect("test operation failed");
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/embed\r\nContent-Length: 0\r\n\r\n"
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("test operation failed");
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        });
+        let embedder = VertexAIEmbedder::new(MODEL_ID.to_owned());
+        let error = VertexAIEmbedder::request_one(
+            &embedder.client,
+            &format!("http://{address}/embed"),
+            "test-token",
+            "sample",
+            EmbeddingTaskType::RetrievalQuery,
+        )
+        .await
+        .expect_err("redirect must remain an ambiguous response");
+        assert!(error.to_string().contains("307"));
+        assert!(server.await.expect("test operation failed"));
     }
 
     #[tokio::test]

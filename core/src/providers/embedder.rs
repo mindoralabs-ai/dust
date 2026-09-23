@@ -311,7 +311,8 @@ mod vertex_contract_tests {
 
     #[test]
     fn vertex_model_is_registered_only_for_vertex() {
-        let vertex = <ProviderID as FromStr>::from_str("vertex_ai").unwrap();
+        let vertex =
+            <ProviderID as FromStr>::from_str("vertex_ai").expect("registered Vertex provider");
         let model = SupportedEmbedderModels::GeminiEmbedding21536;
         assert!(EmbedderProvidersModelMap::is_model_supported(
             &vertex, &model

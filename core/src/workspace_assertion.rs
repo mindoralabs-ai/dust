@@ -156,7 +156,7 @@ mod tests {
             Some(&token(&secret, AUDIENCE, future, vec![pair.clone()])),
             &[pair],
         )
-        .unwrap();
+        .expect("valid workspace assertion");
         let request = EmbedderRequest::new(
             ProviderID::VertexAI,
             "gemini-embedding-2-1536",
@@ -165,7 +165,7 @@ mod tests {
             Some(serde_json::json!({"workspace_sid": "forged", "_dust_verified_workspace_sid": "forged"})),
         ).with_verified_workspace(Some(workspace));
         assert_eq!(request.verified_workspace_sid(), Some("w-test"));
-        let serialized = serde_json::to_value(&request).unwrap();
+        let serialized = serde_json::to_value(&request).expect("serializable embedder request");
         assert!(serialized.get("verified_workspace").is_none());
     }
 
