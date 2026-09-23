@@ -19,6 +19,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -368,6 +369,24 @@ fn embedding_input_hash(
         hasher.update(part.as_bytes());
     }
     *hasher.finalize().as_bytes()
+}
+
+fn coalesce_document_inputs(inputs: Vec<String>) -> (Vec<String>, Vec<usize>) {
+    let mut unique = Vec::new();
+    let mut indexes = HashMap::new();
+    let mut positions = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let index = if let Some(index) = indexes.get(&input) {
+            *index
+        } else {
+            let index = unique.len();
+            indexes.insert(input.clone(), index);
+            unique.push(input);
+            index
+        };
+        positions.push(index);
+    }
+    (unique, positions)
 }
 
 fn finish_embedding_batch(
@@ -770,6 +789,12 @@ impl Embedder for VertexAIEmbedder {
         if owned_inputs.iter().any(|input| input.trim().is_empty()) {
             return Err(anyhow!("Vertex embedding input is empty"));
         }
+        let (owned_inputs, positions) = if task_type == EmbeddingTaskType::RetrievalDocument {
+            coalesce_document_inputs(owned_inputs)
+        } else {
+            let positions = (0..owned_inputs.len()).collect();
+            (owned_inputs, positions)
+        };
         let upsert_key = if task_type == EmbeddingTaskType::RetrievalDocument {
             Some(
                 extras
@@ -845,7 +870,11 @@ impl Embedder for VertexAIEmbedder {
         .buffered(MAX_CONCURRENT_REQUESTS)
         .collect::<Vec<_>>()
         .await;
-        finish_embedding_batch(results, &self.id)
+        let unique_vectors = finish_embedding_batch(results, &self.id)?;
+        Ok(positions
+            .into_iter()
+            .map(|index| unique_vectors[index].clone())
+            .collect())
     }
 }
 
@@ -855,6 +884,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn repeated_document_chunks_share_one_dispatch_result() {
+        let (unique, positions) = coalesce_document_inputs(vec![
+            "first".into(),
+            "repeat".into(),
+            "repeat".into(),
+            "first".into(),
+        ]);
+        assert_eq!(unique, vec!["first", "repeat"]);
+        assert_eq!(positions, vec![0, 1, 1, 0]);
+    }
 
     #[test]
     fn embedding_reservation_key_is_scoped_to_document_version() {
