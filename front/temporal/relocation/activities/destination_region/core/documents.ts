@@ -1,5 +1,6 @@
 import config from "@app/lib/api/config";
 import { UNTITLED_TITLE } from "@app/lib/api/content_nodes";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { Authenticator } from "@app/lib/auth";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
@@ -91,6 +92,12 @@ export async function processDataSourceDocuments({
         lightDocumentOutput: true,
         title,
         mimeType: d.mime_type,
+        workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
+          {
+            projectId: destIds.dustAPIProjectId,
+            dataSourceId: destIds.dustAPIDataSourceId,
+          },
+        ]),
       });
     },
     { concurrency: CORE_API_CONCURRENCY_LIMIT }

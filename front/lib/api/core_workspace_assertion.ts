@@ -1,0 +1,69 @@
+import type { Authenticator } from "@app/lib/auth";
+import { DataSourceResource } from "@app/lib/resources/data_source_resource";
+import jwt from "jsonwebtoken";
+
+export type CoreDataSourcePair = { projectId: string; dataSourceId: string };
+
+/** Mint only after resolving every Core pair through the authenticated workspace's resources. */
+export async function createCoreWorkspaceAssertion(
+  auth: Authenticator,
+  pairs: CoreDataSourcePair[]
+): Promise<string | undefined> {
+  const secret = process.env.DUST_CORE_WORKSPACE_ASSERTION_SECRET;
+  if (!secret) {
+    // Existing providers do not require this header. Core rejects Vertex without it.
+    return undefined;
+  }
+  if (secret.length < 32 || pairs.length === 0 || pairs.length > 100) {
+    throw new Error(
+      "Invalid Core workspace assertion configuration or request"
+    );
+  }
+  const workspace = auth.getNonNullableWorkspace();
+  const resources = await DataSourceResource.fetchByDustAPIDataSourceIds(
+    auth,
+    pairs.map((p) => p.dataSourceId)
+  );
+  const allowed = new Set(
+    resources
+      .filter((resource) => resource.workspaceId === workspace.id)
+      .map(
+        (resource) =>
+          `${resource.dustAPIProjectId}:${resource.dustAPIDataSourceId}`
+      )
+  );
+  const requested = pairs.map((pair) => {
+    if (!/^[1-9][0-9]*$/.test(pair.projectId)) {
+      throw new Error("Invalid Core project id");
+    }
+    const projectId = Number(pair.projectId);
+    if (
+      !Number.isSafeInteger(projectId) ||
+      projectId <= 0 ||
+      !allowed.has(`${projectId}:${pair.dataSourceId}`)
+    ) {
+      throw new Error(
+        "Core data source is not bound to the authenticated workspace"
+      );
+    }
+    return { project_id: projectId, data_source_id: pair.dataSourceId };
+  });
+  // Multiple authorized views can refer to the same Core data source.
+  const uniqueRequested = Array.from(
+    new Map(
+      requested.map((pair) => [
+        `${pair.project_id}:${pair.data_source_id}`,
+        pair,
+      ])
+    ).values()
+  );
+  return jwt.sign(
+    { workspace_sid: workspace.sId, data_sources: uniqueRequested },
+    secret,
+    {
+      algorithm: "HS256",
+      audience: "dust-core-vertex-embedding",
+      expiresIn: "60s",
+    }
+  );
+}

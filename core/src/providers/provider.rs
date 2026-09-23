@@ -6,6 +6,7 @@ use crate::providers::llm::{TokenizerSingleton, LLM};
 use crate::providers::mistral::MistralProvider;
 use crate::providers::noop::NoopProvider;
 use crate::providers::openai::OpenAIProvider;
+use crate::providers::vertex_ai::VertexAIProvider;
 use crate::utils::ParseError;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -29,6 +30,9 @@ pub enum ProviderID {
     AzureOpenAI,
     Anthropic,
     Mistral,
+    #[serde(rename = "vertex_ai")]
+    #[clap(name = "vertex_ai")]
+    VertexAI,
     #[serde(rename = "google_ai_studio")]
     GoogleAiStudio,
     Deepseek,
@@ -44,6 +48,7 @@ impl fmt::Display for ProviderID {
             ProviderID::AzureOpenAI => write!(f, "azure_openai"),
             ProviderID::Anthropic => write!(f, "anthropic"),
             ProviderID::Mistral => write!(f, "mistral"),
+            ProviderID::VertexAI => write!(f, "vertex_ai"),
             ProviderID::GoogleAiStudio => write!(f, "google_ai_studio"),
             ProviderID::Deepseek => write!(f, "deepseek"),
             ProviderID::Fireworks => write!(f, "fireworks"),
@@ -61,6 +66,7 @@ impl FromStr for ProviderID {
             "azure_openai" => Ok(ProviderID::AzureOpenAI),
             "anthropic" => Ok(ProviderID::Anthropic),
             "mistral" => Ok(ProviderID::Mistral),
+            "vertex_ai" => Ok(ProviderID::VertexAI),
             "google_ai_studio" => Ok(ProviderID::GoogleAiStudio),
             "deepseek" => Ok(ProviderID::Deepseek),
             "fireworks" => Ok(ProviderID::Fireworks),
@@ -68,7 +74,7 @@ impl FromStr for ProviderID {
             "noop" => Ok(ProviderID::Noop),
             _ => Err(ParseError::with_message(
                 "Unknown provider ID \
-                 (possible values: openai, azure_openai, anthropic, mistral, google_ai_studio, deepseek, fireworks, xai, noop)",
+                 (possible values: openai, azure_openai, anthropic, mistral, vertex_ai, google_ai_studio, deepseek, fireworks, xai, noop)",
             ))?,
         }
     }
@@ -167,6 +173,7 @@ pub fn provider(t: ProviderID) -> Box<dyn Provider + Sync + Send> {
         ProviderID::AzureOpenAI => Box::new(AzureOpenAIProvider::new()),
         ProviderID::GoogleAiStudio => Box::new(GoogleAiStudioProvider::new()),
         ProviderID::Mistral => Box::new(MistralProvider::new()),
+        ProviderID::VertexAI => Box::new(VertexAIProvider::new()),
         ProviderID::OpenAI => Box::new(OpenAIProvider::new()),
         ProviderID::Deepseek => Box::new(DeepseekProvider::new()),
         ProviderID::Fireworks => Box::new(FireworksProvider::new()),

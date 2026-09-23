@@ -1,3 +1,4 @@
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { BaseEndpointConfiguration } from "@app/lib/model_constructors/configuration";
 import type { GoogleAiStudioInputConfig } from "@app/lib/model_constructors/providers/google_ai_studio/inputConfig";
 import { googleAiStudioConfigSchema } from "@app/lib/model_constructors/providers/google_ai_studio/inputConfig";
@@ -50,6 +51,7 @@ export abstract class GoogleAgentPlatformStream extends WithGoogleGenAIInputConv
   static readonly configSchema = googleAiStudioConfigSchema;
 
   private readonly client: GoogleGenAI;
+  private pocAttemptId: string | null = null;
 
   constructor({ AGENT_PLATFORM_PROJECT_ID }: Credentials) {
     super();
@@ -60,9 +62,31 @@ export abstract class GoogleAgentPlatformStream extends WithGoogleGenAIInputConv
     });
   }
 
+  /**
+   * @cc [label:security;backend] dust-poc-vertex-transport-permit
+   * In isolated POC mode, only the admitted LLM wrapper may arm one provider
+   * request. Direct probes and reused permits must fail before SDK I/O.
+   */
+  armPocAttempt(attemptId: string): void {
+    if (
+      !dustPocMode() ||
+      this.pocAttemptId !== null ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(attemptId)
+    ) {
+      throw new Error("Dust POC provider request unavailable");
+    }
+    this.pocAttemptId = attemptId;
+  }
+
   async *streamRaw(
     input: GenerateContentParameters
   ): AsyncGenerator<GenerateContentResponse> {
+    if (dustPocMode()) {
+      if (!this.pocAttemptId) {
+        throw new Error("Dust POC provider request unavailable");
+      }
+      this.pocAttemptId = null;
+    }
     yield* await this.client.models.generateContentStream(input);
   }
 

@@ -43,6 +43,12 @@ export const MAX_CHUNK_SIZE = 512;
 
 export const EMBEDDING_CONFIGS: Record<EmbeddingProviderIdType, EmbedderType> =
   {
+    vertex_ai: {
+      model_id: "gemini-embedding-2-1536",
+      provider_id: "vertex_ai",
+      splitter_id: "base_v0",
+      max_chunk_size: MAX_CHUNK_SIZE,
+    },
     openai: {
       model_id: "text-embedding-3-large-1536",
       provider_id: "openai",
@@ -288,6 +294,7 @@ interface CoreAPIUpsertDataSourceDocumentPayload {
   lightDocumentOutput?: boolean;
   title: string;
   mimeType: string;
+  workspaceAssertion?: string;
 }
 
 // Counter-part of `DatabasesTablesUpsertPayload` in `core/bin/core_api.rs`.
@@ -949,6 +956,7 @@ export class CoreAPI {
       fullText: boolean;
       credentials: { [key: string]: string };
       target_document_tokens?: number | null;
+      workspaceAssertion?: string;
     }
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
     const response = await this._fetchWithError(
@@ -959,6 +967,9 @@ export class CoreAPI {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(payload.workspaceAssertion
+            ? { "X-Dust-Workspace-Assertion": payload.workspaceAssertion }
+            : {}),
         },
         body: JSON.stringify({
           query: payload.query,
@@ -986,7 +997,10 @@ export class CoreAPI {
       filter?: CoreAPISearchFilter | null;
       view_filter: CoreAPISearchFilter;
     }[],
-    target_document_tokens?: number | null
+    target_document_tokens?: number | null,
+    assertionForPairs?: (
+      pairs: { projectId: string; dataSourceId: string }[]
+    ) => Promise<string | undefined>
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
     const searchResults = await concurrentExecutor(
       searches,
@@ -1002,6 +1016,7 @@ export class CoreAPI {
             fullText: fullText,
             credentials: credentials,
             target_document_tokens: target_document_tokens,
+            workspaceAssertion: await assertionForPairs?.([search]),
           }
         );
 
@@ -1039,7 +1054,10 @@ export class CoreAPI {
       filter?: CoreAPISearchFilter | null;
       view_filter: CoreAPISearchFilter;
     }[],
-    target_document_tokens?: number | null
+    target_document_tokens?: number | null,
+    assertionForPairs?: (
+      pairs: { projectId: string; dataSourceId: string }[]
+    ) => Promise<string | undefined>
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
     const dataSourceChunks = chunk(
       searches,
@@ -1049,12 +1067,16 @@ export class CoreAPI {
     const results = await concurrentExecutor(
       dataSourceChunks,
       async (chunk) => {
+        const workspaceAssertion = await assertionForPairs?.(chunk);
         const response = await this._fetchWithError(
           `${this._url}/data_sources/search/bulk`,
           {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              ...(workspaceAssertion
+                ? { "X-Dust-Workspace-Assertion": workspaceAssertion }
+                : {}),
             },
             body: JSON.stringify({
               query,
@@ -1297,6 +1319,7 @@ export class CoreAPI {
     lightDocumentOutput = false,
     title,
     mimeType,
+    workspaceAssertion,
   }: CoreAPIUpsertDataSourceDocumentPayload): Promise<
     CoreAPIResponse<{
       document:
@@ -1315,6 +1338,9 @@ export class CoreAPI {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(workspaceAssertion
+            ? { "X-Dust-Workspace-Assertion": workspaceAssertion }
+            : {}),
         },
         body: JSON.stringify({
           document_id: documentId,

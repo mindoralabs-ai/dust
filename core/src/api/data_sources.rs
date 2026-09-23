@@ -4,6 +4,7 @@ use axum::{
 };
 use futures::stream::{iter, StreamExt};
 use hyper::http::StatusCode;
+use hyper::HeaderMap;
 use regex::Regex;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -14,6 +15,8 @@ use crate::{
     api::api_state::APIState,
     data_sources::data_source::{Chunk, DataSource, Document},
     providers::embedder::EmbedderRequest,
+    providers::provider::ProviderID,
+    workspace_assertion::{self, DataSourcePair, VerifiedWorkspace},
 };
 use crate::{
     data_sources::{
@@ -412,6 +415,7 @@ pub struct DatasourceSearchPayload {
 pub async fn data_sources_search(
     Path((project_id, data_source_id)): Path<(i64, String)>,
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DatasourceSearchPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     let project = project::Project::new_from_id(project_id);
@@ -433,42 +437,72 @@ pub async fn data_sources_search(
                 &format!("No data source found for id `{}`", data_source_id),
                 None,
             ),
-            Some(ds) => match ds
-                .search(
-                    payload.credentials,
-                    state.store.clone(),
-                    state.qdrant_clients.clone(),
-                    &payload.query,
-                    payload.top_k,
-                    match payload.filter {
-                        Some(filter) => Some(filter.postprocess_for_data_source(&data_source_id)),
-                        None => None,
-                    },
-                    match payload.view_filter {
-                        Some(filter) => Some(filter.postprocess_for_data_source(&data_source_id)),
-                        None => None,
-                    },
-                    payload.full_text,
-                    payload.target_document_tokens,
-                )
-                .await
-            {
-                Ok(documents) => (
-                    StatusCode::OK,
-                    Json(APIResponse {
-                        error: None,
-                        response: Some(json!({
-                            "documents": documents,
-                        })),
-                    }),
-                ),
-                Err(e) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_server_error",
-                    "Failed to perform the search",
-                    Some(e),
-                ),
-            },
+            Some(ds) => {
+                let workspace = if ds.embedder_config().provider_id == ProviderID::VertexAI {
+                    match workspace_assertion::verify(
+                        headers
+                            .get(workspace_assertion::HEADER)
+                            .and_then(|h| h.to_str().ok()),
+                        &[DataSourcePair {
+                            project_id,
+                            data_source_id: data_source_id.clone(),
+                        }],
+                    ) {
+                        Some(w) => Some(w),
+                        None => {
+                            return error_response(
+                                StatusCode::FORBIDDEN,
+                                "invalid_workspace_assertion",
+                                "Vertex workspace assertion is required",
+                                None,
+                            )
+                        }
+                    }
+                } else {
+                    None
+                };
+                match ds
+                    .search(
+                        payload.credentials,
+                        workspace,
+                        state.store.clone(),
+                        state.qdrant_clients.clone(),
+                        &payload.query,
+                        payload.top_k,
+                        match payload.filter {
+                            Some(filter) => {
+                                Some(filter.postprocess_for_data_source(&data_source_id))
+                            }
+                            None => None,
+                        },
+                        match payload.view_filter {
+                            Some(filter) => {
+                                Some(filter.postprocess_for_data_source(&data_source_id))
+                            }
+                            None => None,
+                        },
+                        payload.full_text,
+                        payload.target_document_tokens,
+                    )
+                    .await
+                {
+                    Ok(documents) => (
+                        StatusCode::OK,
+                        Json(APIResponse {
+                            error: None,
+                            response: Some(json!({
+                                "documents": documents,
+                            })),
+                        }),
+                    ),
+                    Err(e) => error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_server_error",
+                        "Failed to perform the search",
+                        Some(e),
+                    ),
+                }
+            }
         },
     }
 }
@@ -507,6 +541,7 @@ const MAX_DATA_SOURCES_PER_REQUEST: usize = 100;
 
 pub async fn data_sources_search_bulk(
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DataSourcesSearchBulkPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     if payload.searches.len() > MAX_DATA_SOURCES_PER_REQUEST {
@@ -575,6 +610,40 @@ pub async fn data_sources_search_bulk(
         }
     }
 
+    // Check every requested pair before starting any concurrently grouped embedding.
+    let vertex_requested = groups
+        .values()
+        .flatten()
+        .any(|(_, ds)| ds.embedder_config().provider_id == ProviderID::VertexAI);
+    let workspace = if vertex_requested {
+        let pairs: Vec<_> = groups
+            .values()
+            .flatten()
+            .map(|(req, _)| DataSourcePair {
+                project_id: req.project_id,
+                data_source_id: req.data_source_id.clone(),
+            })
+            .collect();
+        match workspace_assertion::verify(
+            headers
+                .get(workspace_assertion::HEADER)
+                .and_then(|h| h.to_str().ok()),
+            &pairs,
+        ) {
+            Some(w) => Some(w),
+            None => {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "invalid_workspace_assertion",
+                    "Vertex workspace assertion is required",
+                    None,
+                )
+            }
+        }
+    } else {
+        None
+    };
+
     // Embed and search for each group concurrently.
     let group_futures: Vec<_> = groups
         .into_iter()
@@ -583,6 +652,7 @@ pub async fn data_sources_search_bulk(
             let query = payload.query.clone();
             let full_text = payload.full_text;
             let state = state.clone();
+            let workspace = workspace.clone();
 
             async move {
                 // Get embedder from first data source in group.
@@ -594,8 +664,10 @@ pub async fn data_sources_search_bulk(
                     embedder_config.provider_id,
                     &model_id,
                     vec![&query],
+                    crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
                     first_ds.config().extras.clone(),
-                );
+                )
+                .with_verified_workspace(workspace);
 
                 // If any embedding fails, return error for this group.
                 let query_vector = match embedder_request.execute(credentials).await {
@@ -996,6 +1068,7 @@ pub struct DataSourcesDocumentsUpsertPayload {
 pub async fn data_sources_documents_upsert(
     Path((project_id, data_source_id)): Path<(i64, String)>,
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DataSourcesDocumentsUpsertPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     let project = project::Project::new_from_id(project_id);
@@ -1062,9 +1135,37 @@ pub async fn data_sources_documents_upsert(
                 None,
             ),
             Some(ds) => {
+                let vertex_requested = ds.embedder_config().provider_id == ProviderID::VertexAI
+                    || ds
+                        .shadow_embedder_config()
+                        .is_some_and(|e| e.provider_id == ProviderID::VertexAI);
+                let workspace: Option<VerifiedWorkspace> = if vertex_requested {
+                    match workspace_assertion::verify(
+                        headers
+                            .get(workspace_assertion::HEADER)
+                            .and_then(|h| h.to_str().ok()),
+                        &[DataSourcePair {
+                            project_id,
+                            data_source_id: data_source_id.clone(),
+                        }],
+                    ) {
+                        Some(w) => Some(w),
+                        None => {
+                            return error_response(
+                                StatusCode::FORBIDDEN,
+                                "invalid_workspace_assertion",
+                                "Vertex workspace assertion is required",
+                                None,
+                            )
+                        }
+                    }
+                } else {
+                    None
+                };
                 match ds
                     .upsert(
                         payload.credentials,
+                        workspace,
                         state.store.clone(),
                         state.qdrant_clients.clone(),
                         &payload.document_id,

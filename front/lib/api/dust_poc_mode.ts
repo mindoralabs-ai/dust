@@ -1,0 +1,11 @@
+/** Fail closed on a mistyped isolated-instance mode flag. */
+export function dustPocMode(): boolean {
+  const mode = process.env.DUST_POC_MODE;
+  if (mode === undefined || mode === "0") {
+    return false;
+  }
+  if (mode !== "1") {
+    throw new Error("Dust POC mode configuration unavailable");
+  }
+  return true;
+}

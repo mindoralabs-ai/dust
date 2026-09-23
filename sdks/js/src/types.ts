@@ -145,7 +145,9 @@ export const PublicModelSelectionSchema = z.object({
 
 export type PublicModelSelection = z.infer<typeof PublicModelSelectionSchema>;
 
-const EmbeddingProviderIdSchema = FlexibleEnumSchema<"openai" | "mistral">();
+const EmbeddingProviderIdSchema = FlexibleEnumSchema<
+  "openai" | "mistral" | "vertex_ai"
+>();
 
 const ConnectorsAPIErrorTypeSchema = FlexibleEnumSchema<
   | "authorization_error"
