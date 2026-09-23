@@ -12,6 +12,7 @@ use crate::run::Credentials;
 use crate::tenant_route::{
     CoreTenantRoute, CoreTenantRouteResolver, HttpBundleFetcher, PinnedVerifier,
 };
+use crate::usage_delivery::CoreUsageDeliveryClient;
 use crate::usage_journal::{CoreUsageAttempt, CoreUsageJournal, EmbeddingUsage, StartOutcome};
 use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
@@ -223,6 +224,33 @@ fn core_vertex_runtime() -> Result<&'static CoreVertexRuntime> {
     runtime
         .as_ref()
         .map_err(|_| anyhow!("Core Vertex runtime configuration unavailable"))
+}
+
+/// @cc [label:security;backend] dust-core-reconciler-no-model-effect
+/// This loop may deliver durable accounting while provider I/O is disabled.
+/// A failed delivery never retries an embedding request.
+pub async fn run_core_usage_reconciler() {
+    if std::env::var("DUST_POC_MODE").as_deref() != Ok("1") {
+        return;
+    }
+    loop {
+        if let Ok(runtime) = core_vertex_runtime() {
+            if let Ok(client) = CoreUsageDeliveryClient::new() {
+                if client
+                    .process_due_batch(&runtime.journal, &runtime.resolver)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Dust Core usage reconciliation unavailable");
+                }
+            } else {
+                tracing::warn!("Dust Core usage reconciliation unavailable");
+            }
+        } else {
+            tracing::warn!("Dust Core usage reconciliation unavailable");
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
 }
 
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
