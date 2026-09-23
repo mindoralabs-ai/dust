@@ -102,8 +102,10 @@ impl CoreUsageDeliveryClient {
         resolver: &CoreTenantRouteResolver<F>,
     ) -> Result<usize, DeliveryError> {
         let owner = format!("core_{}", uuid::Uuid::new_v4());
+        // Each claim can spend up to 3s refreshing the route and 5s sending.
+        // Three sequential claims leave room for SQLite settlement within the 60s lease.
         let claims = journal
-            .claim_due(&owner, 20)
+            .claim_due(&owner, 3)
             .map_err(|_| DeliveryError::Unavailable)?;
         let mut failed = false;
         for claim in &claims {
@@ -209,9 +211,9 @@ async fn send_heartbeat_with<T: Transport>(
     let envelope = serde_json::json!({
         "tenant_id": route.tenant_id,
         "observed_at": observed_at,
-        "journal_checked_at": health.checked_at,
+        "journal_checked_at": health.checked_at_seconds,
         "reconciler_heartbeat_at": observed_at,
-        "oldest_delivery_at": health.oldest_delivery_at,
+        "oldest_delivery_at": health.oldest_delivery_at_seconds,
         "journal_healthy": true,
         "unresolved_count": health.unresolved_count,
     })
@@ -339,7 +341,7 @@ mod tests {
     #[async_trait]
     impl Transport for MockTransport {
         async fn send(&self, request: DeliveryRequest) -> Result<Value, DeliveryError> {
-            self.sent.lock().unwrap().push((
+            self.sent.lock().expect("test operation failed").push((
                 request.url.to_string(),
                 request.key,
                 request.envelope,
@@ -384,7 +386,10 @@ mod tests {
     #[tokio::test]
     async fn frozen_exact_event_uses_only_the_signed_tenant_route_and_valid_receipt() {
         let claim = claim();
-        let raw = claim.event_envelope.as_ref().unwrap();
+        let raw = claim
+            .event_envelope
+            .as_ref()
+            .expect("test operation failed");
         let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
         let transport = MockTransport {
             sent: Mutex::new(Vec::new()),
@@ -392,8 +397,8 @@ mod tests {
         };
         send_exact_with(&transport, &route(), &claim, |_| Ok("a".repeat(40)))
             .await
-            .unwrap();
-        let sent = transport.sent.lock().unwrap();
+            .expect("test operation failed");
+        let sent = transport.sent.lock().expect("test operation failed");
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "https://crm-a.internal/internal/usage/events");
         assert_eq!(sent[0].2, *raw);
@@ -413,19 +418,27 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(transport.sent.lock().unwrap().is_empty());
+        assert!(transport
+            .sent
+            .lock()
+            .expect("test operation failed")
+            .is_empty());
         assert!(
             send_exact_with(&transport, &route(), &claim, |_| Ok("a".repeat(40)))
                 .await
                 .is_err()
         );
-        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+        assert_eq!(
+            transport.sent.lock().expect("test operation failed").len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn heartbeat_uses_tenant_local_journal_and_core_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).unwrap();
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal =
+            CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("test operation failed");
         journal
             .start(&CoreUsageAttempt {
                 attempt_id: "attempt_health".into(),
@@ -436,7 +449,7 @@ mod tests {
                 route_id: "tenant-a:23".into(),
                 model: "gemini-embedding-2-1536".into(),
             })
-            .unwrap();
+            .expect("test operation failed");
         let route = CoreTenantRoute {
             tenant_id: "tenant-a".into(),
             workspace_id: "workspace-a".into(),
@@ -455,14 +468,14 @@ mod tests {
         };
         send_heartbeat_with(&transport, &journal, &route, |_| Ok("a".repeat(40)))
             .await
-            .unwrap();
-        let sent = transport.sent.lock().unwrap();
+            .expect("test operation failed");
+        let sent = transport.sent.lock().expect("test operation failed");
         assert_eq!(sent.len(), 1);
         assert_eq!(
             sent[0].0,
             "https://crm-a.internal/internal/usage/producers/dust-core/heartbeat"
         );
-        let evidence: Value = serde_json::from_str(&sent[0].2).unwrap();
+        let evidence: Value = serde_json::from_str(&sent[0].2).expect("test operation failed");
         assert_eq!(evidence["tenant_id"], "tenant-a");
         assert_eq!(evidence["unresolved_count"], 1);
         drop(sent);
@@ -475,6 +488,9 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+        assert_eq!(
+            transport.sent.lock().expect("test operation failed").len(),
+            1
+        );
     }
 }

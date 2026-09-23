@@ -67,8 +67,8 @@ pub struct CoreUsageJournal {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoreJournalHealth {
-    pub checked_at: f64,
-    pub oldest_delivery_at: f64,
+    pub checked_at_seconds: f64,
+    pub oldest_delivery_at_seconds: f64,
     pub unresolved_count: u64,
 }
 
@@ -116,8 +116,8 @@ impl CoreUsageJournal {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(CoreJournalHealth {
-            checked_at: now_ms() as f64 / 1000.0,
-            oldest_delivery_at: oldest.map(|v| v as f64 / 1000.0).unwrap_or(0.0),
+            checked_at_seconds: now_ms() as f64 / 1000.0,
+            oldest_delivery_at_seconds: oldest.map(|v| v as f64 / 1000.0).unwrap_or(0.0),
             unresolved_count: u64::try_from(unresolved)?,
         })
     }
@@ -332,7 +332,7 @@ impl CoreUsageJournal {
             "SELECT attempt_id FROM dust_usage_attempts
              WHERE delivered_at_ms IS NULL AND next_retry_at_ms <= ?1
                AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
-               AND state IN ('started', 'unknown', 'exact', 'manual_review_required')
+               AND state IN ('started', 'unknown', 'exact')
              ORDER BY created_at_ms, attempt_id LIMIT ?2",
         )?;
         let ids = stmt
@@ -528,14 +528,20 @@ mod tests {
 
     #[test]
     fn start_is_durable_and_duplicate_never_reauthorizes_io() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("test operation failed");
         let path = dir.path().join("core-usage.sqlite");
-        let j = CoreUsageJournal::open(&path).unwrap();
+        let j = CoreUsageJournal::open(&path).expect("test operation failed");
         let a = attempt("a1");
-        assert_eq!(j.start(&a).unwrap(), StartOutcome::Created);
+        assert_eq!(
+            j.start(&a).expect("test operation failed"),
+            StartOutcome::Created
+        );
         drop(j);
-        let j = CoreUsageJournal::open(&path).unwrap();
-        assert_eq!(j.start(&a).unwrap(), StartOutcome::Duplicate);
+        let j = CoreUsageJournal::open(&path).expect("test operation failed");
+        assert_eq!(
+            j.start(&a).expect("test operation failed"),
+            StartOutcome::Duplicate
+        );
         let mut conflict = a.clone();
         conflict.tenant_id = "tenant_B".into();
         assert!(j.start(&conflict).is_err());
@@ -546,30 +552,31 @@ mod tests {
 
     #[test]
     fn exact_envelope_is_frozen_and_claim_is_fenced() {
-        let dir = tempdir().unwrap();
-        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite")).unwrap();
+        let dir = tempdir().expect("test operation failed");
+        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
         let a = attempt("a1");
-        j.start(&a).unwrap();
+        j.start(&a).expect("test operation failed");
         let first = j
             .settle_exact(
                 &a,
                 "provider_receipt_1",
                 EmbeddingUsage { input_tokens: 23 },
             )
-            .unwrap();
+            .expect("test operation failed");
         let replay = j
             .settle_exact(
                 &a,
                 "provider_receipt_1",
                 EmbeddingUsage { input_tokens: 23 },
             )
-            .unwrap();
+            .expect("test operation failed");
         assert_eq!(first, replay);
         assert!(first.contains("\"tenant_id\":\"tenant_A\""));
-        let event: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let event: serde_json::Value = serde_json::from_str(&first).expect("test operation failed");
         let keys: Vec<&str> = event
             .as_object()
-            .unwrap()
+            .expect("test operation failed")
             .keys()
             .map(String::as_str)
             .collect();
@@ -601,101 +608,159 @@ mod tests {
             )
             .is_err());
         assert!(j.settle_no_charge("a1", "receipt/no-charge").is_err());
-        let claim = j.claim_due("worker_1", 10).unwrap().remove(0);
+        let claim = j
+            .claim_due("worker_1", 10)
+            .expect("test operation failed")
+            .remove(0);
         assert_eq!(claim.workspace_id, "workspace_A");
         assert_eq!(claim.event_envelope.as_deref(), Some(first.as_str()));
-        assert!(j.claim_due("worker_2", 10).unwrap().is_empty());
+        assert!(j
+            .claim_due("worker_2", 10)
+            .expect("test operation failed")
+            .is_empty());
         let mut stale = claim.clone();
         stale.lease_nonce = "wrong".into();
         assert!(j.complete_delivery(&stale).is_err());
-        j.complete_delivery(&claim).unwrap();
-        assert!(j.claim_due("worker_2", 10).unwrap().is_empty());
+        j.complete_delivery(&claim).expect("test operation failed");
+        assert!(j
+            .claim_due("worker_2", 10)
+            .expect("test operation failed")
+            .is_empty());
     }
 
     #[test]
     fn health_reports_unresolved_and_undelivered_work_per_tenant() {
-        let dir = tempdir().unwrap();
-        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite")).unwrap();
+        let dir = tempdir().expect("test operation failed");
+        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
         let a = attempt("a1");
         let b = attempt("a2");
-        j.start(&a).unwrap();
-        j.start(&b).unwrap();
+        j.start(&a).expect("test operation failed");
+        j.start(&b).expect("test operation failed");
         j.settle_exact(&b, "receipt_2", EmbeddingUsage { input_tokens: 2 })
-            .unwrap();
-        let health = j.read_health("tenant_A").unwrap();
+            .expect("test operation failed");
+        let health = j.read_health("tenant_A").expect("test operation failed");
         assert_eq!(health.unresolved_count, 1);
-        assert!(health.oldest_delivery_at > 0.0);
-        assert!(health.checked_at >= health.oldest_delivery_at);
-        assert_eq!(j.read_health("tenant_B").unwrap().unresolved_count, 0);
-        j.settle_no_charge("a1", "predispatch:test:a1").unwrap();
-        assert_eq!(j.read_health("tenant_A").unwrap().unresolved_count, 0);
-        let claim = j.claim_due("worker_health", 10).unwrap().remove(0);
-        j.complete_delivery(&claim).unwrap();
-        assert_eq!(j.read_health("tenant_A").unwrap().oldest_delivery_at, 0.0);
+        assert!(health.oldest_delivery_at_seconds > 0.0);
+        assert!(health.checked_at_seconds >= health.oldest_delivery_at_seconds);
+        assert_eq!(
+            j.read_health("tenant_B")
+                .expect("test operation failed")
+                .unresolved_count,
+            0
+        );
+        j.settle_no_charge("a1", "predispatch:test:a1")
+            .expect("test operation failed");
+        assert_eq!(
+            j.read_health("tenant_A")
+                .expect("test operation failed")
+                .unresolved_count,
+            0
+        );
+        let claim = j
+            .claim_due("worker_health", 10)
+            .expect("test operation failed")
+            .remove(0);
+        j.complete_delivery(&claim).expect("test operation failed");
+        assert_eq!(
+            j.read_health("tenant_A")
+                .expect("test operation failed")
+                .oldest_delivery_at_seconds,
+            0.0
+        );
     }
 
     #[test]
     fn ambiguous_effect_stays_unresolved_through_retries_and_deadline() {
-        let dir = tempdir().unwrap();
-        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite")).unwrap();
-        j.start(&attempt("a1")).unwrap();
-        j.mark_unknown("a1").unwrap();
-        j.mark_unknown("a1").unwrap();
-        let first = j.claim_due("worker_1", 10).unwrap().remove(0);
+        let dir = tempdir().expect("test operation failed");
+        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        j.start(&attempt("a1")).expect("test operation failed");
+        j.mark_unknown("a1").expect("test operation failed");
+        j.mark_unknown("a1").expect("test operation failed");
+        let first = j
+            .claim_due("worker_1", 10)
+            .expect("test operation failed")
+            .remove(0);
         assert_eq!(first.state, "unknown");
-        j.defer_claim(&first).unwrap();
-        let conn = j.connection().unwrap();
+        j.defer_claim(&first).expect("test operation failed");
+        let conn = j.connection().expect("test operation failed");
         conn.execute(
             "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2,
              first_unresolved_at_ms = ?3 WHERE attempt_id = ?1",
             params!["a1", now_ms() - 1, now_ms() - REVIEW_DEADLINE_MS - 1],
         )
-        .unwrap();
-        let overdue = j.claim_due("worker_2", 10).unwrap().remove(0);
-        j.defer_claim(&overdue).unwrap();
+        .expect("test operation failed");
+        let overdue = j
+            .claim_due("worker_2", 10)
+            .expect("test operation failed")
+            .remove(0);
+        j.defer_claim(&overdue).expect("test operation failed");
         let state: String = conn
             .query_row(
                 "SELECT state FROM dust_usage_attempts WHERE attempt_id = 'a1'",
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("test operation failed");
         assert_eq!(state, "manual_review_required");
+        conn.execute(
+            "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2 WHERE attempt_id = ?1",
+            params!["a1", now_ms() - 1],
+        )
+        .expect("test retry update failed");
+        assert!(j
+            .claim_due("worker_manual", 10)
+            .expect("test claim failed")
+            .is_empty());
         j.settle_no_charge("a1", "provider/verified-no-charge")
-            .unwrap();
-        assert!(j.claim_due("worker_3", 10).unwrap().is_empty());
+            .expect("test operation failed");
+        assert!(j
+            .claim_due("worker_3", 10)
+            .expect("test operation failed")
+            .is_empty());
     }
 
     #[test]
     fn expired_lease_is_reclaimed_after_reopen_and_stale_worker_is_rejected() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("test operation failed");
         let path = dir.path().join("core-usage.sqlite");
-        let j = CoreUsageJournal::open(&path).unwrap();
+        let j = CoreUsageJournal::open(&path).expect("test operation failed");
         let a = attempt("a1");
-        j.start(&a).unwrap();
+        j.start(&a).expect("test operation failed");
         j.settle_exact(&a, "receipt_1", EmbeddingUsage { input_tokens: 4 })
-            .unwrap();
-        let stale = j.claim_due("worker_1", 1).unwrap().remove(0);
+            .expect("test operation failed");
+        let stale = j
+            .claim_due("worker_1", 1)
+            .expect("test operation failed")
+            .remove(0);
         drop(j);
 
-        let j = CoreUsageJournal::open(&path).unwrap();
-        assert!(j.claim_due("worker_2", 1).unwrap().is_empty());
+        let j = CoreUsageJournal::open(&path).expect("test operation failed");
+        assert!(j
+            .claim_due("worker_2", 1)
+            .expect("test operation failed")
+            .is_empty());
         j.connection()
-            .unwrap()
+            .expect("test operation failed")
             .execute(
                 "UPDATE dust_usage_attempts SET lease_until_ms = ?2 WHERE attempt_id = ?1",
                 params![a.attempt_id, now_ms() - 1],
             )
-            .unwrap();
-        let replacement = j.claim_due("worker_2", 1).unwrap().remove(0);
+            .expect("test operation failed");
+        let replacement = j
+            .claim_due("worker_2", 1)
+            .expect("test operation failed")
+            .remove(0);
         assert_eq!(replacement.event_envelope, stale.event_envelope);
         assert!(j.complete_delivery(&stale).is_err());
-        j.complete_delivery(&replacement).unwrap();
+        j.complete_delivery(&replacement)
+            .expect("test operation failed");
     }
 
     #[test]
     fn durable_start_failure_is_not_a_dispatch_allowance() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("test operation failed");
         assert!(CoreUsageJournal::open(dir.path()).is_err());
         assert!(CoreUsageJournal::open(":memory:").is_err());
     }

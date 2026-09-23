@@ -328,8 +328,7 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
             || payload.revision < self.required_revision
             || payload.issued_at > now
             || payload.expires_at <= now
-            || payload.expires_at <= payload.issued_at
-            || payload.expires_at - payload.issued_at > 60
+            || payload.issued_at.checked_add(60) != Some(payload.expires_at)
             || payload.tenants.is_empty()
             || payload.memberships.is_empty()
             || payload.tenants.len() > MAX_ENTRIES
@@ -347,6 +346,30 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
             .ok_or_else(|| anyhow!("invalid Dust registry payload"))?;
         stable_fields.remove("issued_at");
         stable_fields.remove("expires_at");
+        stable_fields["tenants"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("invalid Dust registry tenants"))?
+            .sort_by(|a, b| {
+                a["tenant_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["tenant_id"].as_str().unwrap_or_default())
+            });
+        stable_fields["memberships"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("invalid Dust registry memberships"))?
+            .sort_by(|a, b| {
+                a["tenant_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["tenant_id"].as_str().unwrap_or_default())
+                    .then_with(|| {
+                        a["employee_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .cmp(b["employee_id"].as_str().unwrap_or_default())
+                    })
+            });
         let digest: [u8; 32] = Sha256::digest(canonical_ascii(&stable_payload)?.as_bytes()).into();
         let tenant_identity: HashMap<String, (String, String)> = payload
             .tenants
@@ -377,10 +400,15 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                     }
                 }
             }
+            let mut retained_identities = seen
+                .as_ref()
+                .map(|prior| prior.tenant_identity.clone())
+                .unwrap_or_default();
+            retained_identities.extend(tenant_identity);
             *seen = Some(SeenRevision {
                 revision: payload.revision,
                 payload_digest: digest,
-                tenant_identity,
+                tenant_identity: retained_identities,
             });
         }
         Ok(envelope)
@@ -640,13 +668,14 @@ mod tests {
             if self.fail.load(Ordering::SeqCst) {
                 bail!("simulated signer timeout");
             }
-            Ok(self.raw.lock().unwrap().clone())
+            Ok(self.raw.lock().expect("test operation failed").clone())
         }
     }
 
     fn keypair() -> Ed25519KeyPair {
-        let bytes = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
-        Ed25519KeyPair::from_pkcs8(bytes.as_ref()).unwrap()
+        let bytes =
+            Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("test operation failed");
+        Ed25519KeyPair::from_pkcs8(bytes.as_ref()).expect("test operation failed")
     }
 
     fn payload(now: i64, revision: u64) -> Value {
@@ -677,17 +706,26 @@ mod tests {
     }
 
     fn signed(payload: Value, key: &Ed25519KeyPair) -> Vec<u8> {
-        let key_id = key_id_for_public_key(key.public_key().as_ref().try_into().unwrap());
+        let key_id = key_id_for_public_key(
+            key.public_key()
+                .as_ref()
+                .try_into()
+                .expect("test operation failed"),
+        );
         let mut message = serde_json::Map::new();
         message.insert("key_id".into(), Value::String(key_id.clone()));
         message.insert("payload".into(), payload.clone());
         let mut bytes = DOMAIN.to_vec();
-        bytes.extend(canonical_ascii(&Value::Object(message)).unwrap().as_bytes());
+        bytes.extend(
+            canonical_ascii(&Value::Object(message))
+                .expect("test operation failed")
+                .as_bytes(),
+        );
         let signature = STANDARD.encode(key.sign(&bytes).as_ref());
         serde_json::to_vec(&serde_json::json!({
             "key_id": key_id, "payload": payload, "signature": signature
         }))
-        .unwrap()
+        .expect("test operation failed")
     }
 
     fn resolver(
@@ -699,7 +737,11 @@ mod tests {
         Arc<Mutex<Vec<u8>>>,
         Arc<AtomicBool>,
     ) {
-        let public_key: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let public_key: [u8; 32] = key
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("test operation failed");
         let shared = Arc::new(Mutex::new(raw));
         let fail = Arc::new(AtomicBool::new(false));
         let resolver = CoreTenantRouteResolver::new(
@@ -713,7 +755,7 @@ mod tests {
             }],
             required_revision,
         )
-        .unwrap();
+        .expect("test operation failed");
         (resolver, shared, fail)
     }
 
@@ -742,7 +784,7 @@ mod tests {
         let (resolver, _, _) = resolver(signed(payload(now, 7), &key), &key, 7);
         let route = resolver
             .resolve_bundle(&signed(payload(now, 7), &key), "workspace_A", now)
-            .unwrap();
+            .expect("test operation failed");
         assert_eq!(route.tenant_id, "alpha");
         assert_eq!(route.revision, 7);
         assert!(route.core_credential_ref.ends_with("/dust-core-usage-key"));
@@ -763,10 +805,15 @@ mod tests {
         assert!(resolver
             .resolve_bundle(&signed(payload(now, 7), &key), "workspace_B", now)
             .is_err());
-        let mut tampered: Value = serde_json::from_slice(&signed(payload(now, 8), &key)).unwrap();
+        let mut tampered: Value =
+            serde_json::from_slice(&signed(payload(now, 8), &key)).expect("test operation failed");
         tampered["payload"]["tenants"][0]["tenant_id"] = Value::String("beta".into());
         assert!(resolver
-            .resolve_bundle(&serde_json::to_vec(&tampered).unwrap(), "workspace_A", now)
+            .resolve_bundle(
+                &serde_json::to_vec(&tampered).expect("test operation failed"),
+                "workspace_A",
+                now
+            )
             .is_err());
         let mut stale = payload(now, 6);
         assert!(resolver
@@ -796,7 +843,10 @@ mod tests {
             .is_err());
         let mut duplicate = payload(now, 1);
         let tenant = duplicate["tenants"][0].clone();
-        duplicate["tenants"].as_array_mut().unwrap().push(tenant);
+        duplicate["tenants"]
+            .as_array_mut()
+            .expect("test operation failed")
+            .push(tenant);
         assert!(resolver
             .resolve_bundle(&signed(duplicate, &key), "workspace_A", now)
             .is_err());
@@ -814,6 +864,76 @@ mod tests {
             Value::String("https://example.com/internal/usage/events".into());
         assert!(resolver
             .resolve_bundle(&signed(public, &key), "workspace_A", now)
+            .is_err());
+        let mut short_lease = payload(now, 2);
+        short_lease["expires_at"] = Value::from(now + 1);
+        assert!(resolver
+            .resolve_bundle(&signed(short_lease, &key), "workspace_A", now)
+            .is_err());
+    }
+
+    #[test]
+    fn removed_tenant_identity_cannot_be_reintroduced_with_a_new_route() {
+        let key = keypair();
+        let now = chrono::Utc::now().timestamp();
+        let mut initial = payload(now, 7);
+        let mut beta = initial["tenants"][0].clone();
+        beta["tenant_id"] = Value::String("beta".into());
+        beta["workspace_id"] = Value::String("workspace_B".into());
+        beta["workos_organization_id"] = Value::String("org_2".into());
+        beta["private_route"] = Value::String("https://10.1.1.3".into());
+        beta["journal_target"] = Value::String("tenant:beta:dust-usage".into());
+        beta["front_credential_ref"] =
+            Value::String("/var/run/secrets/dust/tenants/beta/dust-front-usage-key".into());
+        beta["core_credential_ref"] =
+            Value::String("/var/run/secrets/dust/tenants/beta/dust-core-usage-key".into());
+        beta["admission_url"] =
+            Value::String("https://10.1.1.3/internal/usage/dust/admission".into());
+        beta["usage_ingest_url"] = Value::String("https://10.1.1.3/internal/usage/events".into());
+        let mut beta_member = initial["memberships"][0].clone();
+        beta_member["tenant_id"] = Value::String("beta".into());
+        beta_member["employee_id"] = Value::String("employee_2".into());
+        beta_member["dust_user_id"] = Value::String("dust_user_2".into());
+        beta_member["workos_user_id"] = Value::String("workos_user_2".into());
+        initial["tenants"]
+            .as_array_mut()
+            .expect("test array")
+            .push(beta.clone());
+        initial["memberships"]
+            .as_array_mut()
+            .expect("test array")
+            .push(beta_member.clone());
+        let (resolver, _, _) = resolver(signed(initial.clone(), &key), &key, 7);
+        assert!(resolver
+            .resolve_bundle(&signed(initial, &key), "workspace_A", now)
+            .is_ok());
+        let mut reordered = payload(now, 7);
+        reordered["tenants"] = serde_json::json!([beta.clone(), reordered["tenants"][0].clone()]);
+        reordered["memberships"] =
+            serde_json::json!([beta_member.clone(), reordered["memberships"][0].clone()]);
+        assert!(resolver
+            .resolve_bundle(&signed(reordered, &key), "workspace_A", now)
+            .is_ok());
+
+        let mut without_alpha = payload(now + 1, 8);
+        without_alpha["tenants"] = serde_json::json!([beta.clone()]);
+        without_alpha["memberships"] = serde_json::json!([beta_member.clone()]);
+        assert!(resolver
+            .resolve_bundle(&signed(without_alpha, &key), "workspace_B", now + 1)
+            .is_ok());
+
+        let mut reintroduced = payload(now + 2, 9);
+        reintroduced["tenants"][0]["workspace_id"] = Value::String("workspace_C".into());
+        reintroduced["tenants"]
+            .as_array_mut()
+            .expect("test array")
+            .push(beta);
+        reintroduced["memberships"]
+            .as_array_mut()
+            .expect("test array")
+            .push(beta_member);
+        assert!(resolver
+            .resolve_bundle(&signed(reintroduced, &key), "workspace_C", now + 2)
             .is_err());
     }
 
@@ -839,16 +959,21 @@ mod tests {
             &claims,
             &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
         )
-        .unwrap();
-        let workspace = crate::workspace_assertion::verify(Some(&token), &[pair]).unwrap();
+        .expect("test operation failed");
+        let workspace = crate::workspace_assertion::verify(Some(&token), &[pair])
+            .expect("test operation failed");
         assert_eq!(
-            resolver.resolve(&workspace).await.unwrap().tenant_id,
+            resolver
+                .resolve(&workspace)
+                .await
+                .expect("test operation failed")
+                .tenant_id,
             "alpha"
         );
         fail.store(true, Ordering::SeqCst);
         assert!(resolver.resolve(&workspace).await.is_err());
         fail.store(false, Ordering::SeqCst);
-        *shared.lock().unwrap() = signed(payload(now, 6), &key);
+        *shared.lock().expect("test operation failed") = signed(payload(now, 6), &key);
         assert!(resolver.resolve(&workspace).await.is_err());
     }
 
@@ -860,7 +985,7 @@ mod tests {
         let routes = resolver
             .resolve_maintenance(&["workspace_A".to_string()])
             .await
-            .unwrap();
+            .expect("test operation failed");
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].tenant_id, "alpha");
         assert!(resolver
@@ -878,7 +1003,7 @@ mod tests {
     fn canonical_ascii_matches_python_string_escaping() {
         let input = serde_json::json!({"z": "😀 café", "a": [1, true]});
         assert_eq!(
-            canonical_ascii(&input).unwrap(),
+            canonical_ascii(&input).expect("test operation failed"),
             "{\"a\":[1,true],\"z\":\"\\ud83d\\ude00 caf\\u00e9\"}"
         );
     }
@@ -907,7 +1032,7 @@ mod tests {
                 .is_err()
         );
         assert!(PinnedVerifier::from_base64(
-            key_id_for_public_key(pubkey.try_into().unwrap()),
+            key_id_for_public_key(pubkey.try_into().expect("test operation failed")),
             &STANDARD.encode(pubkey)
         )
         .is_ok());
@@ -922,7 +1047,7 @@ mod tests {
         assert_eq!(
             resolver
                 .resolve_delivery_bundle(&signed(payload(now, 7), &key), &claim, now)
-                .unwrap()
+                .expect("test operation failed")
                 .tenant_id,
             "alpha"
         );
@@ -930,8 +1055,11 @@ mod tests {
         revoked["tenants"][0]["revision"] = Value::from(7);
         revoked["tenants"][0]["active"] = Value::Bool(false);
         revoked["memberships"][0]["active"] = Value::Bool(false);
-        *shared.lock().unwrap() = signed(revoked.clone(), &key);
-        let delivery = resolver.resolve_delivery(&claim).await.unwrap();
+        *shared.lock().expect("test operation failed") = signed(revoked.clone(), &key);
+        let delivery = resolver
+            .resolve_delivery(&claim)
+            .await
+            .expect("test operation failed");
         assert_eq!(delivery.current_revision, 8);
         assert_eq!(
             delivery.usage_ingest_url,
@@ -963,7 +1091,7 @@ mod tests {
         let claim = settled_claim();
         resolver
             .resolve_delivery_bundle(&signed(payload(now, 7), &key), &claim, now)
-            .unwrap();
+            .expect("test operation failed");
         let mut redirected = payload(now, 8);
         redirected["tenants"][0]["private_route"] = Value::String("https://10.1.1.3".into());
         redirected["tenants"][0]["admission_url"] =

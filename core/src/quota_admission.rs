@@ -155,6 +155,7 @@ fn validate_route(
         || attempt.tenant_id != route.tenant_id
         || attempt.workspace_id != route.workspace_id
         || route.revision == 0
+        || attempt.route_id != format!("{}:{}", route.tenant_id, route.revision)
         || route.key_id.is_empty()
         || route.journal_target != format!("tenant:{}:dust-usage", route.tenant_id)
         || route.core_credential_ref
@@ -209,10 +210,9 @@ fn exact_keys(map: &Map<String, Value>, expected: &[&str]) -> bool {
     map.len() == expected.len() && expected.iter().all(|key| map.contains_key(*key))
 }
 
-fn period(value: &Value) -> bool {
-    value
-        .as_str()
-        .is_some_and(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
+fn period(value: &Value) -> Result<chrono::DateTime<chrono::FixedOffset>, AdmissionError> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str().ok_or(AdmissionError::Unavailable)?)
+        .map_err(|_| AdmissionError::Unavailable)
 }
 
 fn parse_decision(value: Value) -> Result<(), AdmissionError> {
@@ -229,9 +229,10 @@ fn parse_decision(value: Value) -> Result<(), AdmissionError> {
             "code",
         ],
     ) || map["enforcement_enabled"] != true
-        || !period(&map["period_start"])
-        || !period(&map["period_end"])
     {
+        return Err(AdmissionError::Unavailable);
+    }
+    if period(&map["period_start"])? >= period(&map["period_end"])? {
         return Err(AdmissionError::Unavailable);
     }
     let allowed = map["allowed"]
@@ -291,10 +292,11 @@ mod tests {
     #[async_trait]
     impl Transport for FakeTransport {
         async fn send(&self, request: AdmissionRequest) -> Result<Value, AdmissionError> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((request.url.to_string(), request.key, request.attempt_id));
+            self.0.lock().expect("test operation failed").push((
+                request.url.to_string(),
+                request.key,
+                request.attempt_id,
+            ));
             Ok(self.1.clone())
         }
     }
@@ -320,7 +322,7 @@ mod tests {
             tenant_id: "alpha".into(),
             workspace_id: "w1".into(),
             conversation_id: "conversation1".into(),
-            route_id: "route1".into(),
+            route_id: "alpha:1".into(),
             model: "gemini-embedding-2".into(),
         }
     }
@@ -349,6 +351,19 @@ mod tests {
             .await,
             Err(AdmissionError::Unavailable)
         );
+        let mut wrong_revision = attempt();
+        wrong_revision.route_id = "alpha:2".into();
+        assert_eq!(
+            require_with(
+                &transport,
+                &route(),
+                &wrong_revision,
+                StartOutcome::Created,
+                |_| Ok("key".into())
+            )
+            .await,
+            Err(AdmissionError::Unavailable)
+        );
         assert_eq!(
             require_with(
                 &transport,
@@ -374,7 +389,11 @@ mod tests {
             .await,
             Err(AdmissionError::Unavailable)
         );
-        assert!(transport.0.lock().unwrap().is_empty());
+        assert!(transport
+            .0
+            .lock()
+            .expect("test operation failed")
+            .is_empty());
 
         require_with(
             &transport,
@@ -390,9 +409,13 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .expect("test operation failed");
         assert_eq!(
-            transport.0.lock().unwrap().as_slice(),
+            transport
+                .0
+                .lock()
+                .expect("test operation failed")
+                .as_slice(),
             &[(
                 "https://crm.alpha.internal/internal/usage/dust/admission".into(),
                 "core-alpha-key".into(),
@@ -429,7 +452,11 @@ mod tests {
             .await,
             Err(AdmissionError::Unavailable)
         );
-        assert!(transport.0.lock().unwrap().is_empty());
+        assert!(transport
+            .0
+            .lock()
+            .expect("test operation failed")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -447,6 +474,7 @@ mod tests {
         beta_attempt.tenant_id = "beta".into();
         beta_attempt.workspace_id = "w2".into();
         beta_attempt.attempt_id = "attempt2".into();
+        beta_attempt.route_id = "beta:1".into();
         require_with(
             &transport,
             &beta_route,
@@ -461,9 +489,13 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .expect("test operation failed");
         assert_eq!(
-            transport.0.lock().unwrap().as_slice(),
+            transport
+                .0
+                .lock()
+                .expect("test operation failed")
+                .as_slice(),
             &[(
                 "https://crm.beta.internal/internal/usage/dust/admission".into(),
                 "core-beta-key".into(),
@@ -484,6 +516,12 @@ mod tests {
         let mut no_period = response(true);
         no_period["period_start"] = Value::Null;
         assert_eq!(parse_decision(no_period), Err(AdmissionError::Unavailable));
+        let mut inverted_period = response(true);
+        inverted_period["period_end"] = inverted_period["period_start"].clone();
+        assert_eq!(
+            parse_decision(inverted_period),
+            Err(AdmissionError::Unavailable)
+        );
         let mut mismatch = response(true);
         mismatch["dimensions"]["tokens"]["allowed"] = json!(false);
         assert_eq!(parse_decision(mismatch), Err(AdmissionError::Unavailable));
