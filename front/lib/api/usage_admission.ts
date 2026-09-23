@@ -168,7 +168,7 @@ export async function requireDustAdmission({
       current.frontCredentialRef !== route.frontCredentialRef ||
       current.usageIngestUrl !== route.usageIngestUrl ||
       current.journalTarget !== route.journalTarget ||
-      !consumeFrontUsageStartPermit(startPermit, operationId, route)
+      !(await consumeFrontUsageStartPermit(startPermit, operationId, route))
     ) {
       throw new DustAdmissionUnavailableError();
     }

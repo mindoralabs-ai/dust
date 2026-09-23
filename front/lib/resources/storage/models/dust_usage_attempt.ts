@@ -18,6 +18,7 @@ export class DustUsageAttemptModel extends Model<
   declare conversationId: string;
   declare model: string;
   declare routeId: string;
+  declare routeBindingHash: string | null;
   declare identityHash: string;
   declare state: CreationOptional<
     "started" | "unknown" | "exact" | "no_charge" | "manual_review_required"
@@ -47,10 +48,11 @@ DustUsageAttemptModel.init(
       allowNull: false,
     },
     tenantId: { type: DataTypes.STRING(128), allowNull: false },
-    workspaceId: { type: DataTypes.STRING(128), allowNull: false },
+    workspaceId: { type: DataTypes.STRING(256), allowNull: false },
     conversationId: { type: DataTypes.STRING(256), allowNull: false },
     model: { type: DataTypes.STRING(256), allowNull: false },
     routeId: { type: DataTypes.STRING(256), allowNull: false },
+    routeBindingHash: { type: DataTypes.STRING(64), allowNull: true },
     identityHash: { type: DataTypes.STRING(64), allowNull: false },
     state: {
       type: DataTypes.STRING(32),

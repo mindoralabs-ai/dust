@@ -10,6 +10,7 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   deferFrontUsageClaim,
+  frontUsageRouteBindingHash,
   validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +24,7 @@ vi.mock("@app/lib/api/usage_journal", () => ({
   claimFrontUsageWork: vi.fn(),
   completeFrontUsageClaim: vi.fn(),
   deferFrontUsageClaim: vi.fn(),
+  frontUsageRouteBindingHash: vi.fn(() => "binding"),
   validateFrontUsageClaim: vi.fn(),
 }));
 
@@ -34,6 +36,7 @@ const exact: FrontUsageClaim = {
   tenantId: "tenant-a",
   workspaceId: "workspace-a",
   routeId: "tenant-a:23",
+  routeBindingHash: "binding",
   state: "exact",
   eventEnvelope: envelope,
   eventHash: hash,
@@ -134,6 +137,15 @@ describe("Dust Front usage delivery", () => {
       ...route,
       workspaceId: "workspace-b",
     } as never);
+    await deliverFrontUsageClaim(exact, resolver, fetchImpl);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(completeFrontUsageClaim).toHaveBeenCalledWith(
+      expect.objectContaining({ delivered: false })
+    );
+  });
+
+  it("retains a frozen claim when the signed route binding changes", async () => {
+    vi.mocked(frontUsageRouteBindingHash).mockReturnValueOnce("changed");
     await deliverFrontUsageClaim(exact, resolver, fetchImpl);
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(completeFrontUsageClaim).toHaveBeenCalledWith(

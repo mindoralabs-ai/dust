@@ -8,6 +8,7 @@ export type {
 } from "@app/lib/resources/dust_usage_attempt_resource";
 export {
   buildFrontUsageEnvelope,
+  frontUsageRouteBindingHash,
   newFrontUsageAttemptId,
 } from "@app/lib/resources/dust_usage_attempt_resource";
 

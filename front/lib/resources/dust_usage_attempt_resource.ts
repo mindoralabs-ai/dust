@@ -27,6 +27,7 @@ export type FrontUsageCounts = {
 type JournalRow = {
   attemptId: string;
   identityHash: string;
+  routeBindingHash: string | null;
   state:
     | "started"
     | "unknown"
@@ -49,6 +50,12 @@ const MAX_COUNT = 2147483647;
 function requireIdentity(value: string): void {
   if (!identityPattern.test(value) || value === "unknown") {
     throw new Error("Invalid Dust usage identity");
+  }
+}
+
+function requireWorkspaceId(value: string): void {
+  if (value.length < 1 || value.length > 256) {
+    throw new Error("Invalid Dust usage workspace identity");
   }
 }
 
@@ -75,7 +82,7 @@ function validateAttempt(attempt: FrontUsageAttempt): void {
   if (!tenantPattern.test(attempt.tenantId)) {
     throw new Error("Invalid Dust usage tenant identity");
   }
-  requireIdentity(attempt.workspaceId);
+  requireWorkspaceId(attempt.workspaceId);
   requireReference(attempt.conversationId);
   requireReference(attempt.model);
   const route = /^([a-z0-9][a-z0-9-]{0,62}):(0|[1-9][0-9]*)$/.exec(
@@ -99,6 +106,22 @@ function identityHash(attempt: FrontUsageAttempt): string {
       conversation_id: attempt.conversationId,
       model: attempt.model,
       route_id: attempt.routeId,
+    })
+  );
+}
+
+/** Ignore export signing metadata and global revision; tenant route fields are immutable. */
+export function frontUsageRouteBindingHash(route: TenantRoute): string {
+  return hash(
+    canonicalJson({
+      tenant_id: route.tenantId,
+      workspace_id: route.workspaceId,
+      private_route: route.privateRoute,
+      admission_url: route.admissionUrl,
+      usage_ingest_url: route.usageIngestUrl,
+      journal_target: route.journalTarget,
+      front_credential_ref: route.frontCredentialRef,
+      core_credential_ref: route.coreCredentialRef,
     })
   );
 }
@@ -156,21 +179,23 @@ export async function readFrontUsageHealth(tenantId: string): Promise<{
  * synchronous_commit explicitly prevents a weaker session default.
  */
 export async function startFrontUsageAttempt(
-  attempt: FrontUsageAttempt
+  attempt: FrontUsageAttempt,
+  route?: TenantRoute
 ): Promise<"created" | "duplicate"> {
   validateAttempt(attempt);
   const digest = identityHash(attempt);
+  const routeBindingHash = route ? frontUsageRouteBindingHash(route) : null;
   return frontSequelize.transaction(async (transaction) => {
     await frontSequelize.query("SET LOCAL synchronous_commit = on", {
       transaction,
     });
     const inserted = await frontSequelize.query<{ attemptId: string }>(
       `INSERT INTO "dust_usage_attempts"
-        ("attemptId", "tenantId", "workspaceId", "conversationId", "model", "routeId", "identityHash", "nextRetryAt", "createdAt", "updatedAt")
-       VALUES (:attemptId, :tenantId, :workspaceId, :conversationId, :model, :routeId, :digest, now() + interval '5 minutes', now(), now())
+        ("attemptId", "tenantId", "workspaceId", "conversationId", "model", "routeId", "routeBindingHash", "identityHash", "nextRetryAt", "createdAt", "updatedAt")
+       VALUES (:attemptId, :tenantId, :workspaceId, :conversationId, :model, :routeId, :routeBindingHash, :digest, now() + interval '5 minutes', now(), now())
        ON CONFLICT ("attemptId") DO NOTHING RETURNING "attemptId"`,
       {
-        replacements: { ...attempt, digest },
+        replacements: { ...attempt, digest, routeBindingHash },
         transaction,
         type: QueryTypes.SELECT,
       }
@@ -179,14 +204,18 @@ export async function startFrontUsageAttempt(
       return "created";
     }
     const [existing] = await frontSequelize.query<JournalRow>(
-      `SELECT "identityHash" FROM "dust_usage_attempts" WHERE "attemptId" = :attemptId`,
+      `SELECT "identityHash", "routeBindingHash" FROM "dust_usage_attempts" WHERE "attemptId" = :attemptId`,
       {
         replacements: { attemptId: attempt.attemptId },
         transaction,
         type: QueryTypes.SELECT,
       }
     );
-    if (!existing || existing.identityHash !== digest) {
+    if (
+      !existing ||
+      existing.identityHash !== digest ||
+      existing.routeBindingHash !== routeBindingHash
+    ) {
       throw new Error("Conflicting Dust usage attempt identity");
     }
     return "duplicate";
@@ -216,7 +245,7 @@ export async function startFrontUsageAttemptForAdmission(
   ) {
     throw new Error("Dust usage admission route mismatch");
   }
-  if ((await startFrontUsageAttempt(attempt)) !== "created") {
+  if ((await startFrontUsageAttempt(attempt, route)) !== "created") {
     return null;
   }
   const permit = Object.freeze({ attemptId: attempt.attemptId });
@@ -231,11 +260,11 @@ export async function startFrontUsageAttemptForAdmission(
   return permit;
 }
 
-export function consumeFrontUsageStartPermit(
+export async function consumeFrontUsageStartPermit(
   permit: FrontUsageStartPermit | null,
   attemptId: string,
   route: TenantRoute
-): boolean {
+): Promise<boolean> {
   const binding = permit && issuedStartPermits.get(permit);
   if (
     !permit ||
@@ -250,7 +279,24 @@ export function consumeFrontUsageStartPermit(
     return false;
   }
   issuedStartPermits.delete(permit);
-  return true;
+  const [active] = await frontSequelize.query<{ attemptId: string }>(
+    `UPDATE "dust_usage_attempts"
+       SET "nextRetryAt" = now() + interval '5 minutes', "updatedAt" = now()
+     WHERE "attemptId" = :attemptId AND "state" = 'started'
+       AND "nextRetryAt" > now()
+       AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
+       AND "routeBindingHash" = :routeBindingHash
+     RETURNING "attemptId"`,
+    {
+      replacements: {
+        attemptId,
+        routeBindingHash: frontUsageRouteBindingHash(route),
+      },
+      transaction: null,
+      type: QueryTypes.SELECT,
+    }
+  );
+  return Boolean(active);
 }
 
 async function withLockedAttempt<T>(
@@ -332,6 +378,7 @@ export async function heartbeatFrontUsageAttempt(
     const [updated] = await frontSequelize.query<{ attemptId: string }>(
       `UPDATE "dust_usage_attempts" SET "nextRetryAt" = now() + interval '5 minutes',
        "updatedAt" = now() WHERE "attemptId" = :attemptId AND "state" = 'started'
+       AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
      RETURNING "attemptId"`,
       { replacements: { attemptId }, transaction, type: QueryTypes.SELECT }
     );
@@ -482,6 +529,7 @@ export type FrontUsageClaim = {
   tenantId: string;
   workspaceId: string;
   routeId: string;
+  routeBindingHash: string | null;
   state: string;
   eventEnvelope: string | null;
   eventHash: string | null;
@@ -501,7 +549,7 @@ export async function validateFrontUsageClaim(
   requireIdentity(claim.leaseOwner);
   requireIdentity(claim.leaseNonce);
   const [persisted] = await frontSequelize.query<FrontUsageClaim>(
-    `SELECT "attemptId", "tenantId", "workspaceId", "routeId", "state",
+    `SELECT "attemptId", "tenantId", "workspaceId", "routeId", "routeBindingHash", "state",
             "eventEnvelope", "eventHash", "providerOperationId",
             "firstUnresolvedAt", "retryCount", "manualReviewRequired",
             "leaseOwner", "leaseNonce"
@@ -525,6 +573,7 @@ export async function validateFrontUsageClaim(
     persisted.tenantId === claim.tenantId &&
     persisted.workspaceId === claim.workspaceId &&
     persisted.routeId === claim.routeId &&
+    persisted.routeBindingHash === claim.routeBindingHash &&
     persisted.state === claim.state &&
     persisted.eventEnvelope === claim.eventEnvelope &&
     persisted.eventHash === claim.eventHash &&
@@ -592,7 +641,7 @@ export async function claimFrontUsageWork(
          "leaseNonce" = :leaseNonce,
          "leaseUntil" = now() + interval '60 seconds', "updatedAt" = now()
          FROM due WHERE j."attemptId" = due."attemptId"
-       RETURNING j."attemptId", j."tenantId", j."workspaceId", j."routeId", j."state",
+       RETURNING j."attemptId", j."tenantId", j."workspaceId", j."routeId", j."routeBindingHash", j."state",
                  j."eventEnvelope", j."eventHash", j."providerOperationId",
                  j."firstUnresolvedAt", j."retryCount", j."manualReviewRequired", j."leaseOwner", j."leaseNonce"`,
       {

@@ -6,6 +6,7 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   deferFrontUsageClaim,
+  frontUsageRouteBindingHash,
   validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
@@ -162,7 +163,9 @@ export async function deliverFrontUsageClaim(
     const route = resolver.resolveForDelivery(claim.tenantId, claim.routeId);
     if (
       route.tenantId !== claim.tenantId ||
-      route.workspaceId !== claim.workspaceId
+      route.workspaceId !== claim.workspaceId ||
+      !claim.routeBindingHash ||
+      frontUsageRouteBindingHash(route) !== claim.routeBindingHash
     ) {
       throw new Error("Dust usage route mismatch");
     }

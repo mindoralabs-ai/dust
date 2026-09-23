@@ -4,6 +4,7 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   consumeFrontUsageStartPermit,
+  heartbeatFrontUsageAttempt,
   markFrontUsageUnknown,
   newFrontUsageAttemptId,
   readFrontUsageHealth,
@@ -140,22 +141,67 @@ describe("Front Dust usage journal PostgreSQL durability", () => {
     } as import("@app/lib/api/tenant_route").TenantRoute;
     const permit = await startFrontUsageAttemptForAdmission(attempt, route);
     expect(permit).not.toBeNull();
-    expect(consumeFrontUsageStartPermit(permit, "another-attempt", route)).toBe(
-      false
-    );
     expect(
-      consumeFrontUsageStartPermit(permit, attempt.attemptId, {
+      await consumeFrontUsageStartPermit(permit, "another-attempt", route)
+    ).toBe(false);
+    expect(
+      await consumeFrontUsageStartPermit(permit, attempt.attemptId, {
         ...route,
         tenantId: "tenant-other",
       })
     ).toBe(false);
-    expect(consumeFrontUsageStartPermit(permit, attempt.attemptId, route)).toBe(
-      true
-    );
-    expect(consumeFrontUsageStartPermit(permit, attempt.attemptId, route)).toBe(
-      false
-    );
+    expect(
+      await consumeFrontUsageStartPermit(permit, attempt.attemptId, route)
+    ).toBe(true);
+    expect(
+      await consumeFrontUsageStartPermit(permit, attempt.attemptId, route)
+    ).toBe(false);
     expect(await startFrontUsageAttemptForAdmission(attempt, route)).toBeNull();
+  });
+
+  it("rejects an expired or reconciliation-leased permit before dispatch", async () => {
+    const attempt = {
+      attemptId: newFrontUsageAttemptId(),
+      tenantId: "tenant-test-permit",
+      workspaceId: "workspace-test-permit",
+      conversationId: "conversation-test-permit",
+      model: "gemini-2.5-flash",
+      routeId: "tenant-test-permit:7",
+    };
+    const route = {
+      tenantId: attempt.tenantId,
+      workspaceId: attempt.workspaceId,
+      revision: 7,
+      admissionUrl: "https://crm.internal/internal/usage/dust/admission",
+      frontCredentialRef: "/run/tenant-test-permit-front-key",
+    } as import("@app/lib/api/tenant_route").TenantRoute;
+    const expired = await startFrontUsageAttemptForAdmission(attempt, route);
+    await observer.query(
+      `UPDATE "dust_usage_attempts" SET "nextRetryAt" = now() - interval '1 second'
+       WHERE "attemptId" = $1`,
+      [attempt.attemptId]
+    );
+    expect(
+      await consumeFrontUsageStartPermit(expired, attempt.attemptId, route)
+    ).toBe(false);
+
+    const leasedAttempt = { ...attempt, attemptId: newFrontUsageAttemptId() };
+    const leased = await startFrontUsageAttemptForAdmission(
+      leasedAttempt,
+      route
+    );
+    await observer.query(
+      `UPDATE "dust_usage_attempts" SET "leaseOwner" = 'reconciler',
+       "leaseNonce" = 'nonce', "leaseUntil" = now() + interval '1 minute'
+       WHERE "attemptId" = $1`,
+      [leasedAttempt.attemptId]
+    );
+    expect(
+      await consumeFrontUsageStartPermit(leased, leasedAttempt.attemptId, route)
+    ).toBe(false);
+    await expect(
+      heartbeatFrontUsageAttempt(leasedAttempt.attemptId)
+    ).rejects.toThrow("no longer active");
   });
 
   it("retains an unresolved attempt for recovery instead of inventing no-charge", async () => {

@@ -3,10 +3,11 @@
 CREATE TABLE "dust_usage_attempts" (
   "attemptId" VARCHAR(128) PRIMARY KEY,
   "tenantId" VARCHAR(128) NOT NULL,
-  "workspaceId" VARCHAR(128) NOT NULL,
+  "workspaceId" VARCHAR(256) NOT NULL,
   "conversationId" VARCHAR(256) NOT NULL,
   "model" VARCHAR(256) NOT NULL,
   "routeId" VARCHAR(256) NOT NULL,
+  "routeBindingHash" VARCHAR(64),
   "identityHash" VARCHAR(64) NOT NULL,
   "state" VARCHAR(32) NOT NULL DEFAULT 'started'
     CHECK ("state" IN ('started', 'unknown', 'exact', 'no_charge', 'manual_review_required')),

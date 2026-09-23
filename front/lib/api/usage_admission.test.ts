@@ -8,7 +8,7 @@ import {
 } from "./usage_admission";
 
 vi.mock("@app/lib/api/usage_journal", () => ({
-  consumeFrontUsageStartPermit: (
+  consumeFrontUsageStartPermit: async (
     permit: { attemptId: string } | null,
     operationId: string,
     _route: TenantRoute
