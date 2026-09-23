@@ -386,6 +386,57 @@ impl CoreUsageJournal {
         provider_operation_id: &str,
         usage: EmbeddingUsage,
     ) -> Result<String> {
+        self.settle_exact_inner(attempt, provider_operation_id, usage, None)
+    }
+
+    /// Store a paid result and its exact usage evidence in one retained commit.
+    pub fn settle_exact_with_embedding(
+        &self,
+        attempt: &CoreUsageAttempt,
+        provider_operation_id: &str,
+        usage: EmbeddingUsage,
+        input_hash: &[u8; 32],
+        vector: &[f64],
+    ) -> Result<String> {
+        if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
+            bail!("invalid retained embedding result");
+        }
+        self.settle_exact_inner(
+            attempt,
+            provider_operation_id,
+            usage,
+            Some((input_hash, vector)),
+        )
+    }
+
+    pub fn cached_embedding(&self, input_hash: &[u8; 32]) -> Result<Option<Vec<f64>>> {
+        let conn = self.connection()?;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT r.vector_json FROM dust_embedding_results r
+                 JOIN dust_usage_attempts a ON a.attempt_id = r.attempt_id
+                 WHERE r.input_hash = ?1 AND a.state = 'exact'",
+                [input_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|value| {
+            let vector: Vec<f64> = serde_json::from_str(&value)?;
+            if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
+                bail!("invalid retained embedding result");
+            }
+            Ok(vector)
+        })
+        .transpose()
+    }
+
+    fn settle_exact_inner(
+        &self,
+        attempt: &CoreUsageAttempt,
+        provider_operation_id: &str,
+        usage: EmbeddingUsage,
+        embedding: Option<(&[u8; 32], &[f64])>,
+    ) -> Result<String> {
         validate_attempt(attempt)?;
         validate_reference(provider_operation_id)?;
         let mut conn = self.connection()?;
@@ -447,6 +498,19 @@ impl CoreUsageJournal {
                 )?;
             }
             _ => bail!("conflicting Core usage terminal replay"),
+        }
+        if let Some((input_hash, vector)) = embedding {
+            tx.execute(
+                "INSERT OR IGNORE INTO dust_embedding_results
+                 (input_hash, attempt_id, vector_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    input_hash.as_slice(),
+                    attempt.attempt_id,
+                    serde_json::to_string(vector)?,
+                    now_ms()
+                ],
+            )?;
         }
         tx.commit()?;
         Ok(envelope)
@@ -699,6 +763,46 @@ fn build_envelope(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn settled_embedding_survives_reopen_and_never_precedes_exact_usage() {
+        let dir = tempdir().expect("test directory");
+        let path = dir.path().join("usage.sqlite");
+        let journal = CoreUsageJournal::open(&path).expect("journal");
+        let entry = attempt("cached-embedding");
+        let hash = [7_u8; 32];
+        assert!(journal
+            .cached_embedding(&hash)
+            .expect("cache read")
+            .is_none());
+        journal.start(&entry).expect("durable start");
+        assert!(journal
+            .cached_embedding(&hash)
+            .expect("cache read")
+            .is_none());
+        let vector = vec![0.25; 1536];
+        journal
+            .settle_exact_with_embedding(
+                &entry,
+                "client:cached-embedding",
+                EmbeddingUsage { input_tokens: 7 },
+                &hash,
+                &vector,
+            )
+            .expect("atomic settlement");
+        let reopened = CoreUsageJournal::open(&path).expect("reopen journal");
+        assert_eq!(
+            reopened.cached_embedding(&hash).expect("cache read"),
+            Some(vector)
+        );
+        assert_eq!(
+            reopened
+                .claim_due("cache-test-worker", 1)
+                .expect("usage claim")[0]
+                .state,
+            "exact"
+        );
+    }
 
     fn attempt(id: &str) -> CoreUsageAttempt {
         CoreUsageAttempt {

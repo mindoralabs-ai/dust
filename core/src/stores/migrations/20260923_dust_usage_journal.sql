@@ -35,6 +35,15 @@ CREATE INDEX IF NOT EXISTS dust_usage_attempts_reconcile_idx
 CREATE INDEX IF NOT EXISTS dust_usage_attempts_tenant_state_idx
     ON dust_usage_attempts (tenant_id, state, created_at_ms);
 
+-- A settled embedding is retained with its exact usage event. A retried
+-- multi-input upsert can reuse successful inputs without paying twice.
+CREATE TABLE IF NOT EXISTS dust_embedding_results (
+    input_hash BLOB PRIMARY KEY CHECK (length(input_hash) = 32),
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES dust_usage_attempts(attempt_id),
+    vector_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
 -- Durable rollback and tenant-identity fence; accepted before provider I/O.
 CREATE TABLE IF NOT EXISTS dust_tenant_route_fence (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

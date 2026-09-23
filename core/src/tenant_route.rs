@@ -1023,7 +1023,6 @@ mod tests {
         let (resolver, shared, fail) = resolver(signed(payload(now, 7), &key), &key, 7);
         // This exercises the public path after a real signed Front assertion.
         let secret = "isolated-dust-core-route-test-secret-long-enough";
-        std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", secret);
         let pair = crate::workspace_assertion::DataSourcePair {
             project_id: 1,
             data_source_id: "data-source-1".into(),
@@ -1033,14 +1032,20 @@ mod tests {
             "exp": now + 60, "workspace_sid": "workspace_A",
             "data_sources": [pair.clone()]
         });
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .expect("test operation failed");
-        let workspace = crate::workspace_assertion::verify(Some(&token), &[pair])
+        let workspace = {
+            let _guard = crate::workspace_assertion::TEST_SECRET_LOCK
+                .lock()
+                .expect("test assertion secret lock");
+            std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", secret);
+            let token = jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+            )
             .expect("test operation failed");
+            crate::workspace_assertion::verify(Some(&token), &[pair])
+                .expect("test operation failed")
+        };
         assert_eq!(
             resolver
                 .resolve(&workspace)

@@ -350,6 +350,25 @@ fn same_signed_route(a: &CoreTenantRoute, b: &CoreTenantRoute) -> bool {
         && a.revision == b.revision
 }
 
+fn embedding_input_hash(
+    route: &CoreTenantRoute,
+    model: &str,
+    task_type: EmbeddingTaskType,
+    text: &str,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        route.tenant_id.as_str(),
+        route.workspace_id.as_str(),
+        model,
+        &task_type.prepare(text),
+    ] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
 /// A unique, durable attempt and tenant-bound admission precede each provider
 /// request. A response is returned only after exact provider usage is frozen;
@@ -359,6 +378,7 @@ async fn run_guarded_attempt<A, AFut, P, PFut>(
     route: &CoreTenantRoute,
     model: &str,
     conversation_id: &str,
+    input_hash: Option<[u8; 32]>,
     admit: A,
     provider: P,
 ) -> Result<VertexEmbeddingResponse>
@@ -436,13 +456,18 @@ where
     // embedContent has no provider operation ID in its documented response.
     // The unique client request ID remains the stable local dedup identity.
     let input_tokens = usage.ok_or_else(|| anyhow!("Vertex embedding usage unavailable"))? as u32;
-    journal
-        .settle_exact(
+    let operation_id = format!("client:{}", attempt.provider_request_id);
+    match input_hash {
+        Some(hash) => journal.settle_exact_with_embedding(
             &attempt,
-            &format!("client:{}", attempt.provider_request_id),
+            &operation_id,
             EmbeddingUsage { input_tokens },
-        )
-        .map_err(|_| AmbiguousVertexEffect)?;
+            &hash,
+            &response.vector,
+        ),
+        None => journal.settle_exact(&attempt, &operation_id, EmbeddingUsage { input_tokens }),
+    }
+    .map_err(|_| AmbiguousVertexEffect)?;
     Ok(response)
 }
 
@@ -718,11 +743,16 @@ impl Embedder for VertexAIEmbedder {
             let client = self.client.clone();
             async move {
                 let route = runtime.resolver.resolve(workspace).await?;
+                let input_hash = embedding_input_hash(&route, &self.id, task_type, &input);
+                if let Some(vector) = runtime.journal.cached_embedding(&input_hash)? {
+                    return Ok(vector);
+                }
                 run_guarded_attempt(
                     &runtime.journal,
                     &route,
                     &self.id,
                     &format!("embedding:{}", workspace.sid()),
+                    Some(input_hash),
                     |route, attempt, started| async move {
                         runtime
                             .admission
@@ -747,6 +777,7 @@ impl Embedder for VertexAIEmbedder {
                     },
                 )
                 .await
+                .map(|response| response.vector)
             }
         }))
         .buffered(MAX_CONCURRENT_REQUESTS)
@@ -755,11 +786,11 @@ impl Embedder for VertexAIEmbedder {
         results
             .into_iter()
             .map(|result| {
-                result.map(|response| EmbedderVector {
+                result.map(|vector| EmbedderVector {
                     created: crate::utils::now(),
                     provider: ProviderID::VertexAI.to_string(),
                     model: self.id.clone(),
-                    vector: response.vector,
+                    vector,
                 })
             })
             .collect()
@@ -924,6 +955,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, _| async { Err(crate::quota_admission::AdmissionError::Denied.into()) },
             || async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
@@ -945,6 +977,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, started| async move {
                 assert!(matches!(
                     started,
@@ -980,6 +1013,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, _| async { Ok(()) },
             || async { Err(anyhow!(PreDispatchTokenError)) },
         )
@@ -1001,6 +1035,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, _| async { Ok(()) },
             || async { Err(anyhow!("transport timeout")) },
         )
@@ -1019,6 +1054,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, _| async { Ok(()) },
             || async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
@@ -1056,6 +1092,7 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
+            None,
             |_, _, _| async { Ok(()) },
             || async move {
                 std::fs::remove_dir_all(journal_dir).expect("test operation failed");

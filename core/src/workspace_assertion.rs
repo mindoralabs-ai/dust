@@ -4,6 +4,8 @@ use std::collections::HashSet;
 
 pub const HEADER: &str = "x-dust-workspace-assertion";
 const AUDIENCE: &str = "dust-core-vertex-embedding";
+#[cfg(test)]
+pub(crate) static TEST_SECRET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct DataSourcePair {
@@ -90,6 +92,7 @@ mod tests {
 
     #[test]
     fn forged_missing_expired_and_partial_bulk_assertions_fail() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
         let secret = "test-secret-".repeat(4);
         std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
         let a = DataSourcePair {
@@ -143,6 +146,7 @@ mod tests {
 
     #[test]
     fn caller_extras_cannot_override_verified_workspace() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
         use crate::providers::embedder::{EmbedderRequest, EmbeddingTaskType};
         use crate::providers::provider::ProviderID;
         let secret = "test-secret-".repeat(4);
@@ -171,6 +175,7 @@ mod tests {
 
     #[test]
     fn repeated_authorized_pair_is_allowed_but_new_pair_is_not() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
         let secret = "test-secret-".repeat(4);
         std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
         let a = DataSourcePair {
