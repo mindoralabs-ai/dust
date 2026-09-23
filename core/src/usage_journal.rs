@@ -88,7 +88,7 @@ impl CoreUsageJournal {
         // FULL sync is required before the model effect starts. WAL by itself
         // does not guarantee a committed journal row survives a host crash.
         let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-        if mode.to_ascii_lowercase() != "wal" {
+        if !mode.eq_ignore_ascii_case("wal") {
             bail!("Core usage journal could not enable WAL");
         }
         conn.pragma_update(None, "synchronous", "FULL")?;

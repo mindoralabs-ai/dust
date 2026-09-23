@@ -1135,6 +1135,25 @@ export async function createDataSourceWithoutProvider(
     });
   }
 
+  const activeWorkspace = auth.getNonNullableWorkspace();
+  if (activeWorkspace.sId !== owner.sId) {
+    throw new Error("Dust workspace mismatch");
+  }
+  const activeUser = auth.user();
+  const pocEmbeddingProvider = await selectPocEmbeddingProvider(
+    activeUser &&
+      activeWorkspace.workOSOrganizationId &&
+      activeUser.workOSUserId
+      ? {
+          workspaceId: activeWorkspace.sId,
+          workosOrganizationId: activeWorkspace.workOSOrganizationId,
+          workosUserId: activeUser.workOSUserId,
+          dustUserId: activeUser.sId,
+        }
+      : null,
+    owner.sId
+  );
+
   return withTransaction(
     async (
       t
@@ -1169,24 +1188,6 @@ export async function createDataSourceWithoutProvider(
         });
       }
 
-      const activeWorkspace = auth.getNonNullableWorkspace();
-      if (activeWorkspace.sId !== owner.sId) {
-        throw new Error("Dust workspace mismatch");
-      }
-      const activeUser = auth.user();
-      const pocEmbeddingProvider = await selectPocEmbeddingProvider(
-        activeUser &&
-          activeWorkspace.workOSOrganizationId &&
-          activeUser.workOSUserId
-          ? {
-              workspaceId: activeWorkspace.sId,
-              workosOrganizationId: activeWorkspace.workOSOrganizationId,
-              workosUserId: activeUser.workOSUserId,
-              dustUserId: activeUser.sId,
-            }
-          : null,
-        owner.sId
-      );
       const dataSourceEmbedder =
         pocEmbeddingProvider ??
         owner.defaultEmbeddingProvider ??

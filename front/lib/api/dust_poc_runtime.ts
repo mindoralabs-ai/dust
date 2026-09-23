@@ -100,7 +100,12 @@ export async function authorizePocGeneration(input: {
   });
 }
 
-/** Choose Vertex only for signed, active POC workspaces creating new data sources. */
+/**
+ * @cc [label:security;backend] dust-poc-new-data-source-embedding
+ * Only a signed, active POC workspace may select Vertex for a new data source.
+ * Non-POC workspaces retain their existing provider, and a disabled POC
+ * embedding switch denies selection before Core project creation.
+ */
 export async function selectPocEmbeddingProvider(
   identity: ActiveDustIdentity | null,
   workspaceId: string

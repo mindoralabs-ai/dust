@@ -99,7 +99,7 @@ mod tests {
             data_source_id: "b".into(),
         };
         let future = (crate::utils::now() / 1000 + 60) as usize;
-        assert!(verify(None, &[a.clone()]).is_none());
+        assert!(verify(None, std::slice::from_ref(&a)).is_none());
         assert!(verify(
             Some(&token(
                 "wrong-secret-with-adequate-length-for-tests",
@@ -107,22 +107,22 @@ mod tests {
                 future,
                 vec![a.clone()]
             )),
-            &[a.clone()]
+            std::slice::from_ref(&a)
         )
         .is_none());
         assert!(verify(
             Some(&token(&secret, AUDIENCE, 1, vec![a.clone()])),
-            &[a.clone()]
+            std::slice::from_ref(&a)
         )
         .is_none());
         assert!(verify(
             Some(&token(&secret, AUDIENCE, future - 61, vec![a.clone()])),
-            &[a.clone()]
+            std::slice::from_ref(&a)
         )
         .is_none());
         assert!(verify(
             Some(&token(&secret, "other-audience", future, vec![a.clone()])),
-            &[a.clone()]
+            std::slice::from_ref(&a)
         )
         .is_none());
         let partial = token(&secret, AUDIENCE, future, vec![a.clone()]);

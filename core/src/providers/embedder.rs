@@ -112,18 +112,15 @@ impl EmbedderRequest {
         text.iter().for_each(|s| {
             hasher.update(s.as_bytes());
         });
-        if !extras.is_none() {
-            hasher.update(extras.clone().unwrap().to_string().as_bytes());
+        if let Some(extra) = &extras {
+            hasher.update(extra.to_string().as_bytes());
         }
 
         Self {
             hash: format!("{}", hasher.finalize().to_hex()),
             provider_id,
             model_id: String::from(model_id),
-            text: text
-                .into_iter()
-                .map(|s| String::from(s))
-                .collect::<Vec<_>>(),
+            text: text.into_iter().map(String::from).collect::<Vec<_>>(),
             task_type,
             extras,
             verified_workspace: None,
@@ -269,9 +266,9 @@ pub struct EmbedderProvidersModelMap;
 impl EmbedderProvidersModelMap {
     fn get_models(provider: &ProviderID) -> Result<Vec<SupportedEmbedderModels>> {
         match provider {
-            &ProviderID::OpenAI => Ok(vec![SupportedEmbedderModels::TextEmbedding3Large1536]),
-            &ProviderID::Mistral => Ok(vec![SupportedEmbedderModels::MistralEmbed]),
-            &ProviderID::VertexAI => Ok(vec![SupportedEmbedderModels::GeminiEmbedding21536]),
+            ProviderID::OpenAI => Ok(vec![SupportedEmbedderModels::TextEmbedding3Large1536]),
+            ProviderID::Mistral => Ok(vec![SupportedEmbedderModels::MistralEmbed]),
+            ProviderID::VertexAI => Ok(vec![SupportedEmbedderModels::GeminiEmbedding21536]),
             _ => Err(anyhow!("Provider not supported for embeddings.")),
         }
     }
