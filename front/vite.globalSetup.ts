@@ -86,7 +86,7 @@ export default async function setup() {
   const journalDatabase = target.pathname;
   if (
     !["localhost", "127.0.0.1"].includes(target.hostname) ||
-    !/^\/(?:front(?:_api)?_test(?:_shard_\d+)?|dust_journal_test|dust_front_test_[A-Za-z0-9_]+)$/.test(
+    !/^\/(?:front(?:_api)?_test(?:_shard_\d+)?|dust_journal_test|dust_front_test(?:_[A-Za-z0-9_]+)?)$/.test(
       journalDatabase
     )
   ) {

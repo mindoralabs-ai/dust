@@ -48,28 +48,33 @@ export async function sendFrontUsageHeartbeat(
   if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
     throw new Error("Dust Front usage heartbeat unavailable");
   }
-  const response = await fetchImpl(
-    `${current.privateRoute}/internal/usage/producers/dust-front/heartbeat`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Internal-Auth": key },
-      body: JSON.stringify({
-        tenant_id: current.tenantId,
-        observed_at: observedAtSeconds,
-        journal_checked_at: health.checkedAtSeconds,
-        reconciler_heartbeat_at: observedAtSeconds,
-        oldest_delivery_at: health.oldestDeliveryAtSeconds,
-        journal_healthy: true,
-        unresolved_count: health.unresolvedCount,
-      }),
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+  try {
+    const response = await fetchImpl(
+      `${current.privateRoute}/internal/usage/producers/dust-front/heartbeat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Internal-Auth": key },
+        body: JSON.stringify({
+          tenant_id: current.tenantId,
+          observed_at: observedAtSeconds,
+          journal_checked_at: health.checkedAtSeconds,
+          reconciler_heartbeat_at: observedAtSeconds,
+          oldest_delivery_at: health.oldestDeliveryAtSeconds,
+          journal_healthy: true,
+          unresolved_count: health.unresolvedCount,
+        }),
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(5_000),
+      }
+    );
+    const receipt =
+      response.status === 200 ? await readBoundedReceipt(response) : null;
+    if (heartbeatReceiptSchema.safeParse(receipt).success) {
+      return;
     }
-  );
-  const receipt =
-    response.status === 200 ? await readBoundedReceipt(response) : null;
-  if (!heartbeatReceiptSchema.safeParse(receipt).success) {
-    throw new Error("Dust Front usage heartbeat unavailable");
+  } catch {
+    // Transport errors may contain the signed private CRM destination.
   }
+  throw new Error("Dust Front usage heartbeat unavailable");
 }

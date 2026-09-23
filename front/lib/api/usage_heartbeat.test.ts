@@ -86,6 +86,20 @@ describe("Dust Front journal heartbeat", () => {
     );
   });
 
+  it("does not expose the private destination in transport failures", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new Error("request to https://crm-a.internal failed"));
+    await expect(
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        resolver,
+        fetchImpl
+      )
+    ).rejects.toEqual(new Error("Dust Front usage heartbeat unavailable"));
+  });
+
   it("sends nothing if the journal read or credential fails", async () => {
     const fetchImpl = vi.fn();
     health.mockRejectedValueOnce(new Error("journal unavailable"));
