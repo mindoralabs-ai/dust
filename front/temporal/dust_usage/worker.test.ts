@@ -89,4 +89,20 @@ describe("Dust POC accounting worker", () => {
     expect(heartbeat).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledTimes(1);
   });
+
+  it("does not restart route maintenance after shutdown during delivery", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { runDustPocUsageReconciler } = await import(
+      "@app/temporal/dust_usage/worker"
+    );
+    const controller = new AbortController();
+    resolveRoute.mockResolvedValue({ resolve: vi.fn() } as never);
+    deliver.mockImplementation(async () => {
+      controller.abort();
+      return { processed: 0 };
+    });
+    await runDustPocUsageReconciler(controller.signal);
+    expect(routesForMaintenance).not.toHaveBeenCalled();
+    expect(heartbeat).not.toHaveBeenCalled();
+  });
 });

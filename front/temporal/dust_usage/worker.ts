@@ -38,7 +38,13 @@ export async function runDustPocUsageReconciler(
   await runLoop(async () => {
     const resolver = await pocRouteResolverForMaintenance();
     const batchSuccess = await runFrontUsageDeliveryBatch(resolver);
+    if (signal?.aborted) {
+      return;
+    }
     const routes = await pocRoutesForMaintenance();
+    if (signal?.aborted) {
+      return;
+    }
     await Promise.all(
       routes.map((route) =>
         sendFrontUsageHeartbeat(route, batchSuccess, resolver)
