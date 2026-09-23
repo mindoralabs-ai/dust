@@ -36,6 +36,7 @@ function options(fetchImpl: typeof fetch) {
     routeUrl: ROUTE,
     componentKey: KEY,
     operationId: OPERATION_ID,
+    startOutcome: "created" as const,
     fetchImpl,
   };
 }
@@ -137,6 +138,10 @@ describe("requireDustAdmission", () => {
       name: "inverted period",
       body: { ...admission(), period_end: "2026-08-01T00:00:00Z" },
     },
+    {
+      name: "non-RFC3339 period",
+      body: { ...admission(), period_start: "2026-09-01 00:00:00Z" },
+    },
   ])("fails closed for $name", async ({ body }) => {
     await expect(
       requireDustAdmission(options(fetchReturning(body)))
@@ -169,6 +174,14 @@ describe("requireDustAdmission", () => {
     await expect(
       requireDustAdmission(options(fetchImpl))
     ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
+  });
+
+  it("rejects a duplicate journal start before asking CRM for admission", async () => {
+    const fetchImpl = fetchReturning(admission());
+    await expect(
+      requireDustAdmission({ ...options(fetchImpl), startOutcome: "duplicate" })
+    ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("bounds the request and fails closed on an aborted fetch", async () => {

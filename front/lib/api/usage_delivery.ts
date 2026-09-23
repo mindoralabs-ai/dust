@@ -7,6 +7,7 @@ import {
   completeFrontUsageClaim,
   deferFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
+import { concurrentExecutor } from "@app/lib/utils/async_utils";
 
 const MAX_RECEIPT_BYTES = 2048;
 const MAX_ENVELOPE_BYTES = 16384;
@@ -36,29 +37,18 @@ export async function runFrontUsageDeliveryBatch(
   fetchImpl: typeof fetch = fetch
 ): Promise<number> {
   const claims = await claimFrontUsageWork(`front_${randomUUID()}`, 20);
-  let next = 0;
   let failed = false;
-  const worker = async () => {
-    while (next < claims.length) {
-      const claim = claims[next++];
+  await concurrentExecutor(
+    claims,
+    async (claim) => {
       try {
         await deliverFrontUsageClaim(claim, resolver, fetchImpl);
       } catch {
         failed = true;
       }
-    }
-  };
-  // A fixed worker pool bounds both HTTP and journal-settlement concurrency.
-  await Promise.all([
-    worker(),
-    worker(),
-    worker(),
-    worker(),
-    worker(),
-    worker(),
-    worker(),
-    worker(),
-  ]);
+    },
+    { concurrency: 8 }
+  );
   if (failed) {
     throw new Error("Dust usage reconciliation unavailable");
   }

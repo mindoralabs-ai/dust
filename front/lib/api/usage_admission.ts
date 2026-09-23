@@ -50,16 +50,13 @@ type AdmissionOptions = {
   componentKey: string;
   /** Stable ID for one provider attempt; also used as journal attempt_id. */
   operationId: string;
+  /** Only a newly committed journal row may authorize provider dispatch. */
+  startOutcome: "created" | "duplicate";
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 };
 
-const periodSchema = z
-  .string()
-  .refine(
-    (value) =>
-      /(?:Z|[+-]\d\d:\d\d)$/.test(value) && !Number.isNaN(Date.parse(value))
-  );
+const periodSchema = z.string().datetime({ offset: true });
 const tokenSchema = z
   .object({
     used: z.number().int().nonnegative().safe(),
@@ -137,10 +134,12 @@ export async function requireDustAdmission({
   routeUrl,
   componentKey,
   operationId,
+  startOutcome,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }: AdmissionOptions): Promise<void> {
   if (
+    startOutcome !== "created" ||
     !OPERATION_ID.test(operationId) ||
     !componentKey ||
     componentKey.trim() !== componentKey ||

@@ -33,6 +33,7 @@ export default async function setup() {
     EGRESS_PROXY_POLICY_BUCKET: "test-egress-policy-bucket",
     REDIS_CACHE_URI: process.env.REDIS_CACHE_URI,
     REDIS_URI: process.env.REDIS_URI,
+    DUST_USAGE_JOURNAL_INTEGRATION: process.env.DUST_USAGE_JOURNAL_INTEGRATION,
     NEXT_PUBLIC_DUST_API_URL: "http://fake-url",
     NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL: "http://fake-url",
     NEXT_PUBLIC_DUST_APP_URL: "http://fake-url",

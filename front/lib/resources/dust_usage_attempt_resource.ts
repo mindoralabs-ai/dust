@@ -117,20 +117,25 @@ export async function readFrontUsageHealth(tenantId: string): Promise<{
   unresolvedCount: number;
 }> {
   requireIdentity(tenantId);
-  const [row] = await frontSequelize.query<{
-    unresolvedCount: string;
-    oldestDeliveryAt: string | null;
-  }>(
-    `SELECT
-       COUNT(*) FILTER (WHERE "state" IN ('started', 'unknown', 'manual_review_required')) AS "unresolvedCount",
-       EXTRACT(EPOCH FROM MIN("createdAt") FILTER
-         (WHERE "state" = 'exact' AND "deliveredAt" IS NULL)) AS "oldestDeliveryAt"
-     FROM "dust_usage_attempts" WHERE "tenantId" = :tenantId`,
-    { replacements: { tenantId }, type: QueryTypes.SELECT }
-  );
-  const unresolvedCount = Number(row?.unresolvedCount);
+  const [[unresolved], [delivery]] = await Promise.all([
+    frontSequelize.query<{ unresolvedCount: string }>(
+      `SELECT COUNT(*) AS "unresolvedCount" FROM "dust_usage_attempts"
+       WHERE "tenantId" = :tenantId
+         AND "state" IN ('started', 'unknown', 'manual_review_required')`,
+      { replacements: { tenantId }, type: QueryTypes.SELECT }
+    ),
+    frontSequelize.query<{ oldestDeliveryAt: string | null }>(
+      `SELECT EXTRACT(EPOCH FROM MIN("createdAt")) AS "oldestDeliveryAt"
+       FROM "dust_usage_attempts" WHERE "tenantId" = :tenantId
+         AND "state" = 'exact' AND "deliveredAt" IS NULL`,
+      { replacements: { tenantId }, type: QueryTypes.SELECT }
+    ),
+  ]);
+  const unresolvedCount = Number(unresolved?.unresolvedCount);
   const oldestDeliveryAt =
-    row?.oldestDeliveryAt === null ? 0 : Number(row?.oldestDeliveryAt);
+    delivery?.oldestDeliveryAt === null
+      ? 0
+      : Number(delivery?.oldestDeliveryAt);
   if (
     !Number.isSafeInteger(unresolvedCount) ||
     unresolvedCount < 0 ||

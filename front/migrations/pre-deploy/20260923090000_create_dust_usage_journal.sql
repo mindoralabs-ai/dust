@@ -38,5 +38,7 @@ CREATE INDEX "dust_usage_attempts_reconcile_idx" ON "dust_usage_attempts"
     AND "deliveredAt" IS NULL;
 CREATE UNIQUE INDEX "dust_usage_attempts_provider_operation_unique_idx"
   ON "dust_usage_attempts" ("providerOperationId");
-CREATE INDEX "dust_usage_attempts_tenant_state_idx" ON "dust_usage_attempts"
-  ("tenantId", "state", "createdAt");
+CREATE INDEX "dust_usage_attempts_tenant_unresolved_idx" ON "dust_usage_attempts"
+  ("tenantId") WHERE "state" IN ('started', 'unknown', 'manual_review_required');
+CREATE INDEX "dust_usage_attempts_tenant_delivery_idx" ON "dust_usage_attempts"
+  ("tenantId", "createdAt") WHERE "state" = 'exact' AND "deliveredAt" IS NULL;

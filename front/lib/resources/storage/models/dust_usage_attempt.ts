@@ -105,8 +105,14 @@ DustUsageAttemptModel.init(
         },
       },
       {
-        name: "dust_usage_attempts_tenant_state_idx",
-        fields: ["tenantId", "state", "createdAt"],
+        name: "dust_usage_attempts_tenant_unresolved_idx",
+        fields: ["tenantId"],
+        where: { state: ["started", "unknown", "manual_review_required"] },
+      },
+      {
+        name: "dust_usage_attempts_tenant_delivery_idx",
+        fields: ["tenantId", "createdAt"],
+        where: { state: "exact", deliveredAt: null },
       },
     ],
   }
