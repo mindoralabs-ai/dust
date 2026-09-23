@@ -794,10 +794,11 @@ impl Embedder for VertexAIEmbedder {
     }
 
     /// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
-    /// Each distinct document input is resolved from a verified workspace,
-    /// durably journaled, and admitted before one provider dispatch. Repeated
-    /// positions in the same batch reuse that vector without another paid call.
-    /// Query inputs keep one attempt per position.
+    /// Each input pulled before an ambiguous completion is resolved from a
+    /// verified workspace, durably journaled, and admitted before dispatch.
+    /// Repeated document positions reuse that vector without another paid call;
+    /// query positions each have their own attempt. After an ambiguous effect,
+    /// no new inputs are pulled and already-started attempts settle.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,

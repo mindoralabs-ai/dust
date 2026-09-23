@@ -636,10 +636,11 @@ pub async fn data_sources_search_bulk(
     }
 
     // Check every requested pair before starting any concurrently grouped embedding.
-    let vertex_requested = groups
-        .values()
-        .flatten()
-        .any(|(_, ds)| ds.embedder_config().provider_id == ProviderID::VertexAI);
+    let vertex_requested = !payload.query.is_empty()
+        && groups
+            .values()
+            .flatten()
+            .any(|(_, ds)| ds.embedder_config().provider_id == ProviderID::VertexAI);
     let workspace = if vertex_requested {
         let pairs: Vec<_> = groups
             .values()
@@ -684,32 +685,37 @@ pub async fn data_sources_search_bulk(
                 let first_ds = &group[0].1;
                 let embedder_config = first_ds.embedder_config();
 
-                // Embed query once per group.
-                let embedder_request = EmbedderRequest::new(
-                    embedder_config.provider_id,
-                    &model_id,
-                    vec![&query],
-                    crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
-                    first_ds.config().extras.clone(),
-                )
-                .with_verified_workspace(workspace);
-
-                // If any embedding fails, return error for this group.
-                let query_vector = match embedder_request.execute(credentials).await {
-                    Ok(v) => {
-                        if v.len() != 1 {
-                            return Err(anyhow::anyhow!(
-                                "Expected exactly one embedding vector, got {}",
-                                v.len()
-                            ));
-                        }
-                        Some(v[0].vector.iter().map(|v| *v as f32).collect::<Vec<f32>>())
+                // An empty query is a filter-only search and has no provider effect.
+                let query_vector = if query.is_empty() {
+                    None
+                } else {
+                    let embedder_request = EmbedderRequest::new(
+                        embedder_config.provider_id,
+                        &model_id,
+                        vec![&query],
+                        crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
+                        first_ds.config().extras.clone(),
+                    )
+                    .with_verified_workspace(workspace);
+                    let vectors = embedder_request
+                        .execute(credentials)
+                        .await
+                        .map_err(|error| {
+                            error.context(format!("Failed to embed query with model {}", model_id))
+                        })?;
+                    if vectors.len() != 1 {
+                        return Err(anyhow::anyhow!(
+                            "Expected exactly one embedding vector, got {}",
+                            vectors.len()
+                        ));
                     }
-                    Err(e) => {
-                        return Err(
-                            e.context(format!("Failed to embed query with model {}", model_id))
-                        );
-                    }
+                    Some(
+                        vectors[0]
+                            .vector
+                            .iter()
+                            .map(|value| *value as f32)
+                            .collect::<Vec<f32>>(),
+                    )
                 };
 
                 // Search all data sources in this group with the same vector.
