@@ -64,8 +64,8 @@ describe("Dust POC accounting worker", () => {
     expect(resolveRoute).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(resolver);
     expect(heartbeat).toHaveBeenCalledTimes(2);
-    expect(heartbeat).toHaveBeenCalledWith(routeA, { processed: 1 });
-    expect(heartbeat).toHaveBeenCalledWith(routeB, { processed: 1 });
+    expect(heartbeat).toHaveBeenCalledWith(routeA, { processed: 1 }, resolver);
+    expect(heartbeat).toHaveBeenCalledWith(routeB, { processed: 1 }, resolver);
   });
 
   it("sends no heartbeat until the delivery batch succeeds", async () => {

@@ -39,6 +39,15 @@ export async function pocRouteResolverForMaintenance(): Promise<DustTenantRouteR
   return (await getRuntime()).resolver;
 }
 
+/** Release the resolver's refresh timer when the POC worker shuts down. */
+export async function stopPocRuntime(): Promise<void> {
+  const current = runtimePromise;
+  runtimePromise = null;
+  if (current) {
+    (await current).resolver.stop();
+  }
+}
+
 export async function pocRoutesForMaintenance(): Promise<
   readonly TenantRoute[]
 > {

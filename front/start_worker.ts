@@ -1,4 +1,5 @@
 import config from "@app/lib/api/config";
+import { stopPocRuntime } from "@app/lib/api/dust_poc_runtime";
 import logger from "@app/logger/logger";
 import { runDustPocUsageReconciler } from "@app/temporal/dust_usage/worker";
 import type { WorkerName } from "@app/temporal/worker_registry";
@@ -47,8 +48,14 @@ Runtime.install(
 
 async function runWorkers(workers: WorkerName[]) {
   const reconcilerAbort = new AbortController();
-  process.once("SIGTERM", () => reconcilerAbort.abort());
-  process.once("SIGINT", () => reconcilerAbort.abort());
+  const stopReconciler = () => {
+    reconcilerAbort.abort();
+    void stopPocRuntime().catch((err) =>
+      logger.error({ error: err }, "Error stopping Dust POC route resolver.")
+    );
+  };
+  process.once("SIGTERM", stopReconciler);
+  process.once("SIGINT", stopReconciler);
   void runDustPocUsageReconciler(reconcilerAbort.signal).catch((err) =>
     logger.error({ error: err }, "Error running Dust POC usage reconciler.")
   );

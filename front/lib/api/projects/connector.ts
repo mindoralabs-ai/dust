@@ -89,6 +89,7 @@ export async function createDataSourceAndConnectorForProject(
       let coreProjectId: string;
       let coreDataSourceId: string;
       let createdCoreComponents = false;
+      let selectedPocEmbedder: "vertex_ai" | null | undefined;
 
       if (frontDataSource) {
         // Front data source exists, use its Core API IDs
@@ -102,6 +103,12 @@ export async function createDataSourceAndConnectorForProject(
         });
 
         if (coreDataSourceCheck.isErr()) {
+          // The operator path may not have a user identity. Check whether it
+          // can recreate a POC component before removing the orphaned row.
+          selectedPocEmbedder = await selectPocEmbeddingProviderForAuth(
+            auth,
+            workspace.sId
+          );
           localLogger.warn(
             {
               error: coreDataSourceCheck.error,
@@ -122,7 +129,9 @@ export async function createDataSourceAndConnectorForProject(
       // Create Core API project if needed
       if (!frontDataSource) {
         const dataSourceEmbedder =
-          (await selectPocEmbeddingProviderForAuth(auth, workspace.sId)) ??
+          (selectedPocEmbedder !== undefined
+            ? selectedPocEmbedder
+            : await selectPocEmbeddingProviderForAuth(auth, workspace.sId)) ??
           workspace.defaultEmbeddingProvider ??
           DEFAULT_EMBEDDING_PROVIDER_ID;
         const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];

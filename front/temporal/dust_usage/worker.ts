@@ -40,7 +40,9 @@ export async function runDustPocUsageReconciler(
     const batchSuccess = await runFrontUsageDeliveryBatch(resolver);
     const routes = await pocRoutesForMaintenance();
     await Promise.all(
-      routes.map((route) => sendFrontUsageHeartbeat(route, batchSuccess))
+      routes.map((route) =>
+        sendFrontUsageHeartbeat(route, batchSuccess, resolver)
+      )
     );
   }, 10_000);
 }
