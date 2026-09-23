@@ -250,7 +250,7 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
         claim: &crate::usage_journal::ClaimedWork,
         now: i64,
     ) -> Result<CoreUsageDeliveryRoute> {
-        if !tenant_slug(&claim.tenant_id) || !identity(&claim.workspace_id) {
+        if !tenant_slug(&claim.tenant_id) || !bounded_string(&claim.workspace_id) {
             bail!("invalid persisted Core usage identity");
         }
         let (route_tenant, route_revision) = claim
@@ -572,15 +572,6 @@ fn tenant_slug(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
-}
-
-fn identity(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value != "unknown"
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn bounded_string(value: &str) -> bool {
@@ -1134,6 +1125,20 @@ mod tests {
         claim.route_id = "alpha:0".into();
         assert!(resolver
             .resolve_delivery_bundle(&signed(payload(now, 0), &key), &claim, now)
+            .is_ok());
+    }
+
+    #[test]
+    fn valid_punctuated_workspace_can_deliver_exact_usage() {
+        let key = keypair();
+        let now = chrono::Utc::now().timestamp();
+        let mut registry = payload(now, 7);
+        registry["tenants"][0]["workspace_id"] = Value::String("workspace.user@example.com".into());
+        let (resolver, _, _) = resolver(signed(registry.clone(), &key), &key, 7);
+        let mut claim = settled_claim();
+        claim.workspace_id = "workspace.user@example.com".into();
+        assert!(resolver
+            .resolve_delivery_bundle(&signed(registry, &key), &claim, now)
             .is_ok());
     }
 
