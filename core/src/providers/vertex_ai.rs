@@ -247,9 +247,15 @@ impl CoreVertexRuntime {
             (None, None) => {}
             _ => return Err(anyhow!("Core Vertex runtime configuration unavailable")),
         }
+        let journal = CoreUsageJournal::open(journal_path)?;
         Ok(Self {
-            resolver: CoreTenantRouteResolver::new(fetcher, pins, minimum_revision)?,
-            journal: CoreUsageJournal::open(journal_path)?,
+            resolver: CoreTenantRouteResolver::new_retained(
+                fetcher,
+                pins,
+                minimum_revision,
+                journal.clone(),
+            )?,
+            journal,
             admission: CoreAdmissionClient::new()?,
             workspaces,
         })
@@ -1032,6 +1038,24 @@ mod tests {
         assert!(claims.iter().any(|claim| {
             claim.state == "unknown" && claim.provider_operation_id.as_deref() == Some("abc-123")
         }));
+
+        let journal_dir = dir.path().to_path_buf();
+        let unavailable_journal = run_guarded_attempt(
+            &journal,
+            &route,
+            MODEL_ID,
+            "embedding-test",
+            |_, _, _| async { Ok(()) },
+            || async move {
+                std::fs::remove_dir_all(journal_dir).expect("test operation failed");
+                Err(anyhow!("provider result unknown"))
+            },
+        )
+        .await
+        .expect_err("post-dispatch journal failure must be ambiguous");
+        assert!(unavailable_journal
+            .downcast_ref::<AmbiguousVertexEffect>()
+            .is_some());
     }
 
     #[tokio::test]
@@ -1183,6 +1207,42 @@ mod tests {
         assert!(!message.contains("private-payload"));
         assert!(!message.contains("secret-token"));
         assert!(!message.contains("sensitive-input"));
+        server.await.expect("test operation failed");
+    }
+
+    #[tokio::test]
+    async fn malformed_success_preserves_provider_request_id() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("test operation failed");
+            let mut buffer = [0u8; 4096];
+            let _ = socket
+                .read(&mut buffer)
+                .await
+                .expect("test operation failed");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nx-goog-request-id: response-42\r\ncontent-length: 7\r\n\r\ninvalid")
+                .await
+                .expect("test operation failed");
+        });
+        let error = VertexAIEmbedder::request_one(
+            &reqwest::Client::new(),
+            &format!("http://{address}/embed"),
+            "test-token",
+            "sample",
+            EmbeddingTaskType::RetrievalQuery,
+        )
+        .await
+        .expect_err("malformed success must be rejected");
+        assert_eq!(
+            error
+                .downcast_ref::<ModelError>()
+                .and_then(|error| error.request_id.as_deref()),
+            Some("response-42")
+        );
         server.await.expect("test operation failed");
     }
 

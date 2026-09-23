@@ -1071,6 +1071,13 @@ mod tests {
             .resolve_maintenance(&["workspace_B".to_string()])
             .await
             .is_err());
+        let outcomes = resolver
+            .resolve_maintenance_each(&["workspace_A".to_string(), "workspace_B".to_string()])
+            .await
+            .expect("signed registry failed");
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].is_ok());
+        assert!(outcomes[1].is_err());
         fail.store(true, Ordering::SeqCst);
         assert!(resolver
             .resolve_maintenance(&["workspace_A".to_string()])
