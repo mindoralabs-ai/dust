@@ -105,6 +105,8 @@ export async function authorizeDustGenerationAttempt({
   try {
     await requireDustAdmission({
       route,
+      identity,
+      resolver,
       operationId: attempt.attemptId,
       startPermit,
     });

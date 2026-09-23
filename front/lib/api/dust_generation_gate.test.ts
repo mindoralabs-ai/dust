@@ -107,11 +107,15 @@ describe("Dust Front generation gate", () => {
     expect(selected.resolve).toHaveBeenNthCalledWith(4, identity("b"));
     expect(admit).toHaveBeenNthCalledWith(1, {
       route: route("a"),
+      identity: identity("a"),
+      resolver: selected,
       operationId: "attempt-1",
       startPermit: { attemptId: "attempt-1" },
     });
     expect(admit).toHaveBeenNthCalledWith(2, {
       route: route("b"),
+      identity: identity("b"),
+      resolver: selected,
       operationId: "attempt-2",
       startPermit: { attemptId: "attempt-2" },
     });
