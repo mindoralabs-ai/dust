@@ -431,7 +431,11 @@ where
         None => journal.start(&attempt)?,
     };
     if !matches!(&started, StartOutcome::Created(_)) {
-        return Err(anyhow!("Vertex embedding attempt was not new"));
+        return if input_hash.is_some() {
+            Err(AmbiguousVertexEffect.into())
+        } else {
+            Err(anyhow!("Vertex embedding attempt was not new"))
+        };
     }
     if let Err(error) = admit(route.clone(), attempt.clone(), started).await {
         journal.settle_no_charge(

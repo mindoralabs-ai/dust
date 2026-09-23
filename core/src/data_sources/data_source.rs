@@ -58,6 +58,15 @@ impl Section {
     }
 }
 
+fn embedding_upsert_key(data_source_id: &str, document_id_hash: &str, text: &Section) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [data_source_id, document_id_hash, &text.full_text()] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 /// A Chunk is a subset of a document that was inserted into vector search db. `hash` covers both
 /// the chunk text and the parent document tags (inserted into vector db search on each chunk to
 /// leverage tags filtering there). It is used as unique ID for the chunk in vector search db.
@@ -1028,11 +1037,13 @@ impl DataSource {
 
         let mut extras = self.config.extras.clone().unwrap_or(json!({}));
         extras["enforce_rate_limit_margin"] = json!(true);
-        // Stable across retries of this document version, distinct from a
-        // different document that happens to contain the same chunk text.
-        extras["dust_poc_upsert_key"] = json!(format!(
-            "{}:{}:{}",
-            self.data_source_id, document_id_hash, document_hash
+        // The document hash can include a generated current timestamp when
+        // callers omit one. Bind the paid-input reservation to stable content
+        // instead, so retries cannot dispatch the same chunks again.
+        extras["dust_poc_upsert_key"] = json!(embedding_upsert_key(
+            &self.data_source_id,
+            document_id_hash,
+            text
         ));
 
         // Embed batched chunks sequentially.
@@ -2558,6 +2569,35 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn embedding_upsert_key_is_stable_without_a_document_timestamp() {
+        let text = Section {
+            prefix: None,
+            content: Some("Repeated content".to_string()),
+            sections: vec![],
+        };
+        let key = embedding_upsert_key("data-source", "document-id", &text);
+        assert_eq!(
+            key,
+            embedding_upsert_key("data-source", "document-id", &text)
+        );
+        assert_ne!(
+            key,
+            embedding_upsert_key("data-source", "another-id", &text)
+        );
+        assert_ne!(
+            key,
+            embedding_upsert_key(
+                "data-source",
+                "document-id",
+                &Section {
+                    content: Some("Updated content".to_string()),
+                    ..text
+                },
+            )
+        );
     }
 
     #[test]
