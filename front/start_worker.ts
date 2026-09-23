@@ -1,5 +1,6 @@
 import config from "@app/lib/api/config";
 import logger from "@app/logger/logger";
+import { runDustPocUsageReconciler } from "@app/temporal/dust_usage/worker";
 import type { WorkerName } from "@app/temporal/worker_registry";
 import {
   ALL_WORKERS,
@@ -45,6 +46,9 @@ Runtime.install(
 );
 
 async function runWorkers(workers: WorkerName[]) {
+  void runDustPocUsageReconciler().catch((err) =>
+    logger.error({ error: err }, "Error running Dust POC usage reconciler.")
+  );
   for (const worker of workers) {
     workerFunctions[worker]().catch((err) =>
       logger.error({ error: err }, `Error running ${worker} worker.`)

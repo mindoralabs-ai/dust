@@ -26,6 +26,14 @@ async function getRuntime(): Promise<PocRuntime> {
   return runtimePromise;
 }
 
+/** Server-worker access to the same continuously refreshed signed route cache. */
+export async function pocRouteResolverForMaintenance(): Promise<DustTenantRouteResolver> {
+  if (!dustPocMode()) {
+    throw new Error("Dust POC maintenance unavailable");
+  }
+  return (await getRuntime()).resolver;
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value || value.trim() !== value) {
