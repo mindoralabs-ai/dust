@@ -11,16 +11,24 @@ export function buildErrorEvent({
   message,
   originalError,
   errorSource,
+  providerCompleted,
 }: {
   metadata: EndpointMetadata;
   type: ErrorType;
   message: string;
   originalError?: unknown;
   errorSource: ErrorSource;
+  providerCompleted?: boolean;
 }): ErrorEvent {
   return {
     type: "error",
-    content: { type, message, originalError, errorSource },
+    content: {
+      type,
+      message,
+      originalError,
+      errorSource,
+      ...(providerCompleted ? { providerCompleted: true } : {}),
+    },
     metadata,
   };
 }

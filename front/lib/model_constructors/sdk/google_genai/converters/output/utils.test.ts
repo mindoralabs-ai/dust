@@ -50,6 +50,10 @@ it.each([
     type: "token_usage",
     content: { accountingStatus: "exact", standardInput: 3, totalOutput: 2 },
   });
+  expect(events[2]).toMatchObject({
+    type: "error",
+    content: { providerCompleted: true },
+  });
 });
 
 describe("usageToTokenUsageEvent", () => {

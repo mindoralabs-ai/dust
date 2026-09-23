@@ -647,6 +647,9 @@ export function convertToOldEvent(
           isRetryable,
           originalError: event.content.originalError,
           errorSource: event.content.errorSource,
+          ...(event.content.providerCompleted
+            ? { providerCompleted: true }
+            : {}),
         },
         metadata
       );

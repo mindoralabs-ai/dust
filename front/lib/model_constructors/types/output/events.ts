@@ -153,6 +153,7 @@ export type ErrorContent = {
   message: string;
   originalError?: unknown;
   errorSource: ErrorSource;
+  providerCompleted?: boolean;
 };
 export interface ErrorEvent {
   type: "error";

@@ -74,6 +74,7 @@ import { Ok } from "@app/types/shared/result";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import type { LangfuseGeneration } from "@langfuse/tracing";
 import { startObservation } from "@langfuse/tracing";
+import { ApplicationFailure } from "@temporalio/common";
 import { randomUUID } from "crypto";
 import pickBy from "lodash/pickBy";
 import startCase from "lodash/startCase";
@@ -986,9 +987,10 @@ export abstract class LLM<
       for await (const event of this.sendRequest(payload)) {
         if (pocAttempt && event.type === "error") {
           const terminalModelOutcome =
-            event.content.errorSource === "dust" &&
-            (event.content.type === "stop_error" ||
-              event.content.type === "refusal_error");
+            event.content.providerCompleted === true ||
+            (event.content.errorSource === "dust" &&
+              (event.content.type === "stop_error" ||
+                event.content.type === "refusal_error"));
           if (terminalModelOutcome) {
             sawTerminalModelOutcome = true;
           } else {
@@ -1028,6 +1030,14 @@ export abstract class LLM<
         yield event;
       }
       streamCompleted = true;
+    } catch (error) {
+      if (pocAttempt && providerDispatched) {
+        throw ApplicationFailure.nonRetryable(
+          "Dust POC provider outcome requires manual accounting review",
+          "dust_poc_accounting_unavailable"
+        );
+      }
+      throw error;
     } finally {
       this.pocAttemptId = null;
       this.pocProviderPermit = null;
@@ -1062,8 +1072,30 @@ export abstract class LLM<
             );
           }
         }
+      } catch (error) {
+        if (pocAttempt && providerDispatched) {
+          logger.error(
+            { attemptId: pocAttempt.attempt.attemptId },
+            "Dust POC accounting settlement unavailable"
+          );
+          throw ApplicationFailure.nonRetryable(
+            "Dust POC provider outcome requires manual accounting review",
+            "dust_poc_accounting_unavailable"
+          );
+        }
+        throw error;
       } finally {
-        await lifecycle.close();
+        try {
+          await lifecycle.close();
+        } catch (error) {
+          if (pocAttempt && providerDispatched) {
+            throw ApplicationFailure.nonRetryable(
+              "Dust POC provider outcome requires manual accounting review",
+              "dust_poc_accounting_unavailable"
+            );
+          }
+          throw error;
+        }
       }
     }
   }

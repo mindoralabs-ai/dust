@@ -226,6 +226,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.MAX_TOKENS:
       return buildErrorEvent({
         errorSource: "dust",
+        providerCompleted: true,
         metadata,
         type: "stop_error",
         message: "The maximum response length was reached.",
@@ -240,6 +241,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.LANGUAGE:
       return buildErrorEvent({
         errorSource: "dust",
+        providerCompleted: true,
         metadata,
         type: "refusal_error",
         message:
@@ -249,6 +251,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.UNEXPECTED_TOOL_CALL:
       return buildErrorEvent({
         errorSource: "unknown",
+        providerCompleted: true,
         metadata,
         type: "model_output_error",
         message: `Model generated an invalid tool call for ${metadata.model}.`,
@@ -258,6 +261,7 @@ export function finishReasonToErrorEvent(
     default:
       return buildErrorEvent({
         errorSource: "provider",
+        providerCompleted: true,
         metadata,
         type: "unknown_error",
         message: `Unexpected finish reason from Google: ${finishReason}.`,
