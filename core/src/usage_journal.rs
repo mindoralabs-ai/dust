@@ -7,7 +7,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
@@ -100,6 +100,60 @@ impl CoreUsageJournal {
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(conn)
+    }
+
+    /// Persist the signed registry fence on the same retained, FULL-sync volume
+    /// as the usage outbox before a route can authorize a provider effect.
+    pub fn fence_registry(
+        &self,
+        revision: u64,
+        digest: [u8; 32],
+        current: &HashMap<String, String>,
+    ) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<(u64, Vec<u8>, String)> = tx
+            .query_row(
+                "SELECT revision, payload_digest, tenant_identity_json
+                 FROM dust_tenant_route_fence WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let mut retained = HashMap::new();
+        if let Some((prior_revision, prior_digest, prior_json)) = prior {
+            if revision < prior_revision
+                || (revision == prior_revision && digest.as_slice() != prior_digest.as_slice())
+            {
+                bail!("Dust registry revision rollback or conflict");
+            }
+            retained = serde_json::from_str::<HashMap<String, String>>(&prior_json)?;
+            for (tenant_id, prior_identity) in &retained {
+                if current.get(tenant_id) != Some(prior_identity) {
+                    bail!("Dust registry tenant identity changed or disappeared");
+                }
+            }
+        }
+        retained.extend(
+            current
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        tx.execute(
+            "INSERT INTO dust_tenant_route_fence
+             (singleton, revision, payload_digest, tenant_identity_json)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision,
+               payload_digest = excluded.payload_digest,
+               tenant_identity_json = excluded.tenant_identity_json",
+            params![
+                revision,
+                digest.as_slice(),
+                serde_json::to_string(&retained)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// @cc [label:security;backend] dust-core-journal-health-evidence
@@ -343,7 +397,8 @@ impl CoreUsageJournal {
                AND manual_review_required = 0
                AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
                AND state IN ('started', 'unknown', 'exact')
-             ORDER BY created_at_ms, attempt_id LIMIT ?2",
+             ORDER BY CASE WHEN state = 'exact' AND retry_count = 0 THEN 0 ELSE 1 END,
+                      next_retry_at_ms, created_at_ms, attempt_id LIMIT ?2",
         )?;
         let ids = stmt
             .query_map(params![now, limit as i64], |r| r.get::<_, String>(0))?
@@ -798,6 +853,36 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn fresh_exact_usage_is_not_starved_by_failed_older_claims() {
+        let dir = tempdir().expect("test operation failed");
+        let journal = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        let conn = journal.connection().expect("test operation failed");
+        for index in 0..4 {
+            let entry = attempt(&format!("fair-{index}"));
+            journal.start(&entry).expect("test operation failed");
+            journal
+                .settle_exact(
+                    &entry,
+                    &format!("provider-fair-{index}"),
+                    EmbeddingUsage { input_tokens: 1 },
+                )
+                .expect("test operation failed");
+            if index < 3 {
+                conn.execute(
+                    "UPDATE dust_usage_attempts SET retry_count = 1 WHERE attempt_id = ?1",
+                    [&entry.attempt_id],
+                )
+                .expect("test operation failed");
+            }
+        }
+        let claimed = journal
+            .claim_due("fair-worker", 3)
+            .expect("test claim failed");
+        assert!(claimed.iter().any(|claim| claim.attempt_id == "fair-3"));
     }
 
     #[test]

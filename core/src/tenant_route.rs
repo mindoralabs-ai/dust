@@ -4,6 +4,7 @@
 //! fallback is permitted after a timeout, invalid signature, or expiry. The
 //! retained cache only fences global revision rollback and conflicting replay.
 
+use crate::usage_journal::CoreUsageJournal;
 use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -150,6 +151,7 @@ pub struct CoreTenantRouteResolver<F> {
     pinned: HashMap<String, [u8; 32]>,
     required_revision: u64,
     seen: Mutex<Option<SeenRevision>>,
+    retained_journal: Option<CoreUsageJournal>,
 }
 
 impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
@@ -169,7 +171,19 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
             pinned,
             required_revision,
             seen: Mutex::new(None),
+            retained_journal: None,
         })
+    }
+
+    pub fn new_retained(
+        fetcher: F,
+        pins: Vec<PinnedVerifier>,
+        required_revision: u64,
+        journal: CoreUsageJournal,
+    ) -> Result<Self> {
+        let mut resolver = Self::new(fetcher, pins, required_revision)?;
+        resolver.retained_journal = Some(journal);
+        Ok(resolver)
     }
 
     /// `workspace` must be the value returned by the signed Front-to-Core
@@ -380,7 +394,9 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                 Ok((tenant.tenant_id.clone(), canonical_ascii(&value)?))
             })
             .collect::<Result<_>>()?;
-        {
+        if let Some(journal) = &self.retained_journal {
+            journal.fence_registry(payload.revision, digest, &tenant_identity)?;
+        } else {
             let mut seen = self
                 .seen
                 .lock()
@@ -513,8 +529,8 @@ fn validate_payload(payload: &Payload) -> Result<()> {
         if !tenants.contains(m.tenant_id.as_str())
             || !bounded_string(&m.employee_id)
             || m.authority_namespace != "control-ui"
-            || !reference(&m.dust_user_id)
-            || !reference(&m.workos_user_id)
+            || !bounded_string(&m.dust_user_id)
+            || !bounded_string(&m.workos_user_id)
             || m.revision > payload.revision
             || !member_pairs.insert((m.tenant_id.as_str(), m.employee_id.as_str()))
             || !dust_users.insert((m.tenant_id.as_str(), m.dust_user_id.as_str()))
@@ -606,7 +622,7 @@ fn canonical_ascii(value: &Value) -> Result<String> {
             Value::String(s) => {
                 let json = serde_json::to_string(s)?;
                 for c in json.chars() {
-                    if c.is_ascii() {
+                    if c.is_ascii() && c != '\u{7f}' {
                         out.push(c);
                     } else {
                         for unit in c.encode_utf16(&mut [0; 2]).iter() {
@@ -714,6 +730,11 @@ mod tests {
             Value::String(format!("{}@example.com", "e".repeat(245)));
         let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
         assert!(validate_payload(&parsed).is_err());
+        let mut value = payload(1_000, 1);
+        value["memberships"][0]["dust_user_id"] = Value::String("dust.user@example.com".into());
+        value["memberships"][0]["workos_user_id"] = Value::String("workos.user@example.com".into());
+        let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
+        validate_payload(&parsed).expect("punctuated membership IDs should be valid");
     }
 
     fn signed(payload: Value, key: &Ed25519KeyPair) -> Vec<u8> {
@@ -1010,10 +1031,10 @@ mod tests {
 
     #[test]
     fn canonical_ascii_matches_python_string_escaping() {
-        let input = serde_json::json!({"z": "😀 café", "a": [1, true]});
+        let input = serde_json::json!({"z": "😀 café\u{7f}", "a": [1, true]});
         assert_eq!(
             canonical_ascii(&input).expect("test operation failed"),
-            "{\"a\":[1,true],\"z\":\"\\ud83d\\ude00 caf\\u00e9\"}"
+            "{\"a\":[1,true],\"z\":\"\\ud83d\\ude00 caf\\u00e9\\u007f\"}"
         );
     }
 
@@ -1136,6 +1157,50 @@ mod tests {
             Value::String("org_other".into());
         assert!(resolver
             .resolve_delivery_bundle(&signed(changed_organization, &key), &claim, now)
+            .is_err());
+    }
+
+    #[test]
+    fn retained_tenant_fence_survives_resolver_restart() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal =
+            CoreUsageJournal::open(dir.path().join("core.sqlite")).expect("test operation failed");
+        let key = keypair();
+        let public_key: [u8; 32] = key
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("test key failed");
+        let pin = PinnedVerifier {
+            key_id: key_id_for_public_key(&public_key),
+            public_key,
+        };
+        let now = chrono::Utc::now().timestamp();
+        let initial = signed(payload(now, 7), &key);
+        let make_resolver = || {
+            CoreTenantRouteResolver::new_retained(
+                MockFetcher {
+                    raw: Arc::new(Mutex::new(initial.clone())),
+                    fail: Arc::new(AtomicBool::new(false)),
+                },
+                vec![pin.clone()],
+                7,
+                journal.clone(),
+            )
+            .expect("test resolver failed")
+        };
+        let claim = settled_claim();
+        make_resolver()
+            .resolve_delivery_bundle(&initial, &claim, now)
+            .expect("initial signed registry failed");
+        let mut changed = payload(now, 8);
+        changed["tenants"][0]["private_route"] = Value::String("https://10.1.1.3".into());
+        changed["tenants"][0]["admission_url"] =
+            Value::String("https://10.1.1.3/internal/usage/dust/admission".into());
+        changed["tenants"][0]["usage_ingest_url"] =
+            Value::String("https://10.1.1.3/internal/usage/events".into());
+        assert!(make_resolver()
+            .resolve_delivery_bundle(&signed(changed, &key), &claim, now)
             .is_err());
     }
 }

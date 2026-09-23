@@ -34,3 +34,11 @@ CREATE INDEX IF NOT EXISTS dust_usage_attempts_reconcile_idx
       AND state IN ('started', 'unknown', 'exact', 'manual_review_required');
 CREATE INDEX IF NOT EXISTS dust_usage_attempts_tenant_state_idx
     ON dust_usage_attempts (tenant_id, state, created_at_ms);
+
+-- Durable rollback and tenant-identity fence; accepted before provider I/O.
+CREATE TABLE IF NOT EXISTS dust_tenant_route_fence (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL,
+    payload_digest BLOB NOT NULL,
+    tenant_identity_json TEXT NOT NULL
+);
