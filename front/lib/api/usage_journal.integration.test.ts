@@ -12,7 +12,6 @@ import {
   startFrontUsageAttempt,
 } from "@app/lib/api/usage_journal";
 import { frontSequelize } from "@app/lib/resources/storage";
-import { DustUsageAttemptModel } from "@app/lib/resources/storage/models/dust_usage_attempt";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -48,7 +47,6 @@ describe.runIf(enabled)(
         "utf8"
       );
       await observer.query(migration);
-      await DustUsageAttemptModel.sync({ alter: true });
     });
 
     afterAll(async () => {
@@ -164,6 +162,48 @@ describe.runIf(enabled)(
           ["exact", second.attemptId]
         )
       ).rejects.toThrow();
+    });
+
+    it("claims fresh exact usage ahead of repeatedly due older work", async () => {
+      const base = {
+        tenantId: "tenant-test-fairness",
+        workspaceId: "workspace-test-fairness",
+        conversationId: "conversation-test-fairness",
+        model: "gemini-2.5-flash",
+        routeId: "tenant-test-fairness:7",
+      };
+      const oldAttempts = [newFrontUsageAttemptId(), newFrontUsageAttemptId()];
+      for (const attemptId of oldAttempts) {
+        await startFrontUsageAttempt({ ...base, attemptId });
+        await markFrontUsageUnknown(attemptId, `unknown:${attemptId}`);
+        await observer.query(
+          `UPDATE "dust_usage_attempts" SET "retryCount" = 3,
+           "createdAt" = now() - interval '2 days',
+           "nextRetryAt" = now() - interval '1 hour'
+           WHERE "attemptId" = $1`,
+          [attemptId]
+        );
+      }
+      const fresh = { ...base, attemptId: newFrontUsageAttemptId() };
+      await startFrontUsageAttempt(fresh);
+      await settleFrontUsageExact({
+        attempt: fresh,
+        providerOperationId: `vertex:${fresh.attemptId}`,
+        counts: {
+          inputTokens: 2,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const [claimed] = await claimFrontUsageWork("worker-test-fairness", 1);
+      expect(claimed.attemptId).toBe(fresh.attemptId);
+      await completeFrontUsageClaim({
+        attemptId: fresh.attemptId,
+        leaseOwner: claimed.leaseOwner,
+        leaseNonce: claimed.leaseNonce,
+        delivered: true,
+      });
     });
 
     it("reports tenant-local unresolved work and undelivered exact usage to CRM", async () => {

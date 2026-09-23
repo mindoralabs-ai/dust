@@ -461,7 +461,10 @@ export async function claimFrontUsageWork(
             AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
             AND "nextRetryAt" <= now()
             AND "state" IN ('started', 'unknown', 'exact')
-          ORDER BY "createdAt" LIMIT :limit FOR UPDATE SKIP LOCKED
+          ORDER BY CASE WHEN "state" = 'exact' AND "retryCount" = 0
+                        THEN 0 ELSE 1 END,
+                   "nextRetryAt", "createdAt"
+          LIMIT :limit FOR UPDATE SKIP LOCKED
        )
        UPDATE "dust_usage_attempts" AS j SET "leaseOwner" = :leaseOwner,
          "leaseNonce" = :leaseNonce,
