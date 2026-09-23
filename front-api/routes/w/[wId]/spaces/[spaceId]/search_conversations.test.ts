@@ -607,7 +607,9 @@ describe("GET /api/w/:wId/spaces/:spaceId/search_conversations", () => {
       10,
       expect.any(Object),
       false,
-      expect.any(Array)
+      expect.any(Array),
+      undefined,
+      expect.any(Function)
     );
   });
 
