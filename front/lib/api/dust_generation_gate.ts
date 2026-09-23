@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import type {
   ActiveDustIdentity,
   DustTenantRouteResolver,
@@ -73,18 +72,9 @@ export async function authorizeDustGenerationAttempt({
   // The route, tenant, and key are deliberately absent from the input. The
   // signer-verified binding chooses all three from the authenticated identity.
   let route: ReturnType<DustTenantRouteResolver["resolve"]>;
-  let componentKey: string;
   try {
     route = resolver.resolve(identity);
     if (route.workspaceId !== identity.workspaceId) {
-      throw new DustGenerationGateUnavailable();
-    }
-    componentKey = (await readFile(route.frontCredentialRef, "utf8")).trim();
-    if (
-      componentKey.length < 32 ||
-      componentKey.length > 4096 ||
-      /[\r\n]/.test(componentKey)
-    ) {
       throw new DustGenerationGateUnavailable();
     }
   } catch {
@@ -103,7 +93,7 @@ export async function authorizeDustGenerationAttempt({
 
   let startPermit: FrontUsageStartPermit;
   try {
-    const started = await startFrontUsageAttemptForAdmission(attempt);
+    const started = await startFrontUsageAttemptForAdmission(attempt, route);
     if (!started) {
       throw new DustGenerationGateUnavailable();
     }
@@ -114,8 +104,7 @@ export async function authorizeDustGenerationAttempt({
 
   try {
     await requireDustAdmission({
-      routeUrl: route.admissionUrl,
-      componentKey,
+      route,
       operationId: attempt.attemptId,
       startPermit,
     });

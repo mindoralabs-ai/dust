@@ -53,7 +53,7 @@ describe("Dust POC accounting worker", () => {
     resolveRoute.mockResolvedValue(resolver);
     routesForMaintenance.mockResolvedValue([routeA, routeB]);
     deliver.mockImplementation(async () => {
-      return 1;
+      return { processed: 1 };
     });
     heartbeat.mockImplementation(async () => {
       if (heartbeat.mock.calls.length === 2) {
@@ -64,31 +64,28 @@ describe("Dust POC accounting worker", () => {
     expect(resolveRoute).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(resolver);
     expect(heartbeat).toHaveBeenCalledTimes(2);
-    expect(heartbeat).toHaveBeenCalledWith(routeA);
-    expect(heartbeat).toHaveBeenCalledWith(routeB);
+    expect(heartbeat).toHaveBeenCalledWith(routeA, { processed: 1 });
+    expect(heartbeat).toHaveBeenCalledWith(routeB, { processed: 1 });
   });
 
-  it("sends heartbeats while a delivery batch is still running", async () => {
+  it("sends no heartbeat until the delivery batch succeeds", async () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     const { runDustPocUsageReconciler } = await import(
       "@app/temporal/dust_usage/worker"
     );
     const controller = new AbortController();
-    let finishDelivery: (() => void) | undefined;
-    deliver.mockImplementation(
-      () =>
-        new Promise<number>((resolve) => {
-          finishDelivery = () => resolve(1);
-        })
-    );
+    let heartbeatBeforeSuccess = false;
+    deliver.mockImplementation(async () => {
+      heartbeatBeforeSuccess = heartbeat.mock.calls.length > 0;
+      return { processed: 0 };
+    });
     resolveRoute.mockResolvedValue({ resolve: vi.fn() } as never);
     routesForMaintenance.mockResolvedValue([{ tenantId: "tenant-a" } as never]);
     heartbeat.mockImplementation(async () => {
-      expect(finishDelivery).toBeDefined();
       controller.abort();
-      finishDelivery?.();
     });
     await runDustPocUsageReconciler(controller.signal);
+    expect(heartbeatBeforeSuccess).toBe(false);
     expect(heartbeat).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledTimes(1);
   });

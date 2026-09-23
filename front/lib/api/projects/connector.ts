@@ -66,11 +66,6 @@ export async function createDataSourceAndConnectorForProject(
         );
       }
 
-      const dataSourceEmbedder =
-        (await selectPocEmbeddingProviderForAuth(auth, workspace.sId)) ??
-        workspace.defaultEmbeddingProvider ??
-        DEFAULT_EMBEDDING_PROVIDER_ID;
-      const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];
       const coreAPI = new CoreAPI(config.getCoreAPIConfig(), logger);
       const connectorsAPI = new ConnectorsAPI(
         config.getConnectorsAPIConfig(),
@@ -126,6 +121,11 @@ export async function createDataSourceAndConnectorForProject(
 
       // Create Core API project if needed
       if (!frontDataSource) {
+        const dataSourceEmbedder =
+          (await selectPocEmbeddingProviderForAuth(auth, workspace.sId)) ??
+          workspace.defaultEmbeddingProvider ??
+          DEFAULT_EMBEDDING_PROVIDER_ID;
+        const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];
         createdCoreComponents = true;
         const dustProject = await coreAPI.createProject();
         if (dustProject.isErr()) {

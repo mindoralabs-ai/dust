@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import {
   authorizeDustGenerationAttempt,
   consumeDustProviderPermit,
@@ -20,11 +19,6 @@ import {
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
-  const readFile = vi.fn();
-  return { ...actual, default: { ...actual, readFile }, readFile };
-});
 vi.mock("@app/lib/api/usage_admission", async (importOriginal) => ({
   ...(await importOriginal()),
   requireDustAdmission: vi.fn(),
@@ -35,7 +29,6 @@ vi.mock("@app/lib/api/usage_journal", () => ({
   settleFrontUsageNoCharge: vi.fn(),
 }));
 
-const readKey = vi.mocked(readFile);
 const admit = vi.mocked(requireDustAdmission);
 const newId = vi.mocked(newFrontUsageAttemptId);
 const start = vi.mocked(startFrontUsageAttemptForAdmission);
@@ -96,9 +89,6 @@ describe("Dust Front generation gate", () => {
     vi.resetAllMocks();
     let next = 0;
     newId.mockImplementation(() => `attempt-${++next}`);
-    readKey.mockImplementation(async (path) =>
-      String(path).includes("tenant-a") ? "a".repeat(40) : "b".repeat(40)
-    );
     start.mockImplementation(async (attempt) => ({
       attemptId: attempt.attemptId,
     }));
@@ -115,25 +105,13 @@ describe("Dust Front generation gate", () => {
     expect(selected.resolve).toHaveBeenNthCalledWith(2, identity("a"));
     expect(selected.resolve).toHaveBeenNthCalledWith(3, identity("b"));
     expect(selected.resolve).toHaveBeenNthCalledWith(4, identity("b"));
-    expect(readKey).toHaveBeenNthCalledWith(
-      1,
-      route("a").frontCredentialRef,
-      "utf8"
-    );
-    expect(readKey).toHaveBeenNthCalledWith(
-      2,
-      route("b").frontCredentialRef,
-      "utf8"
-    );
     expect(admit).toHaveBeenNthCalledWith(1, {
-      routeUrl: route("a").admissionUrl,
-      componentKey: "a".repeat(40),
+      route: route("a"),
       operationId: "attempt-1",
       startPermit: { attemptId: "attempt-1" },
     });
     expect(admit).toHaveBeenNthCalledWith(2, {
-      routeUrl: route("b").admissionUrl,
-      componentKey: "b".repeat(40),
+      route: route("b"),
       operationId: "attempt-2",
       startPermit: { attemptId: "attempt-2" },
     });
@@ -165,15 +143,13 @@ describe("Dust Front generation gate", () => {
       componentKey: "b".repeat(40),
     };
     await authorizeDustGenerationAttempt(forged);
-    expect(readKey).toHaveBeenCalledWith(route("a").frontCredentialRef, "utf8");
     expect(admit).toHaveBeenCalledWith(
       expect.objectContaining({
-        routeUrl: route("a").admissionUrl,
-        componentKey: "a".repeat(40),
+        route: route("a"),
       })
     );
     expect(admit).not.toHaveBeenCalledWith(
-      expect.objectContaining({ routeUrl: route("b").admissionUrl })
+      expect.objectContaining({ route: route("b") })
     );
   });
 
@@ -184,7 +160,6 @@ describe("Dust Front generation gate", () => {
         identity: { ...identity("a"), workosUserId: "workos-b" },
       })
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
-    expect(readKey).not.toHaveBeenCalled();
     expect(start).not.toHaveBeenCalled();
     expect(admit).not.toHaveBeenCalled();
   });
@@ -254,18 +229,13 @@ describe("Dust Front generation gate", () => {
     );
   });
 
-  it("fails closed on route, key, or journal errors without admission", async () => {
+  it("fails closed on route or journal errors without admission", async () => {
     const selected = resolver();
     vi.mocked(selected.resolve).mockImplementationOnce(() => {
       throw new Error("route failed");
     });
     await expect(
       authorizeDustGenerationAttempt(input("a", selected))
-    ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
-
-    readKey.mockRejectedValueOnce(new Error("key missing"));
-    await expect(
-      authorizeDustGenerationAttempt(input("a"))
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
 
     start.mockRejectedValueOnce(new Error("journal failed"));

@@ -35,14 +35,12 @@ export async function runDustPocUsageReconciler(
       }
     }
   }
-  await Promise.all([
-    runLoop(async () => {
-      const resolver = await pocRouteResolverForMaintenance();
-      await runFrontUsageDeliveryBatch(resolver);
-    }, 30_000),
-    runLoop(async () => {
-      const routes = await pocRoutesForMaintenance();
-      await Promise.all(routes.map((route) => sendFrontUsageHeartbeat(route)));
-    }, 10_000),
-  ]);
+  await runLoop(async () => {
+    const resolver = await pocRouteResolverForMaintenance();
+    const batchSuccess = await runFrontUsageDeliveryBatch(resolver);
+    const routes = await pocRoutesForMaintenance();
+    await Promise.all(
+      routes.map((route) => sendFrontUsageHeartbeat(route, batchSuccess))
+    );
+  }, 10_000);
 }
