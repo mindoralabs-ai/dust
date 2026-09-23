@@ -753,9 +753,11 @@ impl Embedder for VertexAIEmbedder {
         Err(anyhow!("Vertex embedding is disabled until trusted tenant admission and durable usage accounting are integrated"))
     }
 
-    /// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
-    /// Each input is resolved from a verified workspace, durably journaled,
-    /// and admitted for its tenant before exactly one provider dispatch.
+/// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
+/// Each distinct document input is resolved from a verified workspace,
+/// durably journaled, and admitted before one provider dispatch. Repeated
+/// positions in the same batch reuse that vector without another paid call.
+/// Query inputs keep one attempt per position.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,
