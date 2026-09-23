@@ -87,6 +87,15 @@ app.post("/", validate("param", ParamsSchema), async (ctx) => {
     upsertArgs,
   });
   if (rUpsert.isErr()) {
+    if (rUpsert.error.code === "ambiguous_provider_effect") {
+      return apiError(ctx, {
+        status_code: 409,
+        api_error: {
+          type: "data_source_error",
+          message: rUpsert.error.message,
+        },
+      });
+    }
     let status_code: number;
     let type: APIErrorType;
 

@@ -22,6 +22,7 @@ import type { ModelIdType } from "@app/types/assistant/models/types";
 import { Err, Ok } from "@app/types/shared/result";
 import { safeParseJSON } from "@app/types/shared/utils/json_utils";
 import { CancelledFailure, heartbeat, sleep } from "@temporalio/activity";
+import { ApplicationFailure } from "@temporalio/common";
 
 const LLM_HEARTBEAT_INTERVAL_MS = 10_000;
 // Log heartbeat status periodically to track long-waiting LLM calls.
@@ -84,7 +85,10 @@ class LLMStreamTimeoutError extends Error {
   }
 }
 
-function makeLLMTimeoutResponse(kind: LLMStreamTimeoutKind): GetOutputResponse {
+function makeLLMTimeoutResponse(
+  kind: LLMStreamTimeoutKind,
+  isRetryable = true
+): GetOutputResponse {
   return new Err({
     type: "shouldRetryMessage",
     content: {
@@ -93,7 +97,7 @@ function makeLLMTimeoutResponse(kind: LLMStreamTimeoutKind): GetOutputResponse {
         kind === "activity"
           ? "The agent step hit its time budget before the model response completed"
           : `LLM stream timeout after ${LLM_EVENT_TIMEOUT_MINUTES} minutes waiting for event`,
-      isRetryable: true,
+      isRetryable,
       errorSource: "dust",
     },
   });
@@ -624,7 +628,17 @@ export async function getOutputFromLLMStream(
       // Watchdog timeouts abort after llm_interaction.count is already emitted
       // and never become a terminal LLM error, so they do not increment
       // llm_error.count.
-      return makeLLMTimeoutResponse(err.kind);
+      return makeLLMTimeoutResponse(err.kind, !llm.hasPocProviderDispatch());
+    }
+    if (
+      llm.hasPocProviderDispatch() &&
+      err instanceof ApplicationFailure &&
+      err.type === "ModelInterruption"
+    ) {
+      throw ApplicationFailure.nonRetryable(
+        "Dust POC provider outcome requires manual accounting review",
+        "dust_poc_accounting_unavailable"
+      );
     }
     throw err;
   }

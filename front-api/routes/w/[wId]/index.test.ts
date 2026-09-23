@@ -318,3 +318,25 @@ describe("POST /api/w/:wId (inactive agent archival)", () => {
     ).toBeUndefined();
   });
 });
+
+describe("POST /api/w/:wId (embedding default)", () => {
+  it("rejects Vertex and preserves the persisted provider settings", async () => {
+    const { workspace } = await setup();
+    const before = await WorkspaceResource.fetchById(workspace.sId);
+
+    const response = await post(workspace, {
+      whiteListedProviders: ["google_ai_studio"],
+      defaultEmbeddingProvider: "vertex_ai",
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { type: "invalid_request_error" },
+    });
+    const after = await WorkspaceResource.fetchById(workspace.sId);
+    expect(after?.defaultEmbeddingProvider).toBe(
+      before?.defaultEmbeddingProvider
+    );
+    expect(after?.whiteListedProviders).toEqual(before?.whiteListedProviders);
+  });
+});

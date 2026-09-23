@@ -671,6 +671,14 @@ export async function upsertDocument({
   });
 
   if (upsertRes.isErr()) {
+    if (upsertRes.error.code === "ambiguous_provider_effect") {
+      return new Err(
+        new DustError(
+          "ambiguous_provider_effect",
+          "The document upsert outcome is uncertain. Check the document before trying again."
+        )
+      );
+    }
     return new Err(
       new DustError(
         "core_api_error",
