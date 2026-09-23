@@ -28,27 +28,27 @@ export async function sendFrontUsageHeartbeat(
   resolver: DustTenantRouteResolver,
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
-  await resolver.refresh();
-  const [current] = resolver.listActiveRoutesForMaintenance(
-    new Set([route.workspaceId])
-  );
-  if (
-    !current ||
-    current.tenantId !== route.tenantId ||
-    current.workspaceId !== route.workspaceId
-  ) {
-    throw new Error("Dust Front usage heartbeat unavailable");
-  }
-  if (!consumeFrontUsageBatchSuccess(batchSuccess, route.tenantId)) {
-    throw new Error("Dust Front usage heartbeat unavailable");
-  }
-  const health = await readFrontUsageHealth(current.tenantId);
-  const observedAtSeconds = Date.now() / 1000;
-  const key = (await readFile(current.frontCredentialRef, "utf8")).trim();
-  if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
-    throw new Error("Dust Front usage heartbeat unavailable");
-  }
   try {
+    await resolver.refresh();
+    const [current] = resolver.listActiveRoutesForMaintenance(
+      new Set([route.workspaceId])
+    );
+    if (
+      !current ||
+      current.tenantId !== route.tenantId ||
+      current.workspaceId !== route.workspaceId
+    ) {
+      throw new Error("Dust Front usage heartbeat unavailable");
+    }
+    if (!consumeFrontUsageBatchSuccess(batchSuccess, route.tenantId)) {
+      throw new Error("Dust Front usage heartbeat unavailable");
+    }
+    const health = await readFrontUsageHealth(current.tenantId);
+    const observedAtSeconds = Date.now() / 1000;
+    const key = (await readFile(current.frontCredentialRef, "utf8")).trim();
+    if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
+      throw new Error("Dust Front usage heartbeat unavailable");
+    }
     const response = await fetchImpl(
       `${current.privateRoute}/internal/usage/producers/dust-front/heartbeat`,
       {
@@ -70,11 +70,12 @@ export async function sendFrontUsageHeartbeat(
     );
     const receipt =
       response.status === 200 ? await readBoundedReceipt(response) : null;
-    if (heartbeatReceiptSchema.safeParse(receipt).success) {
-      return;
+    if (!heartbeatReceiptSchema.safeParse(receipt).success) {
+      throw new Error("Dust Front usage heartbeat unavailable");
     }
   } catch {
-    // Transport errors may contain the signed private CRM destination.
+    // Route, credential, journal, and transport errors may include private
+    // tenant details. The reconciler receives only this generic failure.
+    throw new Error("Dust Front usage heartbeat unavailable");
   }
-  throw new Error("Dust Front usage heartbeat unavailable");
 }

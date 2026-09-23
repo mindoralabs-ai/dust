@@ -120,6 +120,15 @@ describe("Dust Front journal heartbeat", () => {
         fetchImpl as typeof fetch
       )
     ).rejects.toThrow();
+    key.mockRejectedValueOnce(new Error("ENOENT /run/tenant-a-front-key"));
+    await expect(
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        resolver,
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toEqual(new Error("Dust Front usage heartbeat unavailable"));
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -154,7 +163,7 @@ describe("Dust Front journal heartbeat", () => {
         resolver,
         fetchImpl as typeof fetch
       )
-    ).rejects.toThrow("revoked");
+    ).rejects.toThrow("Dust Front usage heartbeat unavailable");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
