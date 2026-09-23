@@ -1,5 +1,4 @@
 import { LabsTranscriptsConfigurationResource } from "@app/lib/resources/labs_transcripts_resource";
-import { LabsTranscriptsConfigurationModel } from "@app/lib/resources/storage/models/labs_transcripts";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import { expect, it } from "vitest";
 
@@ -10,22 +9,17 @@ it("retains an ambiguous transcript for manual review without normal reprocessin
   if (!user) {
     throw new Error("test user unavailable");
   }
-  const model = await LabsTranscriptsConfigurationModel.create({
+  const configuration = await LabsTranscriptsConfigurationResource.makeNew({
     workspaceId: workspace.id,
     userId: user.id,
     provider: "google_drive",
     connectionId: null,
     agentConfigurationId: null,
-    status: "active",
     isDefaultWorkspaceConfiguration: false,
     dataSourceViewId: null,
     credentialId: null,
     useConnectorConnection: false,
   });
-  const configuration = new LabsTranscriptsConfigurationResource(
-    LabsTranscriptsConfigurationModel,
-    model.get()
-  );
 
   await configuration.recordHistory({
     workspace,

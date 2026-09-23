@@ -32,6 +32,7 @@ import { isProviderWithDefaultWorkspaceConfiguration } from "@app/types/oauth/li
 import { Err } from "@app/types/shared/result";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import { isEmptyString } from "@app/types/shared/utils/general";
+import { ApplicationFailure } from "@temporalio/common";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 import { UniqueConstraintError } from "sequelize";
@@ -469,7 +470,29 @@ export async function processTranscriptActivity(
           });
         } catch (error) {
           if (!(error instanceof UniqueConstraintError)) {
-            throw error;
+            // A failed marker cannot authorize another paid upsert retry.
+            // Also stop future scheduled batches until an operator reconciles it.
+            try {
+              const stopped = await stopRetrieveTranscriptsWorkflow(
+                transcriptsConfiguration,
+                false
+              );
+              if (stopped.isErr()) {
+                localLogger.error(
+                  {},
+                  "[processTranscriptActivity] Could not stop transcript schedule after ambiguous embedding."
+                );
+              }
+            } catch {
+              localLogger.error(
+                {},
+                "[processTranscriptActivity] Could not stop transcript schedule after ambiguous embedding."
+              );
+            }
+            throw ApplicationFailure.nonRetryable(
+              "Transcript embedding outcome is unknown; manual reconciliation required",
+              "ambiguous_provider_effect"
+            );
           }
         }
         localLogger.warn(
