@@ -211,6 +211,17 @@ describe("Dust Front generation gate", () => {
     );
   });
 
+  it("accepts a signer key rotation with the same tenant route", async () => {
+    const selected = resolver();
+    vi.mocked(selected.resolve)
+      .mockReturnValueOnce(route("a"))
+      .mockReturnValueOnce({ ...route("a"), keyId: "rotated-key" });
+    await expect(
+      authorizeDustGenerationAttempt(input("a", selected))
+    ).resolves.toMatchObject({ attempt: { tenantId: "tenant-a" } });
+    expect(noCharge).not.toHaveBeenCalled();
+  });
+
   it.each([
     "denied",
     "unavailable",

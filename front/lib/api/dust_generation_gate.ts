@@ -117,7 +117,6 @@ export async function authorizeDustGenerationAttempt({
       current.tenantId !== route.tenantId ||
       current.workspaceId !== route.workspaceId ||
       current.revision !== route.revision ||
-      current.keyId !== route.keyId ||
       current.admissionUrl !== route.admissionUrl ||
       current.frontCredentialRef !== route.frontCredentialRef
     ) {
