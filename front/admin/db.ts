@@ -90,6 +90,7 @@ import { CreditUsageConfigurationModel } from "@app/lib/resources/storage/models
 import { CreditModel } from "@app/lib/resources/storage/models/credits";
 import { DataSourceModel } from "@app/lib/resources/storage/models/data_source";
 import { DataSourceViewModel } from "@app/lib/resources/storage/models/data_source_view";
+import { DustUsageAttemptModel } from "@app/lib/resources/storage/models/dust_usage_attempt";
 import { FileSystemBlobCleanupModel } from "@app/lib/resources/storage/models/file_system_blob_cleanup";
 import { FileSystemMutationModel } from "@app/lib/resources/storage/models/file_system_mutation";
 import { FileSystemNodeModel } from "@app/lib/resources/storage/models/file_system_node";
@@ -186,6 +187,7 @@ export function loadAllModels() {
     FileSystemNodeModel,
     FileModel,
     FileSystemMutationModel,
+    DustUsageAttemptModel,
     FileSystemBlobCleanupModel,
     SandboxFunctionModel,
     SandboxFunctionInvocationModel,
