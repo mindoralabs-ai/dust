@@ -40,9 +40,11 @@ CREATE INDEX IF NOT EXISTS dust_usage_attempts_tenant_state_idx
 CREATE TABLE IF NOT EXISTS dust_embedding_results (
     input_hash BLOB PRIMARY KEY CHECK (length(input_hash) = 32),
     attempt_id TEXT NOT NULL UNIQUE REFERENCES dust_usage_attempts(attempt_id),
-    vector_json TEXT NOT NULL,
+    vector_json TEXT,
     created_at_ms INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS dust_embedding_results_expiry_idx
+    ON dust_embedding_results (created_at_ms) WHERE vector_json IS NOT NULL;
 
 -- Durable rollback and tenant-identity fence; accepted before provider I/O.
 CREATE TABLE IF NOT EXISTS dust_tenant_route_fence (

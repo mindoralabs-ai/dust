@@ -347,7 +347,6 @@ fn same_signed_route(a: &CoreTenantRoute, b: &CoreTenantRoute) -> bool {
         && a.usage_ingest_url == b.usage_ingest_url
         && a.core_credential_ref == b.core_credential_ref
         && a.journal_target == b.journal_target
-        && a.revision == b.revision
 }
 
 fn embedding_input_hash(
@@ -369,6 +368,31 @@ fn embedding_input_hash(
     *hasher.finalize().as_bytes()
 }
 
+fn finish_embedding_batch(
+    results: Vec<Result<Vec<f64>>>,
+    model: &str,
+) -> Result<Vec<EmbedderVector>> {
+    if results.iter().any(|result| {
+        result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.downcast_ref::<AmbiguousVertexEffect>().is_some())
+    }) {
+        return Err(AmbiguousVertexEffect.into());
+    }
+    results
+        .into_iter()
+        .map(|result| {
+            result.map(|vector| EmbedderVector {
+                created: crate::utils::now(),
+                provider: ProviderID::VertexAI.to_string(),
+                model: model.to_owned(),
+                vector,
+            })
+        })
+        .collect()
+}
+
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
 /// A unique, durable attempt and tenant-bound admission precede each provider
 /// request. A response is returned only after exact provider usage is frozen;
@@ -385,7 +409,7 @@ async fn run_guarded_attempt<A, AFut, P, PFut>(
 where
     A: FnOnce(CoreTenantRoute, CoreUsageAttempt, StartOutcome) -> AFut,
     AFut: Future<Output = Result<()>>,
-    P: FnOnce() -> PFut,
+    P: FnOnce(CoreUsageAttempt) -> PFut,
     PFut: Future<Output = Result<VertexEmbeddingResponse>>,
 {
     if model != MODEL_ID {
@@ -411,7 +435,7 @@ where
         )?;
         return Err(error);
     }
-    let response = match provider().await {
+    let response = match provider(attempt.clone()).await {
         Ok(response) => response,
         Err(error) if error.downcast_ref::<PreDispatchTokenError>().is_some() => {
             journal.settle_no_charge(
@@ -743,16 +767,19 @@ impl Embedder for VertexAIEmbedder {
             let client = self.client.clone();
             async move {
                 let route = runtime.resolver.resolve(workspace).await?;
-                let input_hash = embedding_input_hash(&route, &self.id, task_type, &input);
-                if let Some(vector) = runtime.journal.cached_embedding(&input_hash)? {
-                    return Ok(vector);
+                let input_hash = (task_type == EmbeddingTaskType::RetrievalDocument)
+                    .then(|| embedding_input_hash(&route, &self.id, task_type, &input));
+                if let Some(hash) = input_hash {
+                    if let Some(vector) = runtime.journal.cached_embedding(&hash)? {
+                        return Ok(vector);
+                    }
                 }
                 run_guarded_attempt(
                     &runtime.journal,
                     &route,
                     &self.id,
                     &format!("embedding:{}", workspace.sid()),
-                    Some(input_hash),
+                    input_hash,
                     |route, attempt, started| async move {
                         runtime
                             .admission
@@ -766,12 +793,17 @@ impl Embedder for VertexAIEmbedder {
                         }
                         Ok(())
                     },
-                    || async move {
+                    |attempt| async move {
                         // ADC is downstream of the per-attempt journal and CRM
                         // admission. A denied tenant must not request a token.
-                        let token = token_source
-                            .token()
-                            .await
+                        let token =
+                            tokio::time::timeout(Duration::from_secs(30), token_source.token())
+                                .await
+                                .map_err(|_| anyhow!(PreDispatchTokenError))?
+                                .map_err(|_| anyhow!(PreDispatchTokenError))?;
+                        runtime
+                            .journal
+                            .heartbeat_started(&attempt.attempt_id)
                             .map_err(|_| anyhow!(PreDispatchTokenError))?;
                         Self::request_one(&client, &endpoint, &token, &input, task_type).await
                     },
@@ -783,17 +815,7 @@ impl Embedder for VertexAIEmbedder {
         .buffered(MAX_CONCURRENT_REQUESTS)
         .collect::<Vec<_>>()
         .await;
-        results
-            .into_iter()
-            .map(|result| {
-                result.map(|vector| EmbedderVector {
-                    created: crate::utils::now(),
-                    provider: ProviderID::VertexAI.to_string(),
-                    model: self.id.clone(),
-                    vector,
-                })
-            })
-            .collect()
+        finish_embedding_batch(results, &self.id)
     }
 }
 
@@ -803,6 +825,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn ambiguous_input_takes_precedence_over_earlier_predispatch_error() {
+        let results = vec![
+            Err(anyhow!("admission unavailable")),
+            Err(AmbiguousVertexEffect.into()),
+        ];
+        let error = finish_embedding_batch(results, MODEL_ID).expect_err("ambiguous batch");
+        assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_some());
+    }
 
     struct FakeTokenSource(Result<String, &'static str>);
 
@@ -947,6 +979,8 @@ mod tests {
         let mut rotated_key = route.clone();
         rotated_key.key_id = "pin-b".into();
         assert!(same_signed_route(&route, &rotated_key));
+        rotated_key.revision += 1;
+        assert!(same_signed_route(&route, &rotated_key));
         rotated_key.workspace_id = "other-workspace".into();
         assert!(!same_signed_route(&route, &rotated_key));
         let provider_calls = AtomicUsize::new(0);
@@ -957,7 +991,7 @@ mod tests {
             "embedding-test",
             None,
             |_, _, _| async { Err(crate::quota_admission::AdmissionError::Denied.into()) },
-            || async {
+            |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 unreachable!()
             },
@@ -985,7 +1019,7 @@ mod tests {
                 ));
                 Ok(())
             },
-            || async {
+            |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(VertexEmbeddingResponse {
                     vector: vec![0.25; DIMENSIONS],
@@ -1015,7 +1049,7 @@ mod tests {
             "embedding-test",
             None,
             |_, _, _| async { Ok(()) },
-            || async { Err(anyhow!(PreDispatchTokenError)) },
+            |_| async { Err(anyhow!(PreDispatchTokenError)) },
         )
         .await;
         assert!(adc_failed.is_err());
@@ -1037,7 +1071,7 @@ mod tests {
             "embedding-test",
             None,
             |_, _, _| async { Ok(()) },
-            || async { Err(anyhow!("transport timeout")) },
+            |_| async { Err(anyhow!("transport timeout")) },
         )
         .await;
         assert!(ambiguous.is_err());
@@ -1056,7 +1090,7 @@ mod tests {
             "embedding-test",
             None,
             |_, _, _| async { Ok(()) },
-            || async {
+            |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 Err(anyhow!(ModelError {
                     message: "Vertex embedding HTTP status 429".into(),
@@ -1094,7 +1128,7 @@ mod tests {
             "embedding-test",
             None,
             |_, _, _| async { Ok(()) },
-            || async move {
+            |_| async move {
                 std::fs::remove_dir_all(journal_dir).expect("test operation failed");
                 Err(anyhow!("provider result unknown"))
             },

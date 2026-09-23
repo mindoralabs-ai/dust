@@ -17,6 +17,7 @@ const START_TIMEOUT_MS: i64 = 5 * 60 * 1000;
 const CLAIM_LEASE_MS: i64 = 60 * 1000;
 const RETRY_DELAY_MS: i64 = 60 * 1000;
 const REVIEW_DEADLINE_MS: i64 = 24 * 60 * 60 * 1000;
+const EMBEDDING_RESULT_RETRY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreUsageAttempt {
@@ -103,6 +104,11 @@ impl CoreUsageJournal {
         };
         let conn = journal.connection()?;
         conn.execute_batch(MIGRATION)?;
+        conn.execute(
+            "UPDATE dust_embedding_results SET vector_json = NULL
+             WHERE created_at_ms < ?1 AND vector_json IS NOT NULL",
+            [now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS],
+        )?;
         Ok(journal)
     }
 
@@ -279,7 +285,7 @@ impl CoreUsageJournal {
         let now = now_ms();
         let changed = conn.execute(
             "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2, updated_at_ms = ?3
-             WHERE attempt_id = ?1 AND state = 'started'",
+             WHERE attempt_id = ?1 AND state = 'started' AND next_retry_at_ms > ?3",
             params![attempt_id, now + START_TIMEOUT_MS, now],
         )?;
         if changed != 1 {
@@ -411,23 +417,27 @@ impl CoreUsageJournal {
 
     pub fn cached_embedding(&self, input_hash: &[u8; 32]) -> Result<Option<Vec<f64>>> {
         let conn = self.connection()?;
-        let json: Option<String> = conn
+        let retained: Option<(Option<String>, i64)> = conn
             .query_row(
-                "SELECT r.vector_json FROM dust_embedding_results r
+                "SELECT r.vector_json, r.created_at_ms FROM dust_embedding_results r
                  JOIN dust_usage_attempts a ON a.attempt_id = r.attempt_id
                  WHERE r.input_hash = ?1 AND a.state = 'exact'",
                 [input_hash.as_slice()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        json.map(|value| {
-            let vector: Vec<f64> = serde_json::from_str(&value)?;
-            if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
-                bail!("invalid retained embedding result");
-            }
-            Ok(vector)
-        })
-        .transpose()
+        let Some((json, created_at_ms)) = retained else {
+            return Ok(None);
+        };
+        if created_at_ms < now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS {
+            bail!("paid embedding result expired; manual recovery required");
+        }
+        let json = json.ok_or_else(|| anyhow!("paid embedding result requires manual recovery"))?;
+        let vector: Vec<f64> = serde_json::from_str(&json)?;
+        if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
+            bail!("invalid retained embedding result");
+        }
+        Ok(Some(vector))
     }
 
     fn settle_exact_inner(
@@ -500,6 +510,11 @@ impl CoreUsageJournal {
             _ => bail!("conflicting Core usage terminal replay"),
         }
         if let Some((input_hash, vector)) = embedding {
+            tx.execute(
+                "UPDATE dust_embedding_results SET vector_json = NULL
+                 WHERE created_at_ms < ?1 AND vector_json IS NOT NULL",
+                [now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS],
+            )?;
             tx.execute(
                 "INSERT OR IGNORE INTO dust_embedding_results
                  (input_hash, attempt_id, vector_json, created_at_ms)
@@ -765,6 +780,23 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn expired_start_cannot_be_renewed_for_provider_dispatch() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let entry = attempt("expired-start");
+        journal.start(&entry).expect("durable start");
+        journal
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_usage_attempts SET next_retry_at_ms = ?1 WHERE attempt_id = ?2",
+                params![now_ms() - 1, entry.attempt_id],
+            )
+            .expect("expire start");
+        assert!(journal.heartbeat_started(&entry.attempt_id).is_err());
+    }
+
+    #[test]
     fn settled_embedding_survives_reopen_and_never_precedes_exact_usage() {
         let dir = tempdir().expect("test directory");
         let path = dir.path().join("usage.sqlite");
@@ -802,6 +834,29 @@ mod tests {
                 .state,
             "exact"
         );
+        reopened
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_embedding_results SET created_at_ms = ?1 WHERE input_hash = ?2",
+                params![
+                    now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS - 1,
+                    hash.as_slice()
+                ],
+            )
+            .expect("age retained vector");
+        let reopened = CoreUsageJournal::open(&path).expect("reopen and prune");
+        assert!(reopened.cached_embedding(&hash).is_err());
+        let retained_marker: Option<String> = reopened
+            .connection()
+            .expect("journal connection")
+            .query_row(
+                "SELECT vector_json FROM dust_embedding_results WHERE input_hash = ?1",
+                [hash.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("retained marker");
+        assert!(retained_marker.is_none());
     }
 
     fn attempt(id: &str) -> CoreUsageAttempt {
