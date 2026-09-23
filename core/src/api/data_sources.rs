@@ -16,6 +16,7 @@ use crate::{
     data_sources::data_source::{Chunk, DataSource, Document},
     providers::embedder::EmbedderRequest,
     providers::provider::ProviderID,
+    quota_admission::AdmissionError,
     workspace_assertion::{self, DataSourcePair, VerifiedWorkspace},
 };
 use crate::{
@@ -495,6 +496,16 @@ pub async fn data_sources_search(
                             })),
                         }),
                     ),
+                    Err(e)
+                        if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) =>
+                    {
+                        error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "quota_exceeded",
+                            "Dust token quota exceeded",
+                            Some(e),
+                        )
+                    }
                     Err(e) => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_server_error",
@@ -673,7 +684,7 @@ pub async fn data_sources_search_bulk(
                 let query_vector = match embedder_request.execute(credentials).await {
                     Ok(v) => {
                         if v.len() != 1 {
-                            return Err(format!(
+                            return Err(anyhow::anyhow!(
                                 "Expected exactly one embedding vector, got {}",
                                 v.len()
                             ));
@@ -681,10 +692,9 @@ pub async fn data_sources_search_bulk(
                         Some(v[0].vector.iter().map(|v| *v as f32).collect::<Vec<f32>>())
                     }
                     Err(e) => {
-                        return Err(format!(
-                            "Failed to embed query with model {}: {}",
-                            model_id, e
-                        ));
+                        return Err(
+                            e.context(format!("Failed to embed query with model {}", model_id))
+                        );
                     }
                 };
 
@@ -759,12 +769,20 @@ pub async fn data_sources_search_bulk(
     for group_result in group_results {
         match group_result {
             Ok(results) => all_results.extend(results),
+            Err(e) if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) => {
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "quota_exceeded",
+                    "Dust token quota exceeded",
+                    Some(e),
+                );
+            }
             Err(e) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "embedding_error",
-                    &e,
-                    None,
+                    "Failed to embed query",
+                    Some(e),
                 );
             }
         }
@@ -1182,6 +1200,16 @@ pub async fn data_sources_documents_upsert(
                     )
                     .await
                 {
+                    Err(e)
+                        if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) =>
+                    {
+                        error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "quota_exceeded",
+                            "Dust token quota exceeded",
+                            Some(e),
+                        )
+                    }
                     Err(e) => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_server_error",

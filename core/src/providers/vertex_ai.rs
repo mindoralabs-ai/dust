@@ -225,8 +225,18 @@ impl CoreVertexRuntime {
         }
         let fetcher = HttpBundleFetcher::new(&signer_url, export_key)?;
         let pin = PinnedVerifier::from_base64(key_id, &public_key)?;
+        let mut pins = vec![pin];
+        let next_key_id = std::env::var("DUST_CORE_REGISTRY_NEXT_KEY_ID").ok();
+        let next_public_key = std::env::var("DUST_CORE_REGISTRY_NEXT_PUBLIC_KEY_BASE64").ok();
+        match (next_key_id, next_public_key) {
+            (Some(key_id), Some(public_key)) => {
+                pins.push(PinnedVerifier::from_base64(key_id, &public_key)?);
+            }
+            (None, None) => {}
+            _ => return Err(anyhow!("Core Vertex runtime configuration unavailable")),
+        }
         Ok(Self {
-            resolver: CoreTenantRouteResolver::new(fetcher, vec![pin], minimum_revision)?,
+            resolver: CoreTenantRouteResolver::new(fetcher, pins, minimum_revision)?,
             journal: CoreUsageJournal::open(journal_path)?,
             admission: CoreAdmissionClient::new()?,
             workspaces,
@@ -251,33 +261,19 @@ pub async fn run_core_usage_reconciler() {
     if std::env::var("DUST_POC_MODE").as_deref() != Ok("1") {
         return;
     }
+    tokio::join!(run_core_delivery_loop(), run_core_heartbeat_loop());
+}
+
+async fn run_core_delivery_loop() {
     loop {
         if let Ok(runtime) = core_vertex_runtime() {
             if let Ok(client) = CoreUsageDeliveryClient::new() {
-                match client
+                if client
                     .process_due_batch(&runtime.journal, &runtime.resolver)
                     .await
+                    .is_err()
                 {
-                    Ok(_) => {
-                        if let Ok(routes) = runtime
-                            .resolver
-                            .resolve_maintenance(&runtime.workspaces)
-                            .await
-                        {
-                            for route in routes {
-                                if client
-                                    .send_heartbeat(&runtime.journal, &route)
-                                    .await
-                                    .is_err()
-                                {
-                                    tracing::warn!("Dust Core usage heartbeat unavailable");
-                                }
-                            }
-                        } else {
-                            tracing::warn!("Dust Core usage heartbeat unavailable");
-                        }
-                    }
-                    Err(_) => tracing::warn!("Dust Core usage reconciliation unavailable"),
+                    tracing::warn!("Dust Core usage reconciliation unavailable");
                 }
             } else {
                 tracing::warn!("Dust Core usage reconciliation unavailable");
@@ -285,7 +281,36 @@ pub async fn run_core_usage_reconciler() {
         } else {
             tracing::warn!("Dust Core usage reconciliation unavailable");
         }
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn run_core_heartbeat_loop() {
+    let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        let result = async {
+            let runtime = core_vertex_runtime()?;
+            let client = CoreUsageDeliveryClient::new()?;
+            let routes = runtime
+                .resolver
+                .resolve_maintenance(&runtime.workspaces)
+                .await?;
+            let outcomes = futures::future::join_all(
+                routes
+                    .iter()
+                    .map(|route| client.send_heartbeat(&runtime.journal, route)),
+            )
+            .await;
+            if outcomes.iter().any(Result::is_err) {
+                return Err(anyhow!("Dust Core usage heartbeat unavailable"));
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if result.is_err() {
+            tracing::warn!("Dust Core usage heartbeat unavailable");
+        }
     }
 }
 
@@ -323,15 +348,12 @@ where
     if started != StartOutcome::Created {
         return Err(anyhow!("Vertex embedding attempt was not new"));
     }
-    if admit(route.clone(), attempt.clone(), started)
-        .await
-        .is_err()
-    {
+    if let Err(error) = admit(route.clone(), attempt.clone(), started).await {
         journal.settle_no_charge(
             &attempt.attempt_id,
             &format!("predispatch:admission-failed:{}", attempt.attempt_id),
         )?;
-        return Err(anyhow!("Vertex embedding quota admission unavailable"));
+        return Err(error);
     }
     let response = match provider().await {
         Ok(response) => response,
@@ -344,6 +366,9 @@ where
         }
         Err(_) => {
             journal.mark_unknown(&attempt.attempt_id)?;
+            // Vertex embedContent has no idempotency key. Retrying this
+            // ambiguous effect through EmbedderRequest would create a second
+            // charged attempt, so do not forward ModelError's retry flag.
             return Err(anyhow!("Vertex embedding provider result unavailable"));
         }
     };
@@ -361,12 +386,11 @@ where
     }
     // embedContent has no provider operation ID in its documented response.
     // The unique client request ID remains the stable local dedup identity.
+    let input_tokens = usage.ok_or_else(|| anyhow!("Vertex embedding usage unavailable"))? as u32;
     journal.settle_exact(
         &attempt,
         &format!("client:{}", attempt.provider_request_id),
-        EmbeddingUsage {
-            input_tokens: usage.unwrap() as u32,
-        },
+        EmbeddingUsage { input_tokens },
     )?;
     Ok(response)
 }
@@ -600,7 +624,9 @@ impl Embedder for VertexAIEmbedder {
         let workspace = workspace
             .filter(|workspace| !workspace.sid().is_empty())
             .ok_or_else(|| anyhow!("Vertex embedding requires verified workspace"))?;
-        if std::env::var("DUST_CORE_VERTEX_PROVIDER_IO_ENABLED").as_deref() != Ok("1") {
+        if std::env::var("DUST_POC_MODE").as_deref() != Ok("1")
+            || std::env::var("DUST_CORE_VERTEX_PROVIDER_IO_ENABLED").as_deref() != Ok("1")
+        {
             return Err(anyhow!("Vertex embedding provider I/O is disabled"));
         }
         let runtime = core_vertex_runtime()?;
@@ -634,7 +660,7 @@ impl Embedder for VertexAIEmbedder {
                             .admission
                             .require_admission(&route, &attempt, started)
                             .await
-                            .map_err(|_| anyhow!("Vertex embedding quota admission unavailable"))?;
+                            .map_err(anyhow::Error::from)?;
                         let current = runtime.resolver.resolve(workspace).await?;
                         if current != route {
                             return Err(anyhow!("Vertex embedding route changed before dispatch"));
@@ -703,21 +729,27 @@ mod tests {
             VertexAIEmbedder::request_body("sample", EmbeddingTaskType::RetrievalDocument);
         let query = VertexAIEmbedder::request_body("sample", EmbeddingTaskType::RetrievalQuery);
         assert_eq!(
-            document.pointer("/content/parts/0/text").unwrap(),
+            document
+                .pointer("/content/parts/0/text")
+                .expect("test operation failed"),
             "title: none | text: sample"
         );
         assert_eq!(
-            query.pointer("/content/parts/0/text").unwrap(),
+            query
+                .pointer("/content/parts/0/text")
+                .expect("test operation failed"),
             "task: search result | query: sample"
         );
         assert_eq!(
             query
                 .pointer("/embedContentConfig/outputDimensionality")
-                .unwrap(),
+                .expect("test operation failed"),
             DIMENSIONS
         );
         assert_eq!(
-            query.pointer("/embedContentConfig/autoTruncate").unwrap(),
+            query
+                .pointer("/embedContentConfig/autoTruncate")
+                .expect("test operation failed"),
             false
         );
         assert!(document.get("taskType").is_none());
@@ -751,7 +783,7 @@ mod tests {
         let response = json!({"embedding": {"values": vec![0.25; DIMENSIONS]}, "usageMetadata": {"promptTokenCount": 7}, "truncated": false});
         assert_eq!(
             VertexAIEmbedder::parse_response(response.clone())
-                .unwrap()
+                .expect("test operation failed")
                 .usage_metadata["promptTokenCount"],
             7
         );
@@ -763,7 +795,7 @@ mod tests {
         let mut missing_usage = response.clone();
         missing_usage
             .as_object_mut()
-            .unwrap()
+            .expect("test operation failed")
             .remove("usageMetadata");
         assert!(VertexAIEmbedder::parse_response(missing_usage).is_err());
         let mut truncated = response;
@@ -797,9 +829,9 @@ mod tests {
     async fn guarded_attempt_requires_durable_start_and_admission_before_provider_io() {
         use crate::tenant_route::CoreTenantRoute;
         use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let journal =
-            crate::usage_journal::CoreUsageJournal::open(dir.path().join("usage.sqlite")).unwrap();
+        let dir = tempdir().expect("test operation failed");
+        let journal = crate::usage_journal::CoreUsageJournal::open(dir.path().join("usage.sqlite"))
+            .expect("test operation failed");
         let route = CoreTenantRoute {
             tenant_id: "tenant-a".into(),
             workspace_id: "workspace-a".into(),
@@ -818,14 +850,20 @@ mod tests {
             &route,
             MODEL_ID,
             "embedding-test",
-            |_, _, _| async { Err(anyhow!("quota denied")) },
+            |_, _, _| async { Err(crate::quota_admission::AdmissionError::Denied.into()) },
             || async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 unreachable!()
             },
         )
         .await;
-        assert!(denied.is_err());
+        assert_eq!(
+            denied
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<crate::quota_admission::AdmissionError>()),
+            Some(&crate::quota_admission::AdmissionError::Denied)
+        );
         assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
 
         let response = run_guarded_attempt(
@@ -846,16 +884,18 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .expect("test operation failed");
         assert_eq!(response.vector.len(), DIMENSIONS);
         assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-        let exact = journal.claim_due("reconciler", 20).unwrap();
+        let exact = journal
+            .claim_due("reconciler", 20)
+            .expect("test operation failed");
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].state, "exact");
         assert!(exact[0]
             .event_envelope
             .as_ref()
-            .unwrap()
+            .expect("test operation failed")
             .contains("\"input_tokens\":\"7\""));
 
         let adc_failed = run_guarded_attempt(
@@ -868,14 +908,15 @@ mod tests {
         )
         .await;
         assert!(adc_failed.is_err());
-        let conn = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("usage.sqlite"))
+            .expect("test operation failed");
         let no_charge: i64 = conn
             .query_row(
                 "SELECT count(*) FROM dust_usage_attempts WHERE state = 'no_charge'",
                 [],
                 |row| row.get(0),
             )
-            .unwrap();
+            .expect("test operation failed");
         assert_eq!(no_charge, 2); // Admission denial and ADC failure, both before dispatch.
 
         let ambiguous = run_guarded_attempt(
@@ -888,10 +929,43 @@ mod tests {
         )
         .await;
         assert!(ambiguous.is_err());
-        let unresolved = journal.claim_due("reconciler2", 20).unwrap();
+        let unresolved = journal
+            .claim_due("reconciler2", 20)
+            .expect("test operation failed");
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].state, "unknown");
         assert!(unresolved[0].event_envelope.is_none());
+
+        let provider_calls_before = provider_calls.load(Ordering::SeqCst);
+        let throttled = run_guarded_attempt(
+            &journal,
+            &route,
+            MODEL_ID,
+            "embedding-test",
+            |_, _, _| async { Ok(()) },
+            || async {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow!(ModelError {
+                    message: "Vertex embedding HTTP status 429".into(),
+                    retryable: Some(ModelErrorRetryOptions {
+                        sleep: Duration::from_secs(1),
+                        factor: 2,
+                        retries: 2,
+                    }),
+                    request_id: None,
+                }))
+            },
+        )
+        .await;
+        assert!(throttled
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<ModelError>())
+            .is_none());
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            provider_calls_before + 1
+        );
     }
 
     #[tokio::test]
@@ -945,14 +1019,19 @@ mod tests {
 
     #[tokio::test]
     async fn transport_sends_instruction_and_bearer_header_without_leaking_response_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.expect("test operation failed");
             let mut request = Vec::new();
             loop {
                 let mut chunk = [0u8; 4096];
-                let read = socket.read(&mut chunk).await.unwrap();
+                let read = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("test operation failed");
                 assert!(read > 0);
                 request.extend_from_slice(&chunk[..read]);
                 let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
@@ -967,12 +1046,12 @@ mod tests {
                             .strip_prefix("content-length: ")
                             .and_then(|value| value.parse::<usize>().ok())
                     })
-                    .unwrap();
+                    .expect("test operation failed");
                 if request.len() >= header_end + 4 + content_length {
                     break;
                 }
             }
-            let request = String::from_utf8(request).unwrap();
+            let request = String::from_utf8(request).expect("test operation failed");
             assert!(request.starts_with("POST /v1/projects/test/locations/global/publishers/google/models/gemini-embedding-2:embedContent HTTP/1.1"));
             assert!(request
                 .to_ascii_lowercase()
@@ -985,7 +1064,10 @@ mod tests {
                 body.len(),
                 body
             );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("test operation failed");
         });
         let endpoint = format!("http://{address}/v1/projects/test/locations/global/publishers/google/models/gemini-embedding-2:embedContent");
         let result = VertexAIEmbedder::request_one(
@@ -996,21 +1078,26 @@ mod tests {
             EmbeddingTaskType::RetrievalQuery,
         )
         .await
-        .unwrap();
+        .expect("test operation failed");
         assert_eq!(result.vector.len(), DIMENSIONS);
         assert_eq!(result.usage_metadata["promptTokenCount"], 4);
-        server.await.unwrap();
+        server.await.expect("test operation failed");
     }
 
     #[tokio::test]
     async fn retryable_status_sanitizes_request_id_and_hides_provider_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.expect("test operation failed");
             let mut buffer = [0u8; 4096];
-            let _ = socket.read(&mut buffer).await.unwrap();
-            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nx-goog-request-id: abc-123\r\ncontent-length: 15\r\n\r\nprivate-payload").await.unwrap();
+            let _ = socket
+                .read(&mut buffer)
+                .await
+                .expect("test operation failed");
+            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nx-goog-request-id: abc-123\r\ncontent-length: 15\r\n\r\nprivate-payload").await.expect("test operation failed");
         });
         let error = VertexAIEmbedder::request_one(
             &reqwest::Client::new(),
@@ -1021,14 +1108,16 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let model_error = error.downcast_ref::<ModelError>().unwrap();
+        let model_error = error
+            .downcast_ref::<ModelError>()
+            .expect("test operation failed");
         assert!(model_error.retryable.is_some());
         assert_eq!(model_error.request_id.as_deref(), Some("abc-123"));
         let message = error.to_string();
         assert!(!message.contains("private-payload"));
         assert!(!message.contains("secret-token"));
         assert!(!message.contains("sensitive-input"));
-        server.await.unwrap();
+        server.await.expect("test operation failed");
     }
 
     #[tokio::test]
@@ -1047,18 +1136,26 @@ mod tests {
     #[tokio::test]
     async fn rejected_statuses_and_timeout_hide_provider_material() {
         for status in [401, 403, 500] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test operation failed");
+            let address = listener.local_addr().expect("test operation failed");
             let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener.accept().await.expect("test operation failed");
                 let mut buffer = [0u8; 4096];
-                let _ = socket.read(&mut buffer).await.unwrap();
+                let _ = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("test operation failed");
                 let body = "secret-provider-error";
                 let response = format!(
                     "HTTP/1.1 {status} Rejected\r\ncontent-length: {}\r\n\r\n{body}",
                     body.len()
                 );
-                socket.write_all(response.as_bytes()).await.unwrap();
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("test operation failed");
             });
             let error = VertexAIEmbedder::request_one(
                 &reqwest::Client::new(),
@@ -1069,24 +1166,31 @@ mod tests {
             )
             .await
             .unwrap_err();
-            let model_error = error.downcast_ref::<ModelError>().unwrap();
+            let model_error = error
+                .downcast_ref::<ModelError>()
+                .expect("test operation failed");
             assert_eq!(model_error.retryable.is_some(), status == 500);
             assert!(!error.to_string().contains("secret"));
-            server.await.unwrap();
+            server.await.expect("test operation failed");
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.expect("test operation failed");
             let mut buffer = [0u8; 4096];
-            let _ = socket.read(&mut buffer).await.unwrap();
+            let _ = socket
+                .read(&mut buffer)
+                .await
+                .expect("test operation failed");
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(10))
             .build()
-            .unwrap();
+            .expect("test operation failed");
         let error = VertexAIEmbedder::request_one(
             &client,
             &format!("http://{address}/embed"),
@@ -1097,13 +1201,15 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "Vertex embedding transport error");
-        server.await.unwrap();
+        server.await.expect("test operation failed");
     }
 
     #[tokio::test]
     async fn private_batch_preserves_order_and_bounds_concurrency() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
         let server = {
@@ -1111,14 +1217,17 @@ mod tests {
             let maximum = maximum.clone();
             tokio::spawn(async move {
                 for _ in 0..12 {
-                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let (mut socket, _) = listener.accept().await.expect("test operation failed");
                     let active = active.clone();
                     let maximum = maximum.clone();
                     tokio::spawn(async move {
                         let mut request = Vec::new();
                         loop {
                             let mut chunk = [0u8; 4096];
-                            let read = socket.read(&mut chunk).await.unwrap();
+                            let read = socket
+                                .read(&mut chunk)
+                                .await
+                                .expect("test operation failed");
                             request.extend_from_slice(&chunk[..read]);
                             let Some(header_end) =
                                 request.windows(4).position(|window| window == b"\r\n\r\n")
@@ -1133,7 +1242,7 @@ mod tests {
                                         .strip_prefix("content-length: ")
                                         .and_then(|v| v.parse::<usize>().ok())
                                 })
-                                .unwrap();
+                                .expect("test operation failed");
                             if request.len() >= header_end + 4 + length {
                                 break;
                             }
@@ -1141,23 +1250,32 @@ mod tests {
                         let body_start = request
                             .windows(4)
                             .position(|window| window == b"\r\n\r\n")
-                            .unwrap()
+                            .expect("test operation failed")
                             + 4;
-                        let body: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+                        let body: Value = serde_json::from_slice(&request[body_start..])
+                            .expect("test operation failed");
                         let input = body
                             .pointer("/content/parts/0/text")
-                            .unwrap()
+                            .expect("test operation failed")
                             .as_str()
-                            .unwrap();
-                        let index: usize =
-                            input.rsplit(':').next().unwrap().trim().parse().unwrap();
+                            .expect("test operation failed");
+                        let index: usize = input
+                            .rsplit(':')
+                            .next()
+                            .expect("test operation failed")
+                            .trim()
+                            .parse()
+                            .expect("test operation failed");
                         let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
                         maximum.fetch_max(concurrent, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(30)).await;
                         active.fetch_sub(1, Ordering::SeqCst);
                         let body = json!({"embedding":{"values":vec![index as f64; DIMENSIONS]},"usageMetadata":{"promptTokenCount":1}}).to_string();
                         let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", body.len(), body);
-                        socket.write_all(response.as_bytes()).await.unwrap();
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("test operation failed");
                     });
                 }
             })
@@ -1175,13 +1293,13 @@ mod tests {
             ),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test operation failed")
+        .expect("test operation failed");
         for (index, result) in results.iter().enumerate() {
             assert_eq!(result.vector[0], index as f64);
         }
         assert!(maximum.load(Ordering::SeqCst) <= MAX_CONCURRENT_REQUESTS);
         assert!(maximum.load(Ordering::SeqCst) > 1);
-        server.await.unwrap();
+        server.await.expect("test operation failed");
     }
 }
