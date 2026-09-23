@@ -932,6 +932,8 @@ export abstract class LLM<
     let providerDispatched = false;
     let exactUsage: FrontUsageCounts | null = null;
     let providerOperationId: string | null = null;
+    let streamCompleted = false;
+    let sawModelError = false;
     try {
       const payload = await this.buildStreamRequestPayload(
         streamParameters,
@@ -979,11 +981,15 @@ export abstract class LLM<
 
       providerDispatched = true;
       for await (const event of this.sendRequest(payload)) {
+        if (pocAttempt && event.type === "error") {
+          sawModelError = true;
+          exactUsage = null;
+        }
         if (pocAttempt && event.type === "interaction_id") {
           providerOperationId = event.content.modelInteractionId;
         }
         if (pocAttempt && event.type === "token_usage") {
-          if (event.content.accountingStatus === "exact") {
+          if (event.content.accountingStatus === "exact" && !sawModelError) {
             exactUsage = {
               inputTokens: event.content.inputTokens,
               outputTokens: event.content.totalOutputTokens,
@@ -1007,6 +1013,7 @@ export abstract class LLM<
         }
         yield event;
       }
+      streamCompleted = true;
     } finally {
       this.pocAttemptId = null;
       try {
@@ -1016,7 +1023,7 @@ export abstract class LLM<
               pocAttempt.attempt.attemptId,
               `predispatch:stream-not-started:${pocAttempt.attempt.attemptId}`
             );
-          } else if (exactUsage) {
+          } else if (streamCompleted && !sawModelError && exactUsage) {
             await settleFrontUsageExact({
               attempt: pocAttempt.attempt,
               providerOperationId:
