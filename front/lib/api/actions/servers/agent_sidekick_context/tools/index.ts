@@ -39,6 +39,7 @@ import {
   listAvailableTools,
 } from "@app/lib/api/assistant/workspace_capabilities";
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import { getDisplayNameForDataSource } from "@app/lib/data_sources";
@@ -1314,7 +1315,9 @@ const handlers: ToolHandlers<typeof AGENT_SIDEKICK_CONTEXT_TOOLS_METADATA> = {
       topK,
       credentials,
       false,
-      dataSourceEntries.map((entry) => entry.searchArg)
+      dataSourceEntries.map((entry) => entry.searchArg),
+      undefined,
+      (pairs) => createCoreWorkspaceAssertion(auth, pairs)
     );
 
     if (searchResults.isErr()) {

@@ -7,6 +7,7 @@ import { toFileContentFragment } from "@app/lib/api/assistant/conversation/conte
 import { getLightConversation } from "@app/lib/api/assistant/conversation/fetch";
 import { postUserMessageAndWaitForCompletion } from "@app/lib/api/assistant/streaming/blocking";
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { sendEmailWithTemplate } from "@app/lib/api/email";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { Authenticator } from "@app/lib/auth";
@@ -449,6 +450,12 @@ export async function processTranscriptActivity(
       lightDocumentOutput: true,
       title: transcriptTitle,
       mimeType: "text/plain",
+      workspaceAssertion: await createCoreWorkspaceAssertion(workspaceAuth, [
+        {
+          projectId: dataSource.dustAPIProjectId,
+          dataSourceId: dataSource.dustAPIDataSourceId,
+        },
+      ]),
     });
 
     if (upsertRes.isErr()) {

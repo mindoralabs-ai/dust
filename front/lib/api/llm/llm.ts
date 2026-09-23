@@ -1,4 +1,7 @@
 import config from "@app/lib/api/config";
+import type { AuthorizedDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
+import { authorizePocGeneration } from "@app/lib/api/dust_poc_runtime";
 import {
   contributeFreeUsageCostForUser,
   isFreeUsageContext,
@@ -41,6 +44,12 @@ import type {
 } from "@app/lib/api/llm/types/options";
 import { emitTokenUsageMetrics } from "@app/lib/api/llm/usage_metrics";
 import { isProgrammaticUsageFromContext } from "@app/lib/api/programmatic_usage/common";
+import type { FrontUsageCounts } from "@app/lib/api/usage_journal";
+import {
+  markFrontUsageUnknown,
+  settleFrontUsageExact,
+  settleFrontUsageNoCharge,
+} from "@app/lib/api/usage_journal";
 import type { Authenticator } from "@app/lib/auth";
 import type { DustBatchEndpointConstructor } from "@app/lib/llms/batch/dust_batch_endpoint";
 import type { DustStreamEndpointConstructor } from "@app/lib/llms/stream/dust_stream_endpoint";
@@ -94,6 +103,7 @@ export abstract class LLM<
   protected readonly traceId: LLMTraceId;
   protected readonly getTraceOutput?: LLMTraceCustomization["getTraceOutput"];
   protected generation: LangfuseGeneration | null = null;
+  protected pocAttemptId: string | null = null;
 
   protected constructor(
     auth: Authenticator,
@@ -572,6 +582,9 @@ export abstract class LLM<
   async sendBatchProcessing(
     conversations: Map<string, LLMStreamParameters>
   ): Promise<string> {
+    if (dustPocMode()) {
+      throw new Error("Dust POC batch generation is unavailable");
+    }
     const batchId = await this.internalSendBatchProcessing(conversations);
     if (this.context) {
       await this.traceBatchInputs(conversations);
@@ -915,6 +928,12 @@ export abstract class LLM<
       usageType,
     });
 
+    let pocAttempt: AuthorizedDustGenerationAttempt | null = null;
+    let providerDispatched = false;
+    let exactUsage: FrontUsageCounts | null = null;
+    let providerOperationId: string | null = null;
+    let streamCompleted = false;
+    let sawModelError = false;
     try {
       const payload = await this.buildStreamRequestPayload(
         streamParameters,
@@ -929,7 +948,58 @@ export abstract class LLM<
         await lifecycle.recordRunUsages(simulatedRunUsages);
       }
 
+      if (dustPocMode()) {
+        const workspace = this.authenticator.getNonNullableWorkspace();
+        const user = this.authenticator.user();
+        const contextUserId = this.context?.userId;
+        const conversationId = this.context?.conversationId;
+        if (
+          !user ||
+          !contextUserId ||
+          user.sId !== contextUserId ||
+          !user.workOSUserId ||
+          !workspace.workOSOrganizationId ||
+          typeof conversationId !== "string"
+        ) {
+          throw new Error("Dust POC generation unavailable");
+        }
+        pocAttempt = await authorizePocGeneration({
+          identity: {
+            workspaceId: workspace.sId,
+            workosOrganizationId: workspace.workOSOrganizationId,
+            workosUserId: user.workOSUserId,
+            dustUserId: user.sId,
+          },
+          conversationId,
+          modelId: this.modelId,
+          providerHost: this.host,
+          providerId: this.modelConfig.providerId,
+          inferenceRegion: this.metadata.inferenceRegion,
+        });
+        this.pocAttemptId = pocAttempt.attempt.attemptId;
+      }
+
+      providerDispatched = true;
       for await (const event of this.sendRequest(payload)) {
+        if (pocAttempt && event.type === "error") {
+          sawModelError = true;
+          exactUsage = null;
+        }
+        if (pocAttempt && event.type === "interaction_id") {
+          providerOperationId = event.content.modelInteractionId;
+        }
+        if (pocAttempt && event.type === "token_usage") {
+          if (event.content.accountingStatus === "exact" && !sawModelError) {
+            exactUsage = {
+              inputTokens: event.content.inputTokens,
+              outputTokens: event.content.totalOutputTokens,
+              cacheReadTokens: event.content.cachedTokens ?? 0,
+              cacheWriteTokens: event.content.cacheCreationTokens ?? 0,
+            };
+          } else {
+            exactUsage = null;
+          }
+        }
         if (event.type === "token_usage") {
           const costMicroUsd = await lifecycle.recordTokenUsage(event.content);
           const user = this.authenticator.user();
@@ -943,8 +1013,33 @@ export abstract class LLM<
         }
         yield event;
       }
+      streamCompleted = true;
     } finally {
-      await lifecycle.close();
+      this.pocAttemptId = null;
+      try {
+        if (pocAttempt) {
+          if (!providerDispatched) {
+            await settleFrontUsageNoCharge(
+              pocAttempt.attempt.attemptId,
+              `predispatch:stream-not-started:${pocAttempt.attempt.attemptId}`
+            );
+          } else if (streamCompleted && !sawModelError && exactUsage) {
+            await settleFrontUsageExact({
+              attempt: pocAttempt.attempt,
+              providerOperationId:
+                providerOperationId &&
+                /^[A-Za-z0-9_.:/-]{1,256}$/.test(providerOperationId)
+                  ? providerOperationId
+                  : `client:${pocAttempt.attempt.attemptId}`,
+              counts: exactUsage,
+            });
+          } else {
+            await markFrontUsageUnknown(pocAttempt.attempt.attemptId);
+          }
+        }
+      } finally {
+        await lifecycle.close();
+      }
     }
   }
 

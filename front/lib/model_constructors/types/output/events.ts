@@ -98,6 +98,9 @@ export type TokenUsageContent = {
   // Inclusive billed output total. Provider adapters must normalize their raw
   // usage into this value, including reasoning and thinking tokens.
   totalOutput: number;
+  // Set by adapters that can verify provider usage metadata. Consumers that
+  // require exact accounting must not infer it from a zero-valued usage event.
+  accountingStatus?: "exact" | "unknown";
   // Optional reasoning and thinking subset of totalOutput. Never add it to
   // totalOutput for persistence or billing.
   reasoning?: number;

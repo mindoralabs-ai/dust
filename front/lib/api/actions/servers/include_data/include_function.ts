@@ -15,6 +15,7 @@ import {
 } from "@app/lib/api/actions/servers/include_data/helpers";
 import { getRefs } from "@app/lib/api/assistant/citations";
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import logger from "@app/logger/logger";
@@ -112,7 +113,9 @@ export async function runIncludeDataRetrieval(
         },
         view_filter: args.view_filter,
       };
-    })
+    }),
+    undefined,
+    (pairs) => createCoreWorkspaceAssertion(auth, pairs)
   );
 
   if (searchResults.isErr()) {

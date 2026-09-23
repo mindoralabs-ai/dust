@@ -505,6 +505,32 @@ describe("Fireworks reasoning round-trip — persisted metadata to Responses inp
 });
 
 describe("convertToOldEvent — token_usage", () => {
+  it.each([
+    "exact",
+    "unknown",
+  ] as const)("preserves provider accounting status %s for the Dust journal", (accountingStatus) => {
+    const converted = convertToOldEvent(
+      {
+        type: "token_usage",
+        content: {
+          cacheCreated: 0,
+          longCacheCreated: 0,
+          shortCacheCreated: 0,
+          cacheHit: 2,
+          standardInput: 10,
+          totalOutput: 4,
+          accountingStatus,
+        },
+        metadata: endpointMetadata,
+      },
+      llmMetadata
+    );
+    expect(converted).toMatchObject({
+      type: "token_usage",
+      content: { accountingStatus },
+    });
+  });
+
   it("sums the per-TTL cache-creation breakdown into cacheCreationTokens and keeps the split", () => {
     expect(
       convertToOldEvent(
