@@ -1,7 +1,9 @@
 import { exec } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { Client } from "pg";
 
 const execAsync = promisify(exec);
 const FRONT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +35,6 @@ export default async function setup() {
     EGRESS_PROXY_POLICY_BUCKET: "test-egress-policy-bucket",
     REDIS_CACHE_URI: process.env.REDIS_CACHE_URI,
     REDIS_URI: process.env.REDIS_URI,
-    DUST_USAGE_JOURNAL_INTEGRATION: process.env.DUST_USAGE_JOURNAL_INTEGRATION,
     NEXT_PUBLIC_DUST_API_URL: "http://fake-url",
     NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL: "http://fake-url",
     NEXT_PUBLIC_DUST_APP_URL: "http://fake-url",
@@ -72,5 +73,40 @@ export default async function setup() {
     throw new Error(
       `Failed to execute db migration script: ${JSON.stringify(stderr)}`
     );
+  }
+
+  // Sequelize's test sync cannot express the journal's CHECK constraints.
+  // Install the deployment DDL on the already-verified test database so the
+  // durability suite runs under the normal Front test command.
+  const journalUri = process.env.FRONT_DATABASE_URI;
+  if (!journalUri) {
+    throw new Error("Front test database unavailable");
+  }
+  const target = new URL(journalUri);
+  const journalDatabase = target.pathname;
+  if (
+    !["localhost", "127.0.0.1"].includes(target.hostname) ||
+    !/^\/(?:front(?:_api)?_test(?:_shard_\d+)?|dust_journal_test)$/.test(
+      journalDatabase
+    )
+  ) {
+    throw new Error(
+      "Refusing to replace the journal outside a known test database"
+    );
+  }
+  const journal = new Client({ connectionString: journalUri });
+  await journal.connect();
+  try {
+    await journal.query('DROP TABLE IF EXISTS "dust_usage_attempts"');
+    const migration = await readFile(
+      path.join(
+        FRONT_DIR,
+        "migrations/pre-deploy/20260923090000_create_dust_usage_journal.sql"
+      ),
+      "utf8"
+    );
+    await journal.query(migration);
+  } finally {
+    await journal.end();
   }
 }

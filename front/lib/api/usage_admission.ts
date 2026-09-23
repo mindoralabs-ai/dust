@@ -1,7 +1,11 @@
 /** Server-side Dust quota admission. The caller must select the tenant route and
  * front component key from a verified, server-controlled workspace mapping. */
 import { readFile } from "node:fs/promises";
-import type { TenantRoute } from "@app/lib/api/tenant_route";
+import type {
+  ActiveDustIdentity,
+  DustTenantRouteResolver,
+  TenantRoute,
+} from "@app/lib/api/tenant_route";
 import type { FrontUsageStartPermit } from "@app/lib/api/usage_journal";
 import { consumeFrontUsageStartPermit } from "@app/lib/api/usage_journal";
 import { z } from "zod";
@@ -50,6 +54,8 @@ export class DustAdmissionUnavailableError extends Error {
 type AdmissionOptions = {
   /** Signed route selected from the server-controlled workspace mapping. */
   route: TenantRoute;
+  identity: ActiveDustIdentity;
+  resolver: Pick<DustTenantRouteResolver, "refresh" | "resolve">;
   /** Stable ID for one provider attempt; also used as journal attempt_id. */
   operationId: string;
   /** Only a newly committed journal row may authorize provider dispatch. */
@@ -134,6 +140,8 @@ async function readBoundedResponse(response: Response): Promise<unknown> {
  * This function never retries and returns only when CRM positively allows it. */
 export async function requireDustAdmission({
   route,
+  identity,
+  resolver,
   operationId,
   startPermit,
   fetchImpl = fetch,
@@ -141,11 +149,31 @@ export async function requireDustAdmission({
 }: AdmissionOptions): Promise<void> {
   if (
     !OPERATION_ID.test(operationId) ||
-    !consumeFrontUsageStartPermit(startPermit, operationId, route) ||
     !Number.isInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > MAX_TIMEOUT_MS
   ) {
+    throw new DustAdmissionUnavailableError();
+  }
+
+  try {
+    await resolver.refresh();
+    const current = resolver.resolve(identity);
+    if (
+      current.tenantId !== route.tenantId ||
+      current.workspaceId !== route.workspaceId ||
+      current.revision !== route.revision ||
+      current.keyId !== route.keyId ||
+      current.privateRoute !== route.privateRoute ||
+      current.admissionUrl !== route.admissionUrl ||
+      current.frontCredentialRef !== route.frontCredentialRef ||
+      current.usageIngestUrl !== route.usageIngestUrl ||
+      current.journalTarget !== route.journalTarget ||
+      !consumeFrontUsageStartPermit(startPermit, operationId, route)
+    ) {
+      throw new DustAdmissionUnavailableError();
+    }
+  } catch {
     throw new DustAdmissionUnavailableError();
   }
 

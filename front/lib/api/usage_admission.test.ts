@@ -56,6 +56,16 @@ function fetchReturning(body: unknown, status = 200) {
 function options(fetchImpl: typeof fetch) {
   return {
     route: tenantRoute,
+    identity: {
+      workspaceId: "workspace-a",
+      workosOrganizationId: "org-a",
+      workosUserId: "workos-a",
+      dustUserId: "dust-a",
+    },
+    resolver: {
+      refresh: vi.fn(async () => {}),
+      resolve: vi.fn(() => tenantRoute),
+    },
     operationId: OPERATION_ID,
     startPermit: { attemptId: OPERATION_ID },
     fetchImpl,
@@ -89,13 +99,17 @@ describe("requireDustAdmission", () => {
   it("keeps the selected tenant route and component key paired", async () => {
     const fetchImpl = fetchReturning(admission());
     await requireDustAdmission(options(fetchImpl));
+    const otherRoute = {
+      ...tenantRoute,
+      admissionUrl: "https://other-crm.internal/internal/usage/dust/admission",
+      frontCredentialRef: "/run/tenant-b-front-key",
+    };
     await requireDustAdmission({
       ...options(fetchImpl),
-      route: {
-        ...tenantRoute,
-        admissionUrl:
-          "https://other-crm.internal/internal/usage/dust/admission",
-        frontCredentialRef: "/run/tenant-b-front-key",
+      route: otherRoute,
+      resolver: {
+        refresh: vi.fn(async () => {}),
+        resolve: vi.fn(() => otherRoute),
       },
       operationId: "attempt_02",
       startPermit: { attemptId: "attempt_02" },
@@ -113,6 +127,28 @@ describe("requireDustAdmission", () => {
       "other-crm.internal"
     );
     expect(readFile).toHaveBeenCalledWith("/run/tenant-b-front-key", "utf8");
+  });
+
+  it("rejects a revoked or changed signed route before consuming admission", async () => {
+    const fetchImpl = fetchReturning(admission());
+    const current = options(fetchImpl);
+    current.resolver.resolve.mockImplementation(() => {
+      throw new Error("tenant deactivated");
+    });
+    await expect(requireDustAdmission(current)).rejects.toBeInstanceOf(
+      DustAdmissionUnavailableError
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const changed = options(fetchImpl);
+    changed.resolver.resolve.mockReturnValue({
+      ...tenantRoute,
+      admissionUrl: "https://new-crm.internal/internal/usage/dust/admission",
+    });
+    await expect(requireDustAdmission(changed)).rejects.toBeInstanceOf(
+      DustAdmissionUnavailableError
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("rejects an explicit token quota denial", async () => {

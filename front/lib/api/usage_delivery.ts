@@ -45,6 +45,12 @@ const deliveryReceiptSchema = z.strictObject({
   envelope_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   replayed: z.boolean(),
 });
+const frozenEnvelopeBindingSchema = z.object({
+  tenant_id: z.string(),
+  workspace_id: z.string(),
+  attempt_id: z.string(),
+  component: z.literal("dust-front"),
+});
 
 function validReceipt(value: unknown, expectedHash: string): boolean {
   const parsed = deliveryReceiptSchema.safeParse(value);
@@ -142,15 +148,13 @@ export async function deliverFrontUsageClaim(
     }
     const digest = createHash("sha256").update(envelope, "utf8").digest("hex");
     const fields: unknown = JSON.parse(envelope);
+    const binding = frozenEnvelopeBindingSchema.safeParse(fields);
     if (
       digest !== claim.eventHash ||
-      typeof fields !== "object" ||
-      fields === null ||
-      Array.isArray(fields) ||
-      (fields as Record<string, unknown>).tenant_id !== claim.tenantId ||
-      (fields as Record<string, unknown>).workspace_id !== claim.workspaceId ||
-      (fields as Record<string, unknown>).attempt_id !== claim.attemptId ||
-      (fields as Record<string, unknown>).component !== "dust-front"
+      !binding.success ||
+      binding.data.tenant_id !== claim.tenantId ||
+      binding.data.workspace_id !== claim.workspaceId ||
+      binding.data.attempt_id !== claim.attemptId
     ) {
       throw new Error("Invalid frozen Dust usage event");
     }
