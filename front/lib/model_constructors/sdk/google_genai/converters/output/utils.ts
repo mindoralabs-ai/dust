@@ -491,7 +491,15 @@ export async function* rawOutputToEvents(
         candidate.finishReason
       );
       if (errorEvent) {
-        // Terminal failure: surface the error and stop without a success event.
+        // A completed model refusal or length limit can still carry exact
+        // billable usage. Emit it before the terminal error, without success.
+        if (
+          errorEvent.content.errorSource === "dust" &&
+          (errorEvent.content.type === "stop_error" ||
+            errorEvent.content.type === "refusal_error")
+        ) {
+          yield converters.usageToTokenUsageEvent(metadata, usage);
+        }
         yield errorEvent;
         return;
       }

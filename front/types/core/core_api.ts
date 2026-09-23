@@ -1060,8 +1060,13 @@ export class CoreAPI {
     target_document_tokens?: number | null,
     assertionForPairs?: (
       pairs: { projectId: string; dataSourceId: string }[]
-    ) => Promise<string | undefined>
+    ) => Promise<
+      (
+        chunk: { projectId: string; dataSourceId: string }[]
+      ) => string | undefined
+    >
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
+    const signWorkspaceAssertion = await assertionForPairs?.(searches);
     const dataSourceChunks = chunk(
       searches,
       BULK_SEARCH_DATA_SOURCE_MAX_DATA_SOURCES
@@ -1070,7 +1075,7 @@ export class CoreAPI {
     const results = await concurrentExecutor(
       dataSourceChunks,
       async (chunk) => {
-        const workspaceAssertion = await assertionForPairs?.(chunk);
+        const workspaceAssertion = signWorkspaceAssertion?.(chunk);
         const response = await this._fetchWithError(
           `${this._url}/data_sources/search/bulk`,
           {

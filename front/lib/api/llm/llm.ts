@@ -935,6 +935,7 @@ export abstract class LLM<
     let providerOperationId: string | null = null;
     let streamCompleted = false;
     let sawModelError = false;
+    let sawTerminalModelOutcome = false;
     try {
       const payload = await this.buildStreamRequestPayload(
         streamParameters,
@@ -984,8 +985,16 @@ export abstract class LLM<
       providerDispatched = true;
       for await (const event of this.sendRequest(payload)) {
         if (pocAttempt && event.type === "error") {
-          sawModelError = true;
-          exactUsage = null;
+          const terminalModelOutcome =
+            event.content.errorSource === "dust" &&
+            (event.content.type === "stop_error" ||
+              event.content.type === "refusal_error");
+          if (terminalModelOutcome) {
+            sawTerminalModelOutcome = true;
+          } else {
+            sawModelError = true;
+            exactUsage = null;
+          }
         }
         if (pocAttempt && event.type === "interaction_id") {
           providerOperationId = event.content.modelInteractionId;
@@ -1029,7 +1038,11 @@ export abstract class LLM<
               pocAttempt.attempt.attemptId,
               `predispatch:stream-not-started:${pocAttempt.attempt.attemptId}`
             );
-          } else if (streamCompleted && !sawModelError && exactUsage) {
+          } else if (
+            (streamCompleted || sawTerminalModelOutcome) &&
+            !sawModelError &&
+            exactUsage
+          ) {
             await settleFrontUsageExact({
               attempt: pocAttempt.attempt,
               providerOperationId:

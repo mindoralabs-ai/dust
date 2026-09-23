@@ -1,6 +1,7 @@
 import {
   createCoreWorkspaceAssertion,
   createCoreWorkspaceAssertionsForSingles,
+  prepareCoreWorkspaceAssertionsForBatches,
 } from "@app/lib/api/core_workspace_assertion";
 import { Authenticator } from "@app/lib/auth";
 import { DataSourceViewFactory } from "@app/tests/utils/DataSourceViewFactory";
@@ -90,6 +91,25 @@ describe("Core workspace assertion", () => {
         data_sources: [{ project_id: projectId, data_source_id: dataSourceId }],
       });
     }
+  });
+
+  it("prevalidates a bulk search and signs only each requested chunk", async () => {
+    const sign = await prepareCoreWorkspaceAssertionsForBatches(auth, [
+      { projectId: "11", dataSourceId: sourceA },
+      { projectId: "12", dataSourceId: sourceB },
+    ]);
+    const token = sign([{ projectId: "12", dataSourceId: sourceB }]);
+    expect(
+      jwt.verify(token!, secret, {
+        audience: "dust-core-vertex-embedding",
+        algorithms: ["HS256"],
+      })
+    ).toMatchObject({
+      data_sources: [{ project_id: 12, data_source_id: sourceB }],
+    });
+    expect(() =>
+      sign([{ projectId: "13", dataSourceId: otherTenantSource }])
+    ).toThrow("not bound");
   });
 
   it("rejects a different project paired with an authorized data source", async () => {

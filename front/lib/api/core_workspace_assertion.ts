@@ -81,6 +81,80 @@ export async function createCoreWorkspaceAssertionsForSingles(
   return assertions;
 }
 
+/** Validate a full bulk search before fan-out, then sign each exact chunk. */
+export async function prepareCoreWorkspaceAssertionsForBatches(
+  auth: Authenticator,
+  pairs: CoreDataSourcePair[]
+): Promise<(chunk: CoreDataSourcePair[]) => string | undefined> {
+  const secret = config.getCoreWorkspaceAssertionSecret();
+  if (!secret) {
+    return () => undefined;
+  }
+  if (secret.length < 32) {
+    throw new Error(
+      "Invalid Core workspace assertion configuration or request"
+    );
+  }
+  const workspace = auth.getNonNullableWorkspace();
+  const unique = [
+    ...new Map(pairs.map((pair) => [pairKey(pair), pair])).values(),
+  ];
+  const verified = new Map<
+    string,
+    { project_id: number; data_source_id: string }
+  >();
+  for (let offset = 0; offset < unique.length; offset += 100) {
+    const batch = unique.slice(offset, offset + 100);
+    const resources = await DataSourceResource.fetchByDustAPIDataSourceIds(
+      auth,
+      batch.map((pair) => pair.dataSourceId)
+    );
+    const allowed = new Set(
+      resources
+        .filter((resource) => resource.workspaceId === workspace.id)
+        .map(
+          (resource) =>
+            `${resource.dustAPIProjectId}:${resource.dustAPIDataSourceId}`
+        )
+    );
+    for (const pair of batch) {
+      if (!/^[1-9][0-9]*$/.test(pair.projectId)) {
+        throw new Error("Invalid Core project id");
+      }
+      const projectId = Number(pair.projectId);
+      if (!Number.isSafeInteger(projectId) || !allowed.has(pairKey(pair))) {
+        throw new Error(
+          "Core data source is not bound to the authenticated workspace"
+        );
+      }
+      verified.set(pairKey(pair), {
+        project_id: projectId,
+        data_source_id: pair.dataSourceId,
+      });
+    }
+  }
+  return (chunk) => {
+    if (chunk.length === 0 || chunk.length > 100) {
+      throw new Error("Invalid Core workspace assertion request");
+    }
+    const exact = chunk.map((pair) => {
+      const authorized = verified.get(pairKey(pair));
+      if (!authorized) {
+        throw new Error(
+          "Core data source is not bound to the authenticated workspace"
+        );
+      }
+      return authorized;
+    });
+    const uniqueExact = [
+      ...new Map(
+        exact.map((pair) => [`${pair.project_id}:${pair.data_source_id}`, pair])
+      ).values(),
+    ];
+    return signAssertion(workspace.sId, uniqueExact, secret);
+  };
+}
+
 /**
  * @cc [label:security;backend] dust-core-assertion-workspace-binding
  * Mint only after resolving every exact Core project/data-source pair through
@@ -91,10 +165,18 @@ export async function createCoreWorkspaceAssertion(
   auth: Authenticator,
   pairs: CoreDataSourcePair[]
 ): Promise<string | undefined> {
+  return (await prepareCoreWorkspaceAssertion(auth, pairs))();
+}
+
+/** Validate once, then mint short-lived exact tokens during a long-running batch. */
+export async function prepareCoreWorkspaceAssertion(
+  auth: Authenticator,
+  pairs: CoreDataSourcePair[]
+): Promise<() => string | undefined> {
   const secret = config.getCoreWorkspaceAssertionSecret();
   if (!secret) {
     // Existing providers do not require this header. Core rejects Vertex without it.
-    return undefined;
+    return () => undefined;
   }
   if (secret.length < 32 || pairs.length === 0 || pairs.length > 100) {
     throw new Error(
@@ -139,5 +221,5 @@ export async function createCoreWorkspaceAssertion(
       ])
     ).values()
   );
-  return signAssertion(workspace.sId, uniqueRequested, secret);
+  return () => signAssertion(workspace.sId, uniqueRequested, secret);
 }

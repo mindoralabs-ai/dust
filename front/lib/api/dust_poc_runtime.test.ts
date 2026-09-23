@@ -148,6 +148,17 @@ describe("isolated Dust POC generation selection", () => {
     expect(Resolver).not.toHaveBeenCalled();
   });
 
+  it("does not initialize a signer for an unrelated workspace in POC mode", async () => {
+    vi.stubEnv("DUST_FRONT_REGISTRY_SIGNER_URL", "");
+    const { selectPocEmbeddingProvider } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    expect(
+      await selectPocEmbeddingProvider(null, "other-workspace")
+    ).toBeNull();
+    expect(Resolver).not.toHaveBeenCalled();
+  });
+
   it("refreshes the signed route before selecting both maintenance tenants", async () => {
     const { pocRoutesForMaintenance } = await import(
       "@app/lib/api/dust_poc_runtime"

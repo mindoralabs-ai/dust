@@ -1,5 +1,5 @@
 import { default as config } from "@app/lib/api/config";
-import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
+import { prepareCoreWorkspaceAssertionsForBatches } from "@app/lib/api/core_workspace_assertion";
 import {
   getLlmCredentials,
   MISSING_EMBEDDING_API_KEY_ERROR_MESSAGE,
@@ -101,7 +101,7 @@ export async function searchProjectConversations(
     false,
     searches,
     undefined,
-    (pairs) => createCoreWorkspaceAssertion(auth, pairs)
+    (pairs) => prepareCoreWorkspaceAssertionsForBatches(auth, pairs)
   );
 
   if (searchResult.isErr()) {

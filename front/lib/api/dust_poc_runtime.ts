@@ -57,7 +57,7 @@ function required(value: string): string {
   return value;
 }
 
-async function initializeRuntime(): Promise<PocRuntime> {
+function configuredPocWorkspaces(): ReadonlySet<string> {
   const workspaceIds = required(config.getDustPocWorkspaceIds()).split(",");
   if (
     workspaceIds.length !== 2 ||
@@ -66,6 +66,11 @@ async function initializeRuntime(): Promise<PocRuntime> {
   ) {
     throw new Error("Dust POC runtime configuration unavailable");
   }
+  return new Set(workspaceIds);
+}
+
+async function initializeRuntime(): Promise<PocRuntime> {
+  const workspaces = configuredPocWorkspaces();
   const minimumRevision = Number(
     required(config.getDustFrontRegistryMinRevision())
   );
@@ -84,7 +89,7 @@ async function initializeRuntime(): Promise<PocRuntime> {
     minimumRevision,
   });
   await resolver.start();
-  return { resolver, workspaces: new Set(workspaceIds) };
+  return { resolver, workspaces };
 }
 
 /**
@@ -138,8 +143,7 @@ export async function selectPocEmbeddingProvider(
   if (!dustPocMode()) {
     return null;
   }
-  const runtime = await getRuntime();
-  if (!runtime.workspaces.has(workspaceId)) {
+  if (!configuredPocWorkspaces().has(workspaceId)) {
     return null;
   }
   if (
@@ -149,6 +153,7 @@ export async function selectPocEmbeddingProvider(
   ) {
     throw new Error("Dust POC embedding unavailable");
   }
+  const runtime = await getRuntime();
   if (runtime.resolver.resolve(identity).workspaceId !== workspaceId) {
     throw new Error("Dust POC embedding unavailable");
   }

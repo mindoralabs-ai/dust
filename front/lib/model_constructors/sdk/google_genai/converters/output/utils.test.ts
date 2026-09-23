@@ -1,6 +1,11 @@
+import * as converters from "@app/lib/model_constructors/sdk/google_genai/converters/output/utils";
 import { usageToTokenUsageEvent } from "@app/lib/model_constructors/sdk/google_genai/converters/output/utils";
 import type { EndpointMetadata } from "@app/lib/model_constructors/types/endpoint_metadata";
-import type { GenerateContentResponseUsageMetadata } from "@google/genai";
+import type {
+  GenerateContentResponse,
+  GenerateContentResponseUsageMetadata,
+} from "@google/genai";
+import { FinishReason } from "@google/genai";
 import { describe, expect, it } from "vitest";
 
 const metadata: EndpointMetadata = {
@@ -9,6 +14,38 @@ const metadata: EndpointMetadata = {
   model: "gemini-3.5-flash",
   region: "global",
 };
+
+it("preserves exact usage before a terminal model error", async () => {
+  const response = {
+    responseId: "provider-response-1",
+    candidates: [{ finishReason: FinishReason.MAX_TOKENS }],
+    usageMetadata: {
+      promptTokenCount: 3,
+      candidatesTokenCount: 2,
+      totalTokenCount: 5,
+    },
+  } as GenerateContentResponse;
+  const stream = async function* () {
+    yield response;
+  };
+  const events = [];
+  for await (const event of converters.rawOutputToEvents(
+    stream(),
+    metadata,
+    converters
+  )) {
+    events.push(event);
+  }
+  expect(events.map((event) => event.type)).toEqual([
+    "response_id",
+    "token_usage",
+    "error",
+  ]);
+  expect(events[1]).toMatchObject({
+    type: "token_usage",
+    content: { accountingStatus: "exact", standardInput: 3, totalOutput: 2 },
+  });
+});
 
 describe("usageToTokenUsageEvent", () => {
   it("normalizes separately reported thought tokens into inclusive output", () => {

@@ -140,7 +140,9 @@ export async function createDataSourceAndConnectorForProject(
         // Create Core API data source
         let credentials: LLMCredentialsType;
         try {
-          credentials = await getLlmCredentials(auth);
+          credentials = await getLlmCredentials(auth, {
+            skipEmbeddingApiKeyRequirement: dataSourceEmbedder === "vertex_ai",
+          });
         } catch (err) {
           logger.error(
             { error: normalizeError(err) },

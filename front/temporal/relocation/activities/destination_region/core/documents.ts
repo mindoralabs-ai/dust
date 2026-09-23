@@ -1,6 +1,6 @@
 import config from "@app/lib/api/config";
 import { UNTITLED_TITLE } from "@app/lib/api/content_nodes";
-import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
+import { prepareCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { Authenticator } from "@app/lib/auth";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
@@ -16,6 +16,7 @@ import {
 } from "@app/temporal/relocation/lib/file_storage/relocation";
 import { CoreAPI } from "@app/types/core/core_api";
 import type { RegionType } from "@app/types/region";
+import { ApplicationFailure } from "@temporalio/common";
 
 export async function processDataSourceDocuments({
   destIds,
@@ -48,6 +49,12 @@ export async function processDataSourceDocuments({
 
   const credentials = await getLlmCredentials(auth);
   const destRegionApiBaseUrl = config.getApiBaseUrl();
+  const workspaceAssertion = await prepareCoreWorkspaceAssertion(auth, [
+    {
+      projectId: destIds.dustAPIProjectId,
+      dataSourceId: destIds.dustAPIDataSourceId,
+    },
+  ]);
 
   const res = await concurrentExecutor(
     data.blobs.documents,
@@ -92,18 +99,24 @@ export async function processDataSourceDocuments({
         lightDocumentOutput: true,
         title,
         mimeType: d.mime_type,
-        workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
-          {
-            projectId: destIds.dustAPIProjectId,
-            dataSourceId: destIds.dustAPIDataSourceId,
-          },
-        ]),
+        workspaceAssertion: workspaceAssertion(),
       });
     },
     { concurrency: CORE_API_CONCURRENCY_LIMIT }
   );
 
   const failed = res.filter((r) => r.isErr());
+  if (
+    res.some(
+      (result) =>
+        result.isErr() && result.error.code === "ambiguous_provider_effect"
+    )
+  ) {
+    throw ApplicationFailure.nonRetryable(
+      "Vertex embedding outcome is unknown; manual reconciliation required",
+      "ambiguous_provider_effect"
+    );
+  }
   if (failed.length > 0) {
     localLogger.error(
       { failed },
