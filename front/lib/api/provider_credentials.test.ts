@@ -172,7 +172,7 @@ describe("getLlmCredentials", () => {
       });
       const workspaceId = authenticator.getNonNullableWorkspace().sId;
       vi.stubEnv("DUST_POC_MODE", "1");
-      vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "1");
+      vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "0");
       vi.stubEnv("DUST_POC_WORKSPACE_IDS", `${workspaceId},other-workspace`);
       try {
         expect(await getLlmCredentials(authenticator)).toEqual(BASE_VARIABLES);

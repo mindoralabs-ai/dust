@@ -16,7 +16,7 @@ export function dustPocMode(): boolean {
 export function isConfiguredPocVertexEmbeddingWorkspace(
   workspaceId: string
 ): boolean {
-  if (!dustPocMode() || !config.getDustFrontVertexEmbeddingSelectionEnabled()) {
+  if (!dustPocMode()) {
     return false;
   }
   const workspaces = config.getDustPocWorkspaceIds().split(",");

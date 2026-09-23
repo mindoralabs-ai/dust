@@ -113,6 +113,7 @@ export class LabsTranscriptsHistoryModel extends WorkspaceAwareModel<LabsTranscr
   declare configuration: NonAttribute<LabsTranscriptsConfigurationModel>;
 
   declare stored?: boolean;
+  declare manualReviewRequired: CreationOptional<boolean>;
 }
 
 LabsTranscriptsHistoryModel.init(
@@ -140,6 +141,11 @@ LabsTranscriptsHistoryModel.init(
       allowNull: true,
     },
     stored: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    manualReviewRequired: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
       defaultValue: false,

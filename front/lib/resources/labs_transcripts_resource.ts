@@ -312,12 +312,14 @@ export class LabsTranscriptsConfigurationResource extends BaseResource<LabsTrans
     fileName,
     conversationId,
     stored,
+    manualReviewRequired = false,
   }: {
     workspace: LightWorkspaceType;
     fileId: string;
     fileName: string;
     conversationId?: string | null;
     stored?: boolean;
+    manualReviewRequired?: boolean;
   }): Promise<InferAttributes<LabsTranscriptsHistoryModel>> {
     const history = await LabsTranscriptsHistoryModel.create({
       configurationId: this.id,
@@ -326,6 +328,7 @@ export class LabsTranscriptsConfigurationResource extends BaseResource<LabsTrans
       fileName,
       conversationId: conversationId,
       stored: stored,
+      manualReviewRequired,
     });
     return history.get();
   }

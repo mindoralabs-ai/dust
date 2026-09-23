@@ -15,10 +15,15 @@ const metadata: EndpointMetadata = {
   region: "global",
 };
 
-it("preserves exact usage before a terminal model error", async () => {
+it.each([
+  FinishReason.MAX_TOKENS,
+  FinishReason.MALFORMED_FUNCTION_CALL,
+  FinishReason.UNEXPECTED_TOOL_CALL,
+  FinishReason.OTHER,
+])("preserves exact usage before terminal finish %s", async (finishReason) => {
   const response = {
     responseId: "provider-response-1",
-    candidates: [{ finishReason: FinishReason.MAX_TOKENS }],
+    candidates: [{ finishReason }],
     usageMetadata: {
       promptTokenCount: 3,
       candidatesTokenCount: 2,

@@ -6,6 +6,7 @@ import {
 } from "@app/lib/api/dust_poc_runtime";
 import { runFrontUsageDeliveryBatch } from "@app/lib/api/usage_delivery";
 import { sendFrontUsageHeartbeat } from "@app/lib/api/usage_heartbeat";
+import { concurrentExecutor } from "@app/lib/utils/async_utils";
 import logger from "@app/logger/logger";
 
 /**
@@ -45,10 +46,10 @@ export async function runDustPocUsageReconciler(
     if (signal?.aborted) {
       return;
     }
-    await Promise.all(
-      routes.map((route) =>
-        sendFrontUsageHeartbeat(route, batchSuccess, resolver)
-      )
+    await concurrentExecutor(
+      routes,
+      (route) => sendFrontUsageHeartbeat(route, batchSuccess, resolver),
+      { concurrency: 2 }
     );
   }, 10_000);
 }
