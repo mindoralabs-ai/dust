@@ -476,6 +476,9 @@ struct MemberEntry {
 }
 
 fn validate_payload(payload: &Payload) -> Result<()> {
+    if payload.revision > 9_007_199_254_740_991 {
+        bail!("Dust registry revision exceeds the shared safe-integer limit");
+    }
     let mut tenants = HashSet::new();
     let mut workspaces = HashSet::new();
     let mut organizations = HashSet::new();
@@ -490,7 +493,6 @@ fn validate_payload(payload: &Payload) -> Result<()> {
             || !tenants.insert(t.tenant_id.as_str())
             || !workspaces.insert(t.workspace_id.as_str())
             || !organizations.insert(t.workos_organization_id.as_str())
-            || !routes.insert(t.private_route.as_str())
             || !journals.insert(t.journal_target.as_str())
         {
             bail!("duplicate or invalid Dust tenant binding");
@@ -500,6 +502,8 @@ fn validate_payload(payload: &Payload) -> Result<()> {
             || origin.path() != "/"
             || origin.query().is_some()
             || origin.fragment().is_some()
+            || t.private_route != origin.origin().ascii_serialization()
+            || !routes.insert(origin.origin().ascii_serialization())
         {
             bail!("invalid Dust tenant private route");
         }
@@ -734,6 +738,22 @@ mod tests {
         value["memberships"][0]["tenant_id"] = Value::String("alpha-".into());
         let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
         validate_payload(&parsed).expect("Front-valid tenant identifiers should be valid");
+    }
+
+    #[test]
+    fn rejects_noncanonical_private_origins_and_unsafe_revisions() {
+        let mut uppercase = payload(1_000, 1);
+        uppercase["tenants"][0]["private_route"] = Value::String("https://CRM.internal".into());
+        uppercase["tenants"][0]["admission_url"] =
+            Value::String("https://CRM.internal/internal/usage/dust/admission".into());
+        uppercase["tenants"][0]["usage_ingest_url"] =
+            Value::String("https://CRM.internal/internal/usage/events".into());
+        let parsed: Payload = serde_json::from_value(uppercase).expect("test payload failed");
+        assert!(validate_payload(&parsed).is_err());
+
+        let unsafe_revision = payload(1_000, 9_007_199_254_740_992);
+        let parsed: Payload = serde_json::from_value(unsafe_revision).expect("test payload failed");
+        assert!(validate_payload(&parsed).is_err());
     }
 
     fn signed(payload: Value, key: &Ed25519KeyPair) -> Vec<u8> {

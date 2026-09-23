@@ -147,6 +147,9 @@ impl CoreUsageDeliveryClient {
                 .map_err(|_| DeliveryError::Unavailable)?;
             return Ok(());
         }
+        journal
+            .validate_leased_claim(claim)
+            .map_err(|_| DeliveryError::Unavailable)?;
         let delivered = match resolver.resolve_delivery(claim).await {
             Ok(route) => send_exact_with(&self.transport, &route, claim, |path| {
                 std::fs::read_to_string(path).map_err(|_| DeliveryError::Unavailable)

@@ -33,12 +33,12 @@ pub struct CoreUsageAttempt {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CreatedPermit {
-    attempt_id: String,
+    attempt: CoreUsageAttempt,
 }
 
 impl CreatedPermit {
-    pub fn matches_attempt(&self, attempt_id: &str) -> bool {
-        self.attempt_id == attempt_id
+    pub fn matches_attempt(&self, attempt: &CoreUsageAttempt) -> bool {
+        self.attempt == *attempt
     }
 }
 
@@ -50,10 +50,8 @@ pub enum StartOutcome {
 
 #[cfg(test)]
 impl StartOutcome {
-    pub(crate) fn created_for_test(attempt_id: &str) -> Self {
-        Self::Created(CreatedPermit {
-            attempt_id: attempt_id.to_owned(),
-        })
+    pub(crate) fn created_for_test(attempt: CoreUsageAttempt) -> Self {
+        Self::Created(CreatedPermit { attempt })
     }
 }
 
@@ -266,7 +264,7 @@ impl CoreUsageJournal {
         tx.commit()?;
         Ok(if inserted == 1 {
             StartOutcome::Created(CreatedPermit {
-                attempt_id: attempt.attempt_id.clone(),
+                attempt: attempt.clone(),
             })
         } else {
             StartOutcome::Duplicate
@@ -491,6 +489,52 @@ impl CoreUsageJournal {
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(claims)
+    }
+
+    /// Confirm the exact frozen row and active lease before any tenant I/O.
+    pub fn validate_leased_claim(&self, claim: &ClaimedWork) -> Result<()> {
+        validate_identity(&claim.attempt_id)?;
+        validate_identity(&claim.lease_owner)?;
+        validate_identity(&claim.lease_nonce)?;
+        let conn = self.connection()?;
+        let persisted = conn
+            .query_row(
+                "SELECT attempt_id, tenant_id, workspace_id, route_id, provider_request_id,
+                        provider_operation_id, state, event_envelope,
+                        first_unresolved_at_ms, retry_count, manual_review_required,
+                        lease_owner, lease_nonce
+                 FROM dust_usage_attempts
+                 WHERE attempt_id = ?1 AND lease_owner = ?2 AND lease_nonce = ?3
+                   AND lease_until_ms > ?4 AND state = 'exact' AND delivered_at_ms IS NULL",
+                params![
+                    claim.attempt_id,
+                    claim.lease_owner,
+                    claim.lease_nonce,
+                    now_ms()
+                ],
+                |r| {
+                    Ok(ClaimedWork {
+                        attempt_id: r.get(0)?,
+                        tenant_id: r.get(1)?,
+                        workspace_id: r.get(2)?,
+                        route_id: r.get(3)?,
+                        provider_request_id: r.get(4)?,
+                        provider_operation_id: r.get(5)?,
+                        state: r.get(6)?,
+                        event_envelope: r.get(7)?,
+                        first_unresolved_at_ms: r.get(8)?,
+                        retry_count: r.get(9)?,
+                        manual_review_required: r.get::<_, i64>(10)? != 0,
+                        lease_owner: r.get(11)?,
+                        lease_nonce: r.get(12)?,
+                    })
+                },
+            )
+            .optional()?;
+        if persisted.as_ref() != Some(claim) {
+            bail!("Core usage claim is not the leased frozen row");
+        }
+        Ok(())
     }
 
     /// Acknowledge only after the tenant stream durably accepts the frozen event.
@@ -985,6 +1029,32 @@ mod tests {
             .fence_registry(1, [7; 32], &tenants)
             .expect("unchanged fence should only read");
         writer.rollback().expect("test operation failed");
+    }
+
+    #[test]
+    fn leased_claim_validation_rejects_changed_frozen_evidence() {
+        let dir = tempdir().expect("test operation failed");
+        let journal = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        let entry = attempt("frozen-claim");
+        journal.start(&entry).expect("test operation failed");
+        journal
+            .settle_exact(
+                &entry,
+                "provider-frozen-claim",
+                EmbeddingUsage { input_tokens: 2 },
+            )
+            .expect("test operation failed");
+        let claim = journal
+            .claim_due("worker-frozen", 1)
+            .expect("test operation failed")
+            .remove(0);
+        journal
+            .validate_leased_claim(&claim)
+            .expect("valid frozen claim");
+        let mut modified = claim.clone();
+        modified.event_envelope = Some("{\"fabricated\":true}".into());
+        assert!(journal.validate_leased_claim(&modified).is_err());
     }
 
     #[test]

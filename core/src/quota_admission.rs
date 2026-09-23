@@ -148,7 +148,7 @@ fn validate_route(
     attempt: &CoreUsageAttempt,
     journal_start: StartOutcome,
 ) -> Result<Url, AdmissionError> {
-    if !matches!(journal_start, StartOutcome::Created(ref permit) if permit.matches_attempt(&attempt.attempt_id))
+    if !matches!(journal_start, StartOutcome::Created(ref permit) if permit.matches_attempt(attempt))
         || !identity(&route.tenant_id)
         || route.workspace_id.is_empty()
         || route.workspace_id.encode_utf16().count() > 256
@@ -347,7 +347,24 @@ mod tests {
                 &transport,
                 &route(),
                 &attempt(),
-                StartOutcome::created_for_test("another-attempt"),
+                StartOutcome::created_for_test({
+                    let mut different = attempt();
+                    different.attempt_id = "another-attempt".into();
+                    different
+                }),
+                |_| Ok("a".repeat(32))
+            )
+            .await,
+            Err(AdmissionError::Unavailable)
+        );
+        let mut modified = attempt();
+        modified.provider_request_id = "different-provider-request".into();
+        assert_eq!(
+            require_with(
+                &transport,
+                &route(),
+                &modified,
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("a".repeat(32))
             )
             .await,
@@ -360,7 +377,7 @@ mod tests {
                 &transport,
                 &route(),
                 &wrong,
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("key".into())
             )
             .await,
@@ -373,7 +390,7 @@ mod tests {
                 &transport,
                 &route(),
                 &wrong_revision,
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("key".into())
             )
             .await,
@@ -398,7 +415,7 @@ mod tests {
                 &transport,
                 &wrong_route,
                 &attempt(),
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("key".into())
             )
             .await,
@@ -414,7 +431,7 @@ mod tests {
             &transport,
             &route(),
             &attempt(),
-            StartOutcome::created_for_test("attempt1"),
+            StartOutcome::created_for_test(attempt()),
             |path| {
                 assert_eq!(
                     path,
@@ -450,7 +467,7 @@ mod tests {
                 &transport,
                 &public,
                 &attempt(),
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("key".into())
             )
             .await,
@@ -461,7 +478,7 @@ mod tests {
                 &transport,
                 &route(),
                 &attempt(),
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("bad\nkey".into())
             )
             .await,
@@ -472,7 +489,7 @@ mod tests {
                 &transport,
                 &route(),
                 &attempt(),
-                StartOutcome::created_for_test("attempt1"),
+                StartOutcome::created_for_test(attempt()),
                 |_| Ok("short-key".into())
             )
             .await,
@@ -505,7 +522,7 @@ mod tests {
             &transport,
             &beta_route,
             &beta_attempt,
-            StartOutcome::created_for_test("attempt2"),
+            StartOutcome::created_for_test(beta_attempt.clone()),
             |path| {
                 assert_eq!(
                     path,
