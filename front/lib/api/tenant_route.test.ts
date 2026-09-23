@@ -105,7 +105,7 @@ describe("DustTenantRouteResolver", () => {
       exportCredentialFile: credentialFile,
       verifiers: [verifier],
       minimumRevision: 7,
-      now: () => now,
+      nowSeconds: () => now,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
   });

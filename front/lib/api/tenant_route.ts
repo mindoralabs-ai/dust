@@ -149,7 +149,7 @@ export interface TenantRouteConfig {
   verifiers: PinnedVerifier[];
   minimumRevision: number;
   fetchImpl?: typeof fetch;
-  now?: () => number;
+  nowSeconds?: () => number;
 }
 
 export interface ActiveDustIdentity {
@@ -180,7 +180,7 @@ export class TenantRouteUnavailable extends Error {
 
 function parsePayload(
   value: unknown,
-  now: number,
+  nowSeconds: number,
   minimumRevision: number
 ): Payload {
   const parsed = payloadSchema.safeParse(value);
@@ -191,8 +191,8 @@ function parsePayload(
   if (
     payload.revision < minimumRevision ||
     payload.expires_at !== payload.issued_at + 60 ||
-    payload.issued_at > now ||
-    now >= payload.expires_at
+    payload.issued_at > nowSeconds ||
+    nowSeconds >= payload.expires_at
   ) {
     throw new TenantRouteUnavailable();
   }
@@ -319,7 +319,7 @@ async function boundedJson(response: Response): Promise<unknown> {
 export class DustTenantRouteResolver {
   private readonly verifiers: Map<string, ReturnType<typeof buildVerifier>>;
   private readonly fetchImpl: typeof fetch;
-  private readonly now: () => number;
+  private readonly nowSeconds: () => number;
   private snapshot: {
     payload: Payload;
     keyId: string;
@@ -356,7 +356,8 @@ export class DustTenantRouteResolver {
       throw new TenantRouteUnavailable();
     }
     this.fetchImpl = config.fetchImpl ?? fetch;
-    this.now = config.now ?? (() => Math.floor(Date.now() / 1000));
+    this.nowSeconds =
+      config.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
   }
 
   async start(): Promise<void> {
@@ -398,9 +399,12 @@ export class DustTenantRouteResolver {
   }
 
   private async fetchAndVerify(): Promise<void> {
+    let refreshed = false;
     try {
       const credential = (
-        await readFile(this.config.exportCredentialFile, "utf8")
+        await readFile(this.config.exportCredentialFile, "utf8").catch(() => {
+          throw new TenantRouteUnavailable();
+        })
       ).trim();
       if (credential.length < 32 || /[\r\n]/.test(credential)) {
         throw new TenantRouteUnavailable();
@@ -411,6 +415,8 @@ export class DustTenantRouteResolver {
         redirect: "error",
         cache: "no-store",
         signal: AbortSignal.timeout(2000),
+      }).catch(() => {
+        throw new TenantRouteUnavailable();
       });
       const bundle = await boundedJson(response);
       if (
@@ -445,7 +451,7 @@ export class DustTenantRouteResolver {
       }
       const payload = parsePayload(
         bundle.payload,
-        this.now(),
+        this.nowSeconds(),
         Math.max(
           this.config.minimumRevision,
           this.snapshot?.payload.revision ?? 0
@@ -496,14 +502,19 @@ export class DustTenantRouteResolver {
       };
       this.refreshHealthy = true;
       this.schedule(
-        Math.max(1, payload.expires_at - this.now() - REFRESH_MARGIN_SECONDS)
+        Math.max(
+          1,
+          payload.expires_at - this.nowSeconds() - REFRESH_MARGIN_SECONDS
+        )
       );
-    } catch {
-      this.refreshHealthy = false;
-      if (this.snapshot) {
-        this.schedule(5);
+      refreshed = true;
+    } finally {
+      if (!refreshed) {
+        this.refreshHealthy = false;
+        if (this.snapshot) {
+          this.schedule(5);
+        }
       }
-      throw new TenantRouteUnavailable();
     }
   }
 
@@ -512,7 +523,7 @@ export class DustTenantRouteResolver {
     if (
       !current ||
       !this.refreshHealthy ||
-      this.now() >= current.payload.expires_at ||
+      this.nowSeconds() >= current.payload.expires_at ||
       current.payload.revision < this.config.minimumRevision ||
       !Object.values(identity).every(nonempty)
     ) {
@@ -545,7 +556,7 @@ export class DustTenantRouteResolver {
     if (
       !current ||
       !this.refreshHealthy ||
-      this.now() >= current.payload.expires_at ||
+      this.nowSeconds() >= current.payload.expires_at ||
       current.payload.revision < this.config.minimumRevision ||
       !TENANT_ID.test(tenantId)
     ) {
@@ -578,7 +589,7 @@ export class DustTenantRouteResolver {
     if (
       !current ||
       !this.refreshHealthy ||
-      this.now() >= current.payload.expires_at ||
+      this.nowSeconds() >= current.payload.expires_at ||
       current.payload.revision < this.config.minimumRevision ||
       workspaceIds.size === 0
     ) {

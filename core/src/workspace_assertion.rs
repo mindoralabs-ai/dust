@@ -135,7 +135,7 @@ mod tests {
                 Some(&token(&secret, AUDIENCE, future, vec![a.clone()])),
                 &[a]
             )
-            .unwrap()
+            .expect("verified test workspace assertion")
             .sid(),
             "w-test"
         );

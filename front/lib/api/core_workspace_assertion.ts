@@ -5,7 +5,12 @@ import jwt from "jsonwebtoken";
 
 export type CoreDataSourcePair = { projectId: string; dataSourceId: string };
 
-/** Mint only after resolving every Core pair through the authenticated workspace's resources. */
+/**
+ * @cc [label:security;backend] dust-core-assertion-workspace-binding
+ * Mint only after resolving every exact Core project/data-source pair through
+ * the authenticated workspace's resources. Never sign caller-supplied pairs
+ * without this workspace-bound lookup.
+ */
 export async function createCoreWorkspaceAssertion(
   auth: Authenticator,
   pairs: CoreDataSourcePair[]
