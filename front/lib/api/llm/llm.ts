@@ -44,6 +44,7 @@ import type {
 } from "@app/lib/api/llm/types/options";
 import { emitTokenUsageMetrics } from "@app/lib/api/llm/usage_metrics";
 import { isProgrammaticUsageFromContext } from "@app/lib/api/programmatic_usage/common";
+import { DustAdmissionDeniedError } from "@app/lib/api/usage_admission";
 import type { FrontUsageCounts } from "@app/lib/api/usage_journal";
 import {
   markFrontUsageUnknown,
@@ -1027,10 +1028,23 @@ export abstract class LLM<
         if (event.type === "success") {
           streamCompleted = true;
         }
-        yield event;
+        // A dispatched POC request may already be billed even when the provider
+        // reports a retryable error event. Surface it without another attempt.
+        yield pocAttempt && event.type === "error" && event.content.isRetryable
+          ? new EventError(
+              { ...event.content, isRetryable: false },
+              event.metadata
+            )
+          : event;
       }
       streamCompleted = true;
     } catch (error) {
+      if (error instanceof DustAdmissionDeniedError) {
+        throw ApplicationFailure.nonRetryable(
+          error.message,
+          "dust_poc_quota_exceeded"
+        );
+      }
       if (pocAttempt && providerDispatched) {
         throw ApplicationFailure.nonRetryable(
           "Dust POC provider outcome requires manual accounting review",

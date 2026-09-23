@@ -186,6 +186,8 @@ const ParamsSchema = z.object({
  *         description: Forbidden. The data source is managed.
  *       404:
  *         description: Data source or document not found.
+ *       409:
+ *         description: Upsert outcome is uncertain; check the document before retrying.
  *       429:
  *         description: Rate limit exceeded.
  *       500:
@@ -705,6 +707,17 @@ app.post(
       });
 
       if (upsertRes.isErr()) {
+        if (upsertRes.error.code === "ambiguous_provider_effect") {
+          return apiError(ctx, {
+            status_code: 409,
+            api_error: {
+              type: "data_source_error",
+              message:
+                "The document upsert outcome is uncertain. Check the document before trying again.",
+              data_source_error: upsertRes.error,
+            },
+          });
+        }
         return apiError(ctx, {
           status_code: 500,
           api_error: {
