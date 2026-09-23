@@ -56,6 +56,7 @@ pub mod project;
 pub mod run;
 pub mod search_filter;
 pub mod utils;
+pub mod workspace_assertion;
 pub mod types {
     pub mod tokenizer;
 }
