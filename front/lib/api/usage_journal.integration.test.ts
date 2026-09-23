@@ -130,6 +130,9 @@ describe.runIf(enabled)(
       await expect(validateFrontUsageClaim(work)).rejects.toThrow(
         "leased frozen row"
       );
+      await expect(markFrontUsageUnknown(attempt.attemptId)).rejects.toThrow(
+        "Conflicting"
+      );
     });
 
     it("issues one admission permit for the committed attempt only", async () => {
@@ -206,6 +209,18 @@ describe.runIf(enabled)(
       await startFrontUsageAttempt(second);
       await markFrontUsageUnknown(first.attemptId, "same-provider-operation");
       await expect(
+        settleFrontUsageExact({
+          attempt: first,
+          providerOperationId: "different-provider-operation",
+          counts: {
+            inputTokens: 2,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        })
+      ).rejects.toThrow("provider operation identity");
+      await expect(
         markFrontUsageUnknown(second.attemptId, "same-provider-operation")
       ).rejects.toThrow();
       await expect(
@@ -214,6 +229,60 @@ describe.runIf(enabled)(
           ["exact", second.attemptId]
         )
       ).rejects.toThrow();
+    });
+
+    it("fences a reclaimed claim even when the worker owner is reused", async () => {
+      const attempt = {
+        attemptId: newFrontUsageAttemptId(),
+        tenantId: "tenant-test-reclaim",
+        workspaceId: "workspace-test-reclaim",
+        conversationId: "conversation-test-reclaim",
+        model: "gemini-2.5-flash",
+        routeId: "tenant-test-reclaim:7",
+      };
+      await startFrontUsageAttempt(attempt);
+      await settleFrontUsageExact({
+        attempt,
+        providerOperationId: `vertex:${attempt.attemptId}`,
+        counts: {
+          inputTokens: 2,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const first = (
+        await claimFrontUsageWork("worker-test-reclaim", 100)
+      ).find((claim) => claim.attemptId === attempt.attemptId);
+      if (!first) {
+        throw new Error("Missing first claimed test row");
+      }
+      await observer.query(
+        `UPDATE "dust_usage_attempts" SET "leaseUntil" = now() - interval '1 second',
+         "nextRetryAt" = now() - interval '1 second' WHERE "attemptId" = $1`,
+        [attempt.attemptId]
+      );
+      const reclaimed = (
+        await claimFrontUsageWork("worker-test-reclaim", 100)
+      ).find((claim) => claim.attemptId === attempt.attemptId);
+      if (!reclaimed) {
+        throw new Error("Missing reclaimed test row");
+      }
+      expect(reclaimed.leaseNonce).not.toBe(first.leaseNonce);
+      await expect(
+        completeFrontUsageClaim({
+          attemptId: attempt.attemptId,
+          leaseOwner: first.leaseOwner,
+          leaseNonce: first.leaseNonce,
+          delivered: true,
+        })
+      ).rejects.toThrow("lease was lost");
+      await completeFrontUsageClaim({
+        attemptId: attempt.attemptId,
+        leaseOwner: reclaimed.leaseOwner,
+        leaseNonce: reclaimed.leaseNonce,
+        delivered: true,
+      });
     });
 
     it("claims fresh exact usage ahead of repeatedly due older work", async () => {

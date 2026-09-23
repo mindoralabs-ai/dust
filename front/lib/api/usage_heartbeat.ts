@@ -1,5 +1,8 @@
 import { readFile } from "node:fs/promises";
-import type { TenantRoute } from "@app/lib/api/tenant_route";
+import type {
+  DustTenantRouteResolver,
+  TenantRoute,
+} from "@app/lib/api/tenant_route";
 import type { FrontUsageBatchSuccess } from "@app/lib/api/usage_delivery";
 import {
   consumeFrontUsageBatchSuccess,
@@ -22,24 +25,36 @@ const heartbeatReceiptSchema = z.strictObject({
 export async function sendFrontUsageHeartbeat(
   route: TenantRoute,
   batchSuccess: FrontUsageBatchSuccess,
+  resolver: DustTenantRouteResolver,
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
+  await resolver.refresh();
+  const [current] = resolver.listActiveRoutesForMaintenance(
+    new Set([route.workspaceId])
+  );
+  if (
+    !current ||
+    current.tenantId !== route.tenantId ||
+    current.workspaceId !== route.workspaceId
+  ) {
+    throw new Error("Dust Front usage heartbeat unavailable");
+  }
   if (!consumeFrontUsageBatchSuccess(batchSuccess, route.tenantId)) {
     throw new Error("Dust Front usage heartbeat unavailable");
   }
-  const health = await readFrontUsageHealth(route.tenantId);
+  const health = await readFrontUsageHealth(current.tenantId);
   const observedAtSeconds = Date.now() / 1000;
-  const key = (await readFile(route.frontCredentialRef, "utf8")).trim();
+  const key = (await readFile(current.frontCredentialRef, "utf8")).trim();
   if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
     throw new Error("Dust Front usage heartbeat unavailable");
   }
   const response = await fetchImpl(
-    `${route.privateRoute}/internal/usage/producers/dust-front/heartbeat`,
+    `${current.privateRoute}/internal/usage/producers/dust-front/heartbeat`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Auth": key },
       body: JSON.stringify({
-        tenant_id: route.tenantId,
+        tenant_id: current.tenantId,
         observed_at: observedAtSeconds,
         journal_checked_at: health.checkedAtSeconds,
         reconciler_heartbeat_at: observedAtSeconds,

@@ -25,9 +25,14 @@ const health = vi.mocked(readFrontUsageHealth);
 const key = vi.mocked(readFile);
 const route = {
   tenantId: "tenant-a",
+  workspaceId: "workspace-a",
   privateRoute: "https://crm-a.internal",
   frontCredentialRef: "/run/tenant-a-front-key",
 } as TenantRoute;
+const resolver = {
+  refresh: vi.fn(),
+  listActiveRoutesForMaintenance: vi.fn(),
+} as unknown as DustTenantRouteResolver;
 
 describe("Dust Front journal heartbeat", () => {
   beforeEach(() => {
@@ -39,6 +44,8 @@ describe("Dust Front journal heartbeat", () => {
     });
     key.mockResolvedValue("a".repeat(40));
     vi.mocked(claimFrontUsageWork).mockResolvedValue([]);
+    vi.mocked(resolver.refresh).mockResolvedValue(undefined);
+    vi.mocked(resolver.listActiveRoutesForMaintenance).mockReturnValue([route]);
   });
 
   async function successfulBatch() {
@@ -53,6 +60,7 @@ describe("Dust Front journal heartbeat", () => {
     await sendFrontUsageHeartbeat(
       route,
       await successfulBatch(),
+      resolver,
       fetchImpl as typeof fetch
     );
     expect(health).toHaveBeenCalledWith("tenant-a");
@@ -85,6 +93,7 @@ describe("Dust Front journal heartbeat", () => {
       sendFrontUsageHeartbeat(
         route,
         await successfulBatch(),
+        resolver,
         fetchImpl as typeof fetch
       )
     ).rejects.toThrow();
@@ -93,10 +102,46 @@ describe("Dust Front journal heartbeat", () => {
       sendFrontUsageHeartbeat(
         route,
         await successfulBatch(),
+        resolver,
         fetchImpl as typeof fetch
       )
     ).rejects.toThrow();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the signed route instead of sending to a retained destination", async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL) =>
+      Response.json({ accepted: true, heartbeat_interval_seconds: 15 })
+    );
+    vi.mocked(resolver.listActiveRoutesForMaintenance).mockReturnValueOnce([
+      {
+        ...route,
+        privateRoute: "https://crm-current.internal",
+        frontCredentialRef: "/run/current-front-key",
+      },
+    ]);
+    await sendFrontUsageHeartbeat(
+      route,
+      await successfulBatch(),
+      resolver,
+      fetchImpl as typeof fetch
+    );
+    expect(resolver.refresh).toHaveBeenCalledTimes(1);
+    expect(key).toHaveBeenCalledWith("/run/current-front-key", "utf8");
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(
+      "https://crm-current.internal/internal/usage/producers/dust-front/heartbeat"
+    );
+
+    vi.mocked(resolver.refresh).mockRejectedValueOnce(new Error("revoked"));
+    await expect(
+      sendFrontUsageHeartbeat(
+        route,
+        await successfulBatch(),
+        resolver,
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("revoked");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("cannot report a successful reconciler without a fresh batch", async () => {
@@ -105,6 +150,7 @@ describe("Dust Front journal heartbeat", () => {
       sendFrontUsageHeartbeat(
         route,
         { processed: 0 },
+        resolver,
         fetchImpl as typeof fetch
       )
     ).rejects.toThrow("unavailable");
@@ -117,9 +163,19 @@ describe("Dust Front journal heartbeat", () => {
     fetchImpl.mockResolvedValue(
       Response.json({ accepted: true, heartbeat_interval_seconds: 15 })
     );
-    await sendFrontUsageHeartbeat(route, success, fetchImpl as typeof fetch);
+    await sendFrontUsageHeartbeat(
+      route,
+      success,
+      resolver,
+      fetchImpl as typeof fetch
+    );
     await expect(
-      sendFrontUsageHeartbeat(route, success, fetchImpl as typeof fetch)
+      sendFrontUsageHeartbeat(
+        route,
+        success,
+        resolver,
+        fetchImpl as typeof fetch
+      )
     ).rejects.toThrow("unavailable");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
@@ -130,6 +186,7 @@ describe("Dust Front journal heartbeat", () => {
       sendFrontUsageHeartbeat(
         route,
         await successfulBatch(),
+        resolver,
         fetchImpl as typeof fetch
       )
     ).rejects.toThrow("unavailable");
