@@ -353,6 +353,7 @@ export async function runModel(
     durationRecorder,
     activityTimeoutDeadlineMs,
     forceDisableToolUse = false,
+    onPocModelStart,
   }: {
     contextProvider: AgentLoopContextProvider;
     runIds: string[];
@@ -362,6 +363,7 @@ export async function runModel(
     activityTimeoutDeadlineMs: number;
     // Set when the previous step came back empty: force the final generation.
     forceDisableToolUse?: boolean;
+    onPocModelStart?: () => void;
   }
 ): Promise<{
   actions: AgentActionsEvent["actions"];
@@ -881,6 +883,7 @@ export async function runModel(
     publishAgentError,
     prompt,
     llm,
+    onPocModelStart,
     updateResourceAndPublishEvent,
   });
 

@@ -1,4 +1,5 @@
 import { isToolExecutionStatusFinal } from "@app/lib/actions/statuses";
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import { getRetryPolicyFromToolConfiguration } from "@app/lib/api/mcp";
 import type { AuthenticatorType } from "@app/lib/auth";
 import { Authenticator, getFeatureFlags } from "@app/lib/auth";
@@ -37,6 +38,7 @@ import { isAgentLoopDataSoftDeleteError } from "@app/types/assistant/agent_run";
 import type { ModelId } from "@app/types/shared/model_id";
 import { startActiveObservation } from "@langfuse/tracing";
 import { Context, heartbeat } from "@temporalio/activity";
+import { ApplicationFailure } from "@temporalio/common";
 
 export type RunModelAndCreateActionsResult = {
   actionBlobs: ActionBlob[];
@@ -89,23 +91,40 @@ export async function runModelAndCreateActionsActivity({
   // immediately and periodically for the whole activity. The LLM stream adds its own heartbeats.
   heartbeat();
 
-  return withPeriodicHeartbeat(
-    () =>
-      tracer.trace("runModelAndCreateActionsActivity", async () =>
-        _runModelAndCreateActionsActivity({
-          authType,
-          checkForResume,
-          runAgentArgs,
-          runIds,
-          step,
-          forceDisableToolUse,
-        })
-      ),
-    {
-      intervalMs: MODEL_ACTIVITY_HEARTBEAT_INTERVAL_MS,
-      heartbeatFn: () => heartbeat(),
+  let pocModelStarted = false;
+  try {
+    return await withPeriodicHeartbeat(
+      () =>
+        tracer.trace("runModelAndCreateActionsActivity", async () =>
+          _runModelAndCreateActionsActivity({
+            authType,
+            checkForResume,
+            runAgentArgs,
+            runIds,
+            step,
+            forceDisableToolUse,
+            onPocModelStart: () => {
+              pocModelStarted = true;
+            },
+          })
+        ),
+      {
+        intervalMs: MODEL_ACTIVITY_HEARTBEAT_INTERVAL_MS,
+        heartbeatFn: () => heartbeat(),
+      }
+    );
+  } catch (error) {
+    if (dustPocMode() && pocModelStarted) {
+      if (error instanceof ApplicationFailure && error.nonRetryable) {
+        throw error;
+      }
+      throw ApplicationFailure.nonRetryable(
+        "Dust POC model activity requires manual accounting review",
+        "dust_poc_accounting_unavailable"
+      );
     }
-  );
+    throw error;
+  }
 }
 
 async function _runModelAndCreateActionsActivity({
@@ -115,6 +134,7 @@ async function _runModelAndCreateActionsActivity({
   runIds,
   step,
   forceDisableToolUse,
+  onPocModelStart,
 }: {
   authType: AuthenticatorType;
   checkForResume: boolean;
@@ -122,6 +142,7 @@ async function _runModelAndCreateActionsActivity({
   runIds: string[];
   step: number;
   forceDisableToolUse: boolean;
+  onPocModelStart: () => void;
 }): Promise<RunModelAndCreateActionsResult | null> {
   const activityTimeoutDeadlineMs = getActivityTimeoutDeadlineMs();
   const durationRecorder = DurationRecorder.create([]);
@@ -282,6 +303,7 @@ async function _runModelAndCreateActionsActivity({
     durationRecorder,
     activityTimeoutDeadlineMs,
     forceDisableToolUse,
+    onPocModelStart,
   });
 
   if (!modelResult) {

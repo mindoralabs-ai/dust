@@ -1,4 +1,5 @@
 import { isDustLikeAgent } from "@app/lib/api/assistant/global_agents/prompt_context";
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { CacheDiagnosticsKey } from "@app/lib/api/llm/cache_diagnostics";
 import {
   getPreviousMessageId,
@@ -302,7 +303,8 @@ export async function getOutputFromLLMStream(
     prompt,
     llm,
     updateResourceAndPublishEvent,
-  }: GetOutputRequestParams & { llm: LLM }
+    onPocModelStart,
+  }: GetOutputRequestParams & { llm: LLM; onPocModelStart?: () => void }
 ): Promise<GetOutputResponse> {
   const start = Date.now();
   let timeToFirstEvent: number | undefined = undefined;
@@ -336,6 +338,11 @@ export async function getOutputFromLLMStream(
 
   const previousMessageId = await getPreviousMessageId(cacheDiagnosticsKey);
 
+  if (dustPocMode()) {
+    // The next stream read may dispatch after a watchdog begins cleanup.
+    // Mark the activity before starting that read, so its tail cannot retry.
+    onPocModelStart?.();
+  }
   const events = llm.stream(
     {
       conversation: modelConversationRes.value.modelConversation,
@@ -628,10 +635,10 @@ export async function getOutputFromLLMStream(
       // Watchdog timeouts abort after llm_interaction.count is already emitted
       // and never become a terminal LLM error, so they do not increment
       // llm_error.count.
-      return makeLLMTimeoutResponse(err.kind, !llm.hasPocProviderDispatch());
+      return makeLLMTimeoutResponse(err.kind, !dustPocMode());
     }
     if (
-      llm.hasPocProviderDispatch() &&
+      dustPocMode() &&
       err instanceof ApplicationFailure &&
       err.type === "ModelInterruption"
     ) {

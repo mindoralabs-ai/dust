@@ -107,12 +107,6 @@ export abstract class LLM<
   protected generation: LangfuseGeneration | null = null;
   protected pocAttemptId: string | null = null;
   protected pocProviderPermit: object | null = null;
-  private pocProviderDispatched = false;
-
-  /** Remains true after stream cleanup so consumer watchdogs cannot retry it. */
-  hasPocProviderDispatch(): boolean {
-    return this.pocProviderDispatched;
-  }
 
   protected constructor(
     auth: Authenticator,
@@ -937,7 +931,6 @@ export abstract class LLM<
       usageType,
     });
 
-    this.pocProviderDispatched = false;
     let pocAttempt: AuthorizedDustGenerationAttempt | null = null;
     let providerDispatched = false;
     let exactUsage: FrontUsageCounts | null = null;
@@ -992,9 +985,6 @@ export abstract class LLM<
       }
 
       providerDispatched = true;
-      if (pocAttempt) {
-        this.pocProviderDispatched = true;
-      }
       for await (const event of this.sendRequest(payload)) {
         if (pocAttempt && event.type === "error") {
           const terminalModelOutcome =
