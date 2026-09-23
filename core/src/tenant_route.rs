@@ -507,10 +507,11 @@ fn validate_payload(payload: &Payload) -> Result<()> {
     let mut member_pairs = HashSet::new();
     let mut dust_users = HashSet::new();
     let mut workos_users = HashSet::new();
+    let mut represented_tenants = HashSet::new();
     let mut active_count: HashMap<&str, usize> = HashMap::new();
     for m in &payload.memberships {
         if !tenants.contains(m.tenant_id.as_str())
-            || !identity(&m.employee_id)
+            || !bounded_string(&m.employee_id)
             || m.authority_namespace != "control-ui"
             || !reference(&m.dust_user_id)
             || !reference(&m.workos_user_id)
@@ -524,15 +525,11 @@ fn validate_payload(payload: &Payload) -> Result<()> {
         if m.active {
             *active_count.entry(m.tenant_id.as_str()).or_default() += 1;
         }
+        represented_tenants.insert(m.tenant_id.as_str());
     }
     for t in &payload.tenants {
         let count = active_count.get(t.tenant_id.as_str()).copied().unwrap_or(0);
-        if t.active != (count > 0)
-            || !payload
-                .memberships
-                .iter()
-                .any(|m| m.tenant_id == t.tenant_id)
-        {
+        if t.active != (count > 0) || !represented_tenants.contains(t.tenant_id.as_str()) {
             bail!("inactive or partial Dust workspace binding");
         }
     }
@@ -569,6 +566,10 @@ fn identity(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn bounded_string(value: &str) -> bool {
+    !value.is_empty() && value.encode_utf16().count() <= 256
 }
 
 fn reference(value: &str) -> bool {
@@ -700,6 +701,19 @@ mod tests {
                 "workos_user_id": "workos_user_1", "active": true, "revision": revision
             }]
         })
+    }
+
+    #[test]
+    fn membership_employee_id_uses_front_wire_bounds() {
+        let mut value = payload(1_000, 1);
+        value["memberships"][0]["employee_id"] =
+            Value::String(format!("{}@example.com", "e".repeat(244)));
+        let parsed: Payload = serde_json::from_value(value.clone()).expect("test payload failed");
+        validate_payload(&parsed).expect("256-character employee ID should be valid");
+        value["memberships"][0]["employee_id"] =
+            Value::String(format!("{}@example.com", "e".repeat(245)));
+        let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
+        assert!(validate_payload(&parsed).is_err());
     }
 
     fn signed(payload: Value, key: &Ed25519KeyPair) -> Vec<u8> {

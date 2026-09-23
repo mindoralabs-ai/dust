@@ -302,7 +302,7 @@ impl CoreUsageJournal {
             {
                 tx.execute(
                     "UPDATE dust_usage_attempts SET manual_review_required = 0,
-                     next_retry_at_ms = ?2, updated_at_ms = ?2
+                     first_unresolved_at_ms = ?2, next_retry_at_ms = ?2, updated_at_ms = ?2
                      WHERE attempt_id = ?1 AND manual_review_required = 1",
                     params![attempt.attempt_id, now_ms()],
                 )?;
@@ -310,7 +310,7 @@ impl CoreUsageJournal {
             "started" | "unknown" | "manual_review_required" => {
                 tx.execute(
                     "UPDATE dust_usage_attempts SET state = 'exact', provider_operation_id = ?2,
-                     event_envelope = ?3, next_retry_at_ms = ?4,
+                     event_envelope = ?3, first_unresolved_at_ms = ?4, next_retry_at_ms = ?4,
                      manual_review_required = 0, updated_at_ms = ?4
                      WHERE attempt_id = ?1",
                     params![
@@ -772,9 +772,28 @@ mod tests {
                 EmbeddingUsage { input_tokens: 2 },
             )
             .expect("test exact evidence failed");
+        let replayed = journal
+            .claim_due("evidence-worker", 1)
+            .expect("test claim failed")
+            .remove(0);
+        journal.defer_claim(&replayed).expect("test defer failed");
+        let (state, manual): (String, i64) = conn
+            .query_row(
+                "SELECT state, manual_review_required FROM dust_usage_attempts WHERE attempt_id = ?1",
+                [&attempt.attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("test query failed");
+        assert_eq!(state, "exact");
+        assert_eq!(manual, 0);
+        conn.execute(
+            "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2 WHERE attempt_id = ?1",
+            params![attempt.attempt_id, now_ms() - 1],
+        )
+        .expect("test operation failed");
         assert_eq!(
             journal
-                .claim_due("evidence-worker", 1)
+                .claim_due("retry-worker", 1)
                 .expect("test claim failed")
                 .len(),
             1

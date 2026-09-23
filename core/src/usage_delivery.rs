@@ -190,7 +190,6 @@ async fn send_heartbeat_with<T: Transport>(
         .read_health(&route.tenant_id)
         .map_err(|_| DeliveryError::Unavailable)?;
     let key = read_key(Path::new(&route.core_credential_ref))?;
-    let key = key.trim().to_string();
     if !(32..=4096).contains(&key.len()) || key.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(DeliveryError::Unavailable);
@@ -479,6 +478,15 @@ mod tests {
         assert_eq!(evidence["tenant_id"], "tenant-a");
         assert_eq!(evidence["unresolved_count"], 1);
         drop(sent);
+        assert!(send_heartbeat_with(&transport, &journal, &route, |_| {
+            Ok(format!(" {}", "a".repeat(40)))
+        })
+        .await
+        .is_err());
+        assert_eq!(
+            transport.sent.lock().expect("test operation failed").len(),
+            1
+        );
         let mut cross_tenant = route.clone();
         cross_tenant.tenant_id = "tenant-b".into();
         assert!(
