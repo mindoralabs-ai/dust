@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -197,7 +197,8 @@ struct CoreVertexRuntime {
     workspaces: Vec<String>,
 }
 
-static CORE_VERTEX_RUNTIME: OnceLock<Result<CoreVertexRuntime, String>> = OnceLock::new();
+static CORE_VERTEX_RUNTIME: OnceLock<CoreVertexRuntime> = OnceLock::new();
+static CORE_VERTEX_RUNTIME_INIT: Mutex<()> = Mutex::new(());
 
 impl CoreVertexRuntime {
     fn from_environment() -> Result<Self> {
@@ -256,13 +257,20 @@ impl CoreVertexRuntime {
 }
 
 fn core_vertex_runtime() -> Result<&'static CoreVertexRuntime> {
-    let runtime = CORE_VERTEX_RUNTIME.get_or_init(|| {
-        CoreVertexRuntime::from_environment()
-            .map_err(|_| "Core Vertex runtime configuration unavailable".to_string())
-    });
-    runtime
-        .as_ref()
-        .map_err(|_| anyhow!("Core Vertex runtime configuration unavailable"))
+    if let Some(runtime) = CORE_VERTEX_RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let _guard = CORE_VERTEX_RUNTIME_INIT
+        .lock()
+        .map_err(|_| anyhow!("Core Vertex runtime initialization unavailable"))?;
+    if CORE_VERTEX_RUNTIME.get().is_none() {
+        let runtime = CoreVertexRuntime::from_environment()
+            .map_err(|_| anyhow!("Core Vertex runtime configuration unavailable"))?;
+        let _ = CORE_VERTEX_RUNTIME.set(runtime);
+    }
+    CORE_VERTEX_RUNTIME
+        .get()
+        .ok_or_else(|| anyhow!("Core Vertex runtime initialization unavailable"))
 }
 
 /// @cc [label:security;backend] dust-core-reconciler-no-model-effect
@@ -303,18 +311,16 @@ async fn run_core_heartbeat_loop() {
         let result = async {
             let runtime = core_vertex_runtime()?;
             let client = CoreUsageDeliveryClient::new()?;
-            let outcomes =
-                futures::future::join_all(runtime.workspaces.iter().map(|workspace| async {
-                    let routes = runtime
-                        .resolver
-                        .resolve_maintenance(std::slice::from_ref(workspace))
-                        .await?;
-                    for route in routes {
-                        client.send_heartbeat(&runtime.journal, &route).await?;
-                    }
-                    Ok::<(), anyhow::Error>(())
-                }))
-                .await;
+            let routes = runtime
+                .resolver
+                .resolve_maintenance_each(&runtime.workspaces)
+                .await?;
+            let outcomes = futures::future::join_all(routes.into_iter().map(|route| async {
+                let route = route?;
+                client.send_heartbeat(&runtime.journal, &route).await?;
+                Ok::<(), anyhow::Error>(())
+            }))
+            .await;
             if outcomes.iter().any(Result::is_err) {
                 return Err(anyhow!("Dust Core usage heartbeat unavailable"));
             }
@@ -392,7 +398,12 @@ where
             let operation_id = error
                 .downcast_ref::<ModelError>()
                 .and_then(|provider_error| provider_error.request_id.as_deref());
-            journal.mark_unknown_with_operation(&attempt.attempt_id, operation_id)?;
+            if journal
+                .mark_unknown_with_operation(&attempt.attempt_id, operation_id)
+                .is_err()
+            {
+                tracing::error!("Dust Core unknown-effect journal write unavailable");
+            }
             // Vertex embedContent has no idempotency key. Retrying this
             // ambiguous effect through EmbedderRequest would create a second
             // charged attempt, so do not forward ModelError's retry flag.
@@ -408,17 +419,21 @@ where
         || response.vector.iter().any(|value| !value.is_finite())
         || usage.is_none()
     {
-        journal.mark_unknown(&attempt.attempt_id)?;
-        return Err(anyhow!("Vertex embedding response or usage unavailable"));
+        if journal.mark_unknown(&attempt.attempt_id).is_err() {
+            tracing::error!("Dust Core unknown-effect journal write unavailable");
+        }
+        return Err(AmbiguousVertexEffect.into());
     }
     // embedContent has no provider operation ID in its documented response.
     // The unique client request ID remains the stable local dedup identity.
     let input_tokens = usage.ok_or_else(|| anyhow!("Vertex embedding usage unavailable"))? as u32;
-    journal.settle_exact(
-        &attempt,
-        &format!("client:{}", attempt.provider_request_id),
-        EmbeddingUsage { input_tokens },
-    )?;
+    journal
+        .settle_exact(
+            &attempt,
+            &format!("client:{}", attempt.provider_request_id),
+            EmbeddingUsage { input_tokens },
+        )
+        .map_err(|_| AmbiguousVertexEffect)?;
     Ok(response)
 }
 
@@ -529,6 +544,11 @@ impl VertexAIEmbedder {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
             .take(80)
             .collect::<String>();
+        let request_id = if request_id.is_empty() {
+            None
+        } else {
+            Some(request_id)
+        };
         if !status.is_success() {
             let retryable = if status.as_u16() == 429 || status.is_server_error() {
                 Some(ModelErrorRetryOptions {
@@ -542,19 +562,23 @@ impl VertexAIEmbedder {
             return Err(ModelError {
                 message: format!("Vertex embedding HTTP status {}", status.as_u16()),
                 retryable,
-                request_id: if request_id.is_empty() {
-                    None
-                } else {
-                    Some(request_id)
-                },
+                request_id,
             }
             .into());
         }
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|_| anyhow!("Vertex embedding response JSON is invalid"))?;
-        Self::parse_response(payload)
+        let payload: Value = response.json().await.map_err(|_| ModelError {
+            message: "Vertex embedding response JSON is invalid".into(),
+            retryable: None,
+            request_id: request_id.clone(),
+        })?;
+        Self::parse_response(payload).map_err(|_| {
+            ModelError {
+                message: "Vertex embedding response is invalid".into(),
+                retryable: None,
+                request_id,
+            }
+            .into()
+        })
     }
 
     #[allow(dead_code)]

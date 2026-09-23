@@ -200,12 +200,23 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
         &self,
         workspace_ids: &[String],
     ) -> Result<Vec<CoreTenantRoute>> {
+        self.resolve_maintenance_each(workspace_ids)
+            .await?
+            .into_iter()
+            .collect()
+    }
+
+    /// One verified registry snapshot, with tenant-local routing outcomes.
+    pub async fn resolve_maintenance_each(
+        &self,
+        workspace_ids: &[String],
+    ) -> Result<Vec<Result<CoreTenantRoute>>> {
         if workspace_ids.is_empty() || workspace_ids.len() > 2 {
             bail!("invalid Dust maintenance workspace selection");
         }
         let raw = self.fetcher.fetch().await?;
         let envelope = self.verify_bundle(&raw, chrono::Utc::now().timestamp())?;
-        workspace_ids
+        Ok(workspace_ids
             .iter()
             .map(|workspace_id| {
                 let entry = envelope
@@ -226,7 +237,7 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                     key_id: envelope.key_id.clone(),
                 })
             })
-            .collect()
+            .collect::<Vec<_>>())
     }
 
     /// Resolve only delivery for an existing exact-usage journal claim. A
