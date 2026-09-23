@@ -502,6 +502,7 @@ fn validate_payload(payload: &Payload) -> Result<()> {
             || origin.path() != "/"
             || origin.query().is_some()
             || origin.fragment().is_some()
+            || t.private_route.len() > 256
             || t.private_route != origin.origin().ascii_serialization()
             || !routes.insert(origin.origin().ascii_serialization())
         {
@@ -749,6 +750,24 @@ mod tests {
         uppercase["tenants"][0]["usage_ingest_url"] =
             Value::String("https://CRM.internal/internal/usage/events".into());
         let parsed: Payload = serde_json::from_value(uppercase).expect("test payload failed");
+        assert!(validate_payload(&parsed).is_err());
+
+        let mut long_origin = payload(1_000, 1);
+        let host = format!(
+            "{}.{}.{}.{}.internal",
+            "a".repeat(60),
+            "b".repeat(60),
+            "c".repeat(60),
+            "d".repeat(60)
+        );
+        let origin = format!("https://{host}:8443");
+        assert!(origin.len() > 256);
+        long_origin["tenants"][0]["private_route"] = Value::String(origin.clone());
+        long_origin["tenants"][0]["admission_url"] =
+            Value::String(format!("{origin}/internal/usage/dust/admission"));
+        long_origin["tenants"][0]["usage_ingest_url"] =
+            Value::String(format!("{origin}/internal/usage/events"));
+        let parsed: Payload = serde_json::from_value(long_origin).expect("test payload failed");
         assert!(validate_payload(&parsed).is_err());
 
         let unsafe_revision = payload(1_000, 9_007_199_254_740_992);
