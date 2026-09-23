@@ -493,6 +493,53 @@ export type FrontUsageClaim = {
   leaseNonce: string;
 };
 
+/** Check the exact frozen row and current lease before external tenant I/O. */
+export async function validateFrontUsageClaim(
+  claim: FrontUsageClaim
+): Promise<void> {
+  requireIdentity(claim.attemptId);
+  requireIdentity(claim.leaseOwner);
+  requireIdentity(claim.leaseNonce);
+  const [persisted] = await frontSequelize.query<FrontUsageClaim>(
+    `SELECT "attemptId", "tenantId", "workspaceId", "routeId", "state",
+            "eventEnvelope", "eventHash", "providerOperationId",
+            "firstUnresolvedAt", "retryCount", "manualReviewRequired",
+            "leaseOwner", "leaseNonce"
+       FROM "dust_usage_attempts"
+      WHERE "attemptId" = :attemptId AND "leaseOwner" = :leaseOwner
+        AND "leaseNonce" = :leaseNonce AND "leaseUntil" > now()
+        AND "state" = 'exact' AND "deliveredAt" IS NULL
+        AND "manualReviewRequired" = false`,
+    {
+      replacements: {
+        attemptId: claim.attemptId,
+        leaseOwner: claim.leaseOwner,
+        leaseNonce: claim.leaseNonce,
+      },
+      type: QueryTypes.SELECT,
+    }
+  );
+  const same =
+    persisted &&
+    persisted.attemptId === claim.attemptId &&
+    persisted.tenantId === claim.tenantId &&
+    persisted.workspaceId === claim.workspaceId &&
+    persisted.routeId === claim.routeId &&
+    persisted.state === claim.state &&
+    persisted.eventEnvelope === claim.eventEnvelope &&
+    persisted.eventHash === claim.eventHash &&
+    persisted.providerOperationId === claim.providerOperationId &&
+    Number(new Date(persisted.firstUnresolvedAt ?? 0)) ===
+      Number(new Date(claim.firstUnresolvedAt ?? 0)) &&
+    persisted.retryCount === claim.retryCount &&
+    persisted.manualReviewRequired === claim.manualReviewRequired &&
+    persisted.leaseOwner === claim.leaseOwner &&
+    persisted.leaseNonce === claim.leaseNonce;
+  if (!same) {
+    throw new Error("Dust usage claim is not the leased frozen row");
+  }
+}
+
 /**
  * @cc [label:security;concurrency] dust-front-usage-claim-fence
  * A fresh lease nonce fences each claimed batch; only that lease may mark the
@@ -640,6 +687,7 @@ export class DustUsageAttemptResource {
   static settleNoCharge = settleFrontUsageNoCharge;
   static settleExact = settleFrontUsageExact;
   static claimWork = claimFrontUsageWork;
+  static validateClaim = validateFrontUsageClaim;
   static completeClaim = completeFrontUsageClaim;
   static deferClaim = deferFrontUsageClaim;
 }

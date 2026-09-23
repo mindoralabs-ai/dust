@@ -12,6 +12,7 @@ import {
   settleFrontUsageNoCharge,
   startFrontUsageAttempt,
   startFrontUsageAttemptForAdmission,
+  validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { frontSequelize } from "@app/lib/resources/storage";
 import { Client } from "pg";
@@ -105,6 +106,14 @@ describe.runIf(enabled)(
       expect(
         claimed.filter((item) => item.attemptId === attempt.attemptId)
       ).toHaveLength(1);
+      expect(work).toBeDefined();
+      if (!work) {
+        throw new Error("Missing claimed test row");
+      }
+      await expect(validateFrontUsageClaim(work)).resolves.toBeUndefined();
+      await expect(
+        validateFrontUsageClaim({ ...work, eventEnvelope: "fabricated" })
+      ).rejects.toThrow("leased frozen row");
       await completeFrontUsageClaim({
         attemptId: attempt.attemptId,
         leaseOwner: "worker-test-a",
@@ -118,6 +127,9 @@ describe.runIf(enabled)(
       expect(settled.rows[0].state).toBe("exact");
       expect(settled.rows[0].eventEnvelope).toBe(frozen);
       expect(settled.rows[0].deliveredAt).not.toBeNull();
+      await expect(validateFrontUsageClaim(work)).rejects.toThrow(
+        "leased frozen row"
+      );
     });
 
     it("issues one admission permit for the committed attempt only", async () => {

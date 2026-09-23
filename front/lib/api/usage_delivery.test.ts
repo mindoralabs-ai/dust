@@ -10,6 +10,7 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   deferFrontUsageClaim,
+  validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -22,6 +23,7 @@ vi.mock("@app/lib/api/usage_journal", () => ({
   claimFrontUsageWork: vi.fn(),
   completeFrontUsageClaim: vi.fn(),
   deferFrontUsageClaim: vi.fn(),
+  validateFrontUsageClaim: vi.fn(),
 }));
 
 const envelope =
@@ -132,6 +134,17 @@ describe("Dust Front usage delivery", () => {
       ...route,
       workspaceId: "workspace-b",
     } as never);
+    await deliverFrontUsageClaim(exact, resolver, fetchImpl);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(completeFrontUsageClaim).toHaveBeenCalledWith(
+      expect.objectContaining({ delivered: false })
+    );
+  });
+
+  it("does not send a stale or modified claim before journal validation", async () => {
+    vi.mocked(validateFrontUsageClaim).mockRejectedValueOnce(
+      new Error("lost lease")
+    );
     await deliverFrontUsageClaim(exact, resolver, fetchImpl);
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(completeFrontUsageClaim).toHaveBeenCalledWith(

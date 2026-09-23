@@ -6,6 +6,7 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   deferFrontUsageClaim,
+  validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
 import { z } from "zod";
@@ -165,6 +166,7 @@ export async function deliverFrontUsageClaim(
     if (key.length < 32 || key.length > 4096 || /[\r\n]/.test(key)) {
       throw new Error("Dust usage delivery unavailable");
     }
+    await validateFrontUsageClaim(claim);
     const response = await fetchImpl(route.usageIngestUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Auth": key },

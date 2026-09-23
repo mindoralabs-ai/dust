@@ -22,5 +22,6 @@ export const heartbeatFrontUsageAttempt = DustUsageAttemptResource.heartbeat;
 export const settleFrontUsageNoCharge = DustUsageAttemptResource.settleNoCharge;
 export const settleFrontUsageExact = DustUsageAttemptResource.settleExact;
 export const claimFrontUsageWork = DustUsageAttemptResource.claimWork;
+export const validateFrontUsageClaim = DustUsageAttemptResource.validateClaim;
 export const completeFrontUsageClaim = DustUsageAttemptResource.completeClaim;
 export const deferFrontUsageClaim = DustUsageAttemptResource.deferClaim;
