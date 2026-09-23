@@ -16,7 +16,7 @@ import {
 import {
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
-  startFrontUsageAttempt,
+  startFrontUsageAttemptForAdmission,
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -31,14 +31,14 @@ vi.mock("@app/lib/api/usage_admission", async (importOriginal) => ({
 }));
 vi.mock("@app/lib/api/usage_journal", () => ({
   newFrontUsageAttemptId: vi.fn(),
-  startFrontUsageAttempt: vi.fn(),
+  startFrontUsageAttemptForAdmission: vi.fn(),
   settleFrontUsageNoCharge: vi.fn(),
 }));
 
 const readKey = vi.mocked(readFile);
 const admit = vi.mocked(requireDustAdmission);
 const newId = vi.mocked(newFrontUsageAttemptId);
-const start = vi.mocked(startFrontUsageAttempt);
+const start = vi.mocked(startFrontUsageAttemptForAdmission);
 const noCharge = vi.mocked(settleFrontUsageNoCharge);
 
 function identity(tenant: "a" | "b"): ActiveDustIdentity {
@@ -99,7 +99,9 @@ describe("Dust Front generation gate", () => {
     readKey.mockImplementation(async (path) =>
       String(path).includes("tenant-a") ? "a".repeat(40) : "b".repeat(40)
     );
-    start.mockResolvedValue("created");
+    start.mockImplementation(async (attempt) => ({
+      attemptId: attempt.attemptId,
+    }));
     admit.mockResolvedValue(undefined);
     noCharge.mockResolvedValue(undefined);
   });
@@ -127,13 +129,13 @@ describe("Dust Front generation gate", () => {
       routeUrl: route("a").admissionUrl,
       componentKey: "a".repeat(40),
       operationId: "attempt-1",
-      startOutcome: "created",
+      startPermit: { attemptId: "attempt-1" },
     });
     expect(admit).toHaveBeenNthCalledWith(2, {
       routeUrl: route("b").admissionUrl,
       componentKey: "b".repeat(40),
       operationId: "attempt-2",
-      startOutcome: "created",
+      startPermit: { attemptId: "attempt-2" },
     });
     expect(Object.keys(a)).toEqual(["attempt", "providerPermit"]);
     expect(consumeDustProviderPermit({}, "attempt-1")).toBe(false);
@@ -202,9 +204,9 @@ describe("Dust Front generation gate", () => {
 
   it("starts durably before CRM admission and uses a new ID per retry", async () => {
     const order: string[] = [];
-    start.mockImplementation(async () => {
+    start.mockImplementation(async (attempt) => {
       order.push("start");
-      return "created";
+      return { attemptId: attempt.attemptId };
     });
     admit.mockImplementation(async () => {
       order.push("admit");
@@ -274,7 +276,7 @@ describe("Dust Front generation gate", () => {
   });
 
   it("never admits a duplicate or failed pre-dispatch settlement", async () => {
-    start.mockResolvedValueOnce("duplicate");
+    start.mockResolvedValueOnce(null);
     await expect(
       authorizeDustGenerationAttempt(input("a"))
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);

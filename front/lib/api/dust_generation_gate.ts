@@ -7,11 +7,14 @@ import {
   DustAdmissionDeniedError,
   requireDustAdmission,
 } from "@app/lib/api/usage_admission";
-import type { FrontUsageAttempt } from "@app/lib/api/usage_journal";
+import type {
+  FrontUsageAttempt,
+  FrontUsageStartPermit,
+} from "@app/lib/api/usage_journal";
 import {
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
-  startFrontUsageAttempt,
+  startFrontUsageAttemptForAdmission,
 } from "@app/lib/api/usage_journal";
 
 /** This module is for authenticated server-side generation paths only. */
@@ -98,12 +101,13 @@ export async function authorizeDustGenerationAttempt({
     routeId: `${route.tenantId}:${route.revision}`,
   });
 
-  let startOutcome: Awaited<ReturnType<typeof startFrontUsageAttempt>>;
+  let startPermit: FrontUsageStartPermit;
   try {
-    startOutcome = await startFrontUsageAttempt(attempt);
-    if (startOutcome !== "created") {
+    const started = await startFrontUsageAttemptForAdmission(attempt);
+    if (!started) {
       throw new DustGenerationGateUnavailable();
     }
+    startPermit = started;
   } catch {
     throw new DustGenerationGateUnavailable();
   }
@@ -113,7 +117,7 @@ export async function authorizeDustGenerationAttempt({
       routeUrl: route.admissionUrl,
       componentKey,
       operationId: attempt.attemptId,
-      startOutcome,
+      startPermit,
     });
     // Recheck the signed mapping after the network round trip. If a refresh
     // failed or changed the binding, no provider request has been sent yet.
