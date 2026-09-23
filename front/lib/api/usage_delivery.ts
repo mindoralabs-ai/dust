@@ -8,23 +8,20 @@ import {
   deferFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
+import { z } from "zod";
 
 const MAX_RECEIPT_BYTES = 2048;
 const MAX_ENVELOPE_BYTES = 16384;
 
+const deliveryReceiptSchema = z.strictObject({
+  stream_id: z.string().regex(/^\d+-\d+$/),
+  envelope_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  replayed: z.boolean(),
+});
+
 function validReceipt(value: unknown, expectedHash: string): boolean {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const receipt = value as Record<string, unknown>;
-  return (
-    Object.keys(receipt).sort().join(",") ===
-      "envelope_sha256,replayed,stream_id" &&
-    typeof receipt.stream_id === "string" &&
-    /^\d+-\d+$/.test(receipt.stream_id) &&
-    receipt.envelope_sha256 === expectedHash &&
-    typeof receipt.replayed === "boolean"
-  );
+  const parsed = deliveryReceiptSchema.safeParse(value);
+  return parsed.success && parsed.data.envelope_sha256 === expectedHash;
 }
 
 /**

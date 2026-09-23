@@ -215,5 +215,36 @@ describe.runIf(enabled)(
         (await readFrontUsageHealth(tenantId)).oldestDeliveryAtSeconds
       ).toBe(0);
     });
+
+    it("accepts revision zero and excludes exact rows placed under manual review", async () => {
+      const attempt = {
+        attemptId: newFrontUsageAttemptId(),
+        tenantId: "tenant-test-zero",
+        workspaceId: "workspace-test-zero",
+        conversationId: "conversation-test-zero",
+        model: "gemini-3.7-flash",
+        routeId: "tenant-test-zero:0",
+      };
+      expect(await startFrontUsageAttempt(attempt)).toBe("created");
+      await settleFrontUsageExact({
+        attempt,
+        providerOperationId: "vertex-test-zero",
+        counts: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      await observer.query(
+        'UPDATE "dust_usage_attempts" SET "manualReviewRequired" = true WHERE "attemptId" = $1',
+        [attempt.attemptId]
+      );
+      expect(
+        (await claimFrontUsageWork("worker-test-zero")).some(
+          (claim) => claim.attemptId === attempt.attemptId
+        )
+      ).toBe(false);
+    });
   }
 );

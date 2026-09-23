@@ -2,6 +2,12 @@ import { readFile } from "node:fs/promises";
 import type { TenantRoute } from "@app/lib/api/tenant_route";
 import { readBoundedReceipt } from "@app/lib/api/usage_delivery";
 import { readFrontUsageHealth } from "@app/lib/api/usage_journal";
+import { z } from "zod";
+
+const heartbeatReceiptSchema = z.strictObject({
+  accepted: z.literal(true),
+  heartbeat_interval_seconds: z.literal(15),
+});
 
 /**
  * @cc [label:security;backend] dust-front-independent-heartbeat
@@ -40,15 +46,7 @@ export async function sendFrontUsageHeartbeat(
   );
   const receipt =
     response.status === 200 ? await readBoundedReceipt(response) : null;
-  if (
-    typeof receipt !== "object" ||
-    receipt === null ||
-    Array.isArray(receipt) ||
-    Object.keys(receipt).sort().join(",") !==
-      "accepted,heartbeat_interval_seconds" ||
-    (receipt as Record<string, unknown>).accepted !== true ||
-    (receipt as Record<string, unknown>).heartbeat_interval_seconds !== 15
-  ) {
+  if (!heartbeatReceiptSchema.safeParse(receipt).success) {
     throw new Error("Dust Front usage heartbeat unavailable");
   }
 }

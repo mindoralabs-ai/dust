@@ -77,7 +77,7 @@ function validateAttempt(attempt: FrontUsageAttempt): void {
   requireIdentity(attempt.workspaceId);
   requireReference(attempt.conversationId);
   requireReference(attempt.model);
-  const route = /^([a-z0-9][a-z0-9-]{0,62}):([1-9][0-9]*)$/.exec(
+  const route = /^([a-z0-9][a-z0-9-]{0,62}):(0|[1-9][0-9]*)$/.exec(
     attempt.routeId
   );
   if (
@@ -450,6 +450,7 @@ export async function claimFrontUsageWork(
       `WITH due AS (
          SELECT "attemptId" FROM "dust_usage_attempts"
           WHERE "deliveredAt" IS NULL
+            AND "manualReviewRequired" = false
             AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
             AND "nextRetryAt" <= now()
             AND "state" IN ('started', 'unknown', 'exact')
