@@ -353,6 +353,7 @@ fn embedding_input_hash(
     route: &CoreTenantRoute,
     model: &str,
     task_type: EmbeddingTaskType,
+    upsert_key: &str,
     text: &str,
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
@@ -360,6 +361,7 @@ fn embedding_input_hash(
         route.tenant_id.as_str(),
         route.workspace_id.as_str(),
         model,
+        upsert_key,
         &task_type.prepare(text),
     ] {
         hasher.update(&(part.len() as u64).to_le_bytes());
@@ -424,7 +426,10 @@ where
         route_id: format!("{}:{}", route.tenant_id, route.revision),
         model: model.to_string(),
     };
-    let started = journal.start(&attempt)?;
+    let started = match input_hash.as_ref() {
+        Some(hash) => journal.start_embedding(&attempt, hash)?,
+        None => journal.start(&attempt)?,
+    };
     if !matches!(&started, StartOutcome::Created(_)) {
         return Err(anyhow!("Vertex embedding attempt was not new"));
     }
@@ -732,7 +737,7 @@ impl Embedder for VertexAIEmbedder {
         &self,
         text: Vec<&str>,
         task_type: EmbeddingTaskType,
-        _extras: Option<Value>,
+        extras: Option<Value>,
         workspace: Option<&VerifiedWorkspace>,
     ) -> Result<Vec<EmbedderVector>> {
         let workspace = workspace
@@ -761,14 +766,35 @@ impl Embedder for VertexAIEmbedder {
         if owned_inputs.iter().any(|input| input.trim().is_empty()) {
             return Err(anyhow!("Vertex embedding input is empty"));
         }
+        let upsert_key = if task_type == EmbeddingTaskType::RetrievalDocument {
+            Some(
+                extras
+                    .as_ref()
+                    .and_then(|value| value.get("dust_poc_upsert_key"))
+                    .and_then(Value::as_str)
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| anyhow!("Vertex document embedding requires upsert identity"))?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         let results = stream::iter(owned_inputs.into_iter().map(|input| {
             let token_source = self.token_source.clone();
             let endpoint = endpoint.clone();
             let client = self.client.clone();
+            let upsert_key = upsert_key.clone();
             async move {
                 let route = runtime.resolver.resolve(workspace).await?;
-                let input_hash = (task_type == EmbeddingTaskType::RetrievalDocument)
-                    .then(|| embedding_input_hash(&route, &self.id, task_type, &input));
+                let input_hash = (task_type == EmbeddingTaskType::RetrievalDocument).then(|| {
+                    embedding_input_hash(
+                        &route,
+                        &self.id,
+                        task_type,
+                        upsert_key.as_deref().unwrap_or_default(),
+                        &input,
+                    )
+                });
                 if let Some(hash) = input_hash {
                     if let Some(vector) = runtime.journal.cached_embedding(&hash)? {
                         return Ok(vector);
@@ -825,6 +851,37 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn embedding_reservation_key_is_scoped_to_document_version() {
+        let route = CoreTenantRoute {
+            tenant_id: "tenant-a".into(),
+            workspace_id: "workspace-a".into(),
+            private_route: "https://crm-a.internal".into(),
+            admission_url: "https://crm-a.internal/admission".into(),
+            usage_ingest_url: "https://crm-a.internal/usage".into(),
+            core_credential_ref: "core-key".into(),
+            journal_target: "tenant:tenant-a:dust-usage".into(),
+            revision: 1,
+            key_id: "pin-a".into(),
+        };
+        assert_ne!(
+            embedding_input_hash(
+                &route,
+                MODEL_ID,
+                EmbeddingTaskType::RetrievalDocument,
+                "document-a:version-1",
+                "repeated text",
+            ),
+            embedding_input_hash(
+                &route,
+                MODEL_ID,
+                EmbeddingTaskType::RetrievalDocument,
+                "document-b:version-1",
+                "repeated text",
+            )
+        );
+    }
 
     #[test]
     fn ambiguous_input_takes_precedence_over_earlier_predispatch_error() {

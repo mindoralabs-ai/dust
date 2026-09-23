@@ -1028,6 +1028,12 @@ impl DataSource {
 
         let mut extras = self.config.extras.clone().unwrap_or(json!({}));
         extras["enforce_rate_limit_margin"] = json!(true);
+        // Stable across retries of this document version, distinct from a
+        // different document that happens to contain the same chunk text.
+        extras["dust_poc_upsert_key"] = json!(format!(
+            "{}:{}:{}",
+            self.data_source_id, document_id_hash, document_hash
+        ));
 
         // Embed batched chunks sequentially.
         for chunk in chunked_splits {

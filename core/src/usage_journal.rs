@@ -224,6 +224,25 @@ impl CoreUsageJournal {
     }
 
     pub fn start(&self, attempt: &CoreUsageAttempt) -> Result<StartOutcome> {
+        self.start_inner(attempt, None)
+    }
+
+    /// Reserve an upsert input in the same durable transaction as its attempt.
+    /// A duplicate may not obtain a dispatch permit, even while the first
+    /// provider request is still in flight or after an ambiguous crash.
+    pub fn start_embedding(
+        &self,
+        attempt: &CoreUsageAttempt,
+        input_hash: &[u8; 32],
+    ) -> Result<StartOutcome> {
+        self.start_inner(attempt, Some(input_hash))
+    }
+
+    fn start_inner(
+        &self,
+        attempt: &CoreUsageAttempt,
+        input_hash: Option<&[u8; 32]>,
+    ) -> Result<StartOutcome> {
         validate_attempt(attempt)?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -265,6 +284,20 @@ impl CoreUsageJournal {
             )?;
             if existing != *attempt {
                 bail!("conflicting Core usage attempt identity");
+            }
+        }
+        if inserted == 1 {
+            if let Some(input_hash) = input_hash {
+                let reserved = tx.execute(
+                    "INSERT OR IGNORE INTO dust_embedding_results
+                     (input_hash, attempt_id, vector_json, created_at_ms)
+                     VALUES (?1, ?2, NULL, ?3)",
+                    params![input_hash.as_slice(), attempt.attempt_id, now],
+                )?;
+                if reserved == 0 {
+                    // Dropping the transaction also rolls back the new attempt.
+                    return Ok(StartOutcome::Duplicate);
+                }
             }
         }
         tx.commit()?;
@@ -380,6 +413,11 @@ impl CoreUsageJournal {
             }
             _ => bail!("conflicting Core usage terminal replay"),
         }
+        tx.execute(
+            "DELETE FROM dust_embedding_results
+             WHERE attempt_id = ?1 AND vector_json IS NULL",
+            [attempt_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -515,10 +553,10 @@ impl CoreUsageJournal {
                  WHERE created_at_ms < ?1 AND vector_json IS NOT NULL",
                 [now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS],
             )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO dust_embedding_results
-                 (input_hash, attempt_id, vector_json, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)",
+            let updated = tx.execute(
+                "UPDATE dust_embedding_results SET vector_json = ?3, created_at_ms = ?4
+                 WHERE input_hash = ?1 AND attempt_id = ?2
+                   AND (vector_json IS NULL OR vector_json = ?3)",
                 params![
                     input_hash.as_slice(),
                     attempt.attempt_id,
@@ -526,6 +564,9 @@ impl CoreUsageJournal {
                     now_ms()
                 ],
             )?;
+            if updated != 1 {
+                bail!("Core embedding reservation missing or conflicting");
+            }
         }
         tx.commit()?;
         Ok(envelope)
@@ -797,6 +838,54 @@ mod tests {
     }
 
     #[test]
+    fn embedding_reservation_blocks_duplicate_dispatch_and_releases_proven_no_charge() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let hash = [3_u8; 32];
+        let first = attempt("first-embedding");
+        let duplicate = attempt("duplicate-embedding");
+        let other = attempt("other-document");
+        assert!(matches!(
+            journal
+                .start_embedding(&first, &hash)
+                .expect("first permit"),
+            StartOutcome::Created(_)
+        ));
+        assert_eq!(
+            journal
+                .start_embedding(&duplicate, &hash)
+                .expect("duplicate blocked"),
+            StartOutcome::Duplicate
+        );
+        assert!(journal
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT attempt_id FROM dust_usage_attempts WHERE attempt_id = ?1",
+                [&duplicate.attempt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .expect("rolled back attempt")
+            .is_none());
+        assert!(matches!(
+            journal
+                .start_embedding(&other, &[4_u8; 32])
+                .expect("different document permit"),
+            StartOutcome::Created(_)
+        ));
+        journal
+            .settle_no_charge(&first.attempt_id, "predispatch:denied")
+            .expect("proven no charge");
+        assert!(matches!(
+            journal
+                .start_embedding(&duplicate, &hash)
+                .expect("reservation released"),
+            StartOutcome::Created(_)
+        ));
+    }
+
+    #[test]
     fn settled_embedding_survives_reopen_and_never_precedes_exact_usage() {
         let dir = tempdir().expect("test directory");
         let path = dir.path().join("usage.sqlite");
@@ -807,7 +896,9 @@ mod tests {
             .cached_embedding(&hash)
             .expect("cache read")
             .is_none());
-        journal.start(&entry).expect("durable start");
+        journal
+            .start_embedding(&entry, &hash)
+            .expect("durable reservation");
         assert!(journal
             .cached_embedding(&hash)
             .expect("cache read")
