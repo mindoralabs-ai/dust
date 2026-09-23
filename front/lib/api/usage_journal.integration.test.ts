@@ -4,7 +4,9 @@ import {
   completeFrontUsageClaim,
   markFrontUsageUnknown,
   newFrontUsageAttemptId,
+  readFrontUsageHealth,
   settleFrontUsageExact,
+  settleFrontUsageNoCharge,
   startFrontUsageAttempt,
 } from "@app/lib/api/usage_journal";
 import { frontSequelize } from "@app/lib/resources/storage";
@@ -132,6 +134,54 @@ describe.runIf(enabled)(
         "vertex-unresolved-test"
       );
       expect(persisted.rows[0].firstUnresolvedAt).not.toBeNull();
+    });
+
+    it("reports tenant-local unresolved work and undelivered exact usage to CRM", async () => {
+      const tenantId = "tenant-test-health";
+      const base = {
+        tenantId,
+        workspaceId: "workspace-test-health",
+        conversationId: "conversation-test-health",
+        model: "gemini-3.7-flash",
+        routeId: "route-test-health",
+      };
+      const unresolved = { ...base, attemptId: newFrontUsageAttemptId() };
+      const exact = { ...base, attemptId: newFrontUsageAttemptId() };
+      await startFrontUsageAttempt(unresolved);
+      await startFrontUsageAttempt(exact);
+      await settleFrontUsageExact({
+        attempt: exact,
+        providerOperationId: "vertex-test-health",
+        counts: {
+          inputTokens: 3,
+          outputTokens: 2,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const pending = await readFrontUsageHealth(tenantId);
+      expect(pending.unresolvedCount).toBe(1);
+      expect(pending.oldestDeliveryAt).toBeGreaterThan(0);
+      expect(pending.checkedAt).toBeGreaterThanOrEqual(
+        pending.oldestDeliveryAt
+      );
+
+      await settleFrontUsageNoCharge(
+        unresolved.attemptId,
+        `predispatch:test:${unresolved.attemptId}`
+      );
+      expect((await readFrontUsageHealth(tenantId)).unresolvedCount).toBe(0);
+      const work = (await claimFrontUsageWork("worker-test-health")).find(
+        (item) => item.attemptId === exact.attemptId
+      );
+      expect(work).toBeDefined();
+      await completeFrontUsageClaim({
+        attemptId: exact.attemptId,
+        leaseOwner: "worker-test-health",
+        leaseNonce: work?.leaseNonce ?? "",
+        delivered: true,
+      });
+      expect((await readFrontUsageHealth(tenantId)).oldestDeliveryAt).toBe(0);
     });
   }
 );

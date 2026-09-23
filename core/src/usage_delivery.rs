@@ -1,7 +1,9 @@
 //! Core-only delivery of frozen embedding usage to its signed tenant route.
 //! No path in this module retries or starts a provider request.
 
-use crate::tenant_route::{BundleFetcher, CoreTenantRouteResolver, CoreUsageDeliveryRoute};
+use crate::tenant_route::{
+    BundleFetcher, CoreTenantRoute, CoreTenantRouteResolver, CoreUsageDeliveryRoute,
+};
 use crate::usage_journal::{ClaimedWork, CoreUsageJournal};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -115,6 +117,19 @@ impl CoreUsageDeliveryClient {
         Ok(claims.len())
     }
 
+    /// Send independent journal evidence after a successful reconciliation
+    /// batch. Provider I/O is not involved in this path.
+    pub async fn send_heartbeat(
+        &self,
+        journal: &CoreUsageJournal,
+        route: &CoreTenantRoute,
+    ) -> Result<(), DeliveryError> {
+        send_heartbeat_with(&self.transport, journal, route, |path| {
+            std::fs::read_to_string(path).map_err(|_| DeliveryError::Unavailable)
+        })
+        .await
+    }
+
     /// @cc [label:security;backend] dust-core-frozen-usage-delivery
     /// A failed receipt or route refresh leaves exact usage durable and due
     /// again. Unknown usage remains blocked until separate provider evidence.
@@ -149,6 +164,72 @@ impl CoreUsageDeliveryClient {
         }
         Ok(())
     }
+}
+
+/// @cc [label:security;backend] dust-core-independent-heartbeat
+/// A successful retained-journal read and tenant-specific Core credential
+/// precede a bounded heartbeat to only the fresh signed private route.
+async fn send_heartbeat_with<T: Transport>(
+    transport: &T,
+    journal: &CoreUsageJournal,
+    route: &CoreTenantRoute,
+    read_key: impl FnOnce(&Path) -> Result<String, DeliveryError>,
+) -> Result<(), DeliveryError> {
+    if route.core_credential_ref
+        != format!(
+            "/var/run/secrets/dust/tenants/{}/dust-core-usage-key",
+            route.tenant_id
+        )
+        || route.journal_target != format!("tenant:{}:dust-usage", route.tenant_id)
+    {
+        return Err(DeliveryError::Unavailable);
+    }
+    let health = journal
+        .read_health(&route.tenant_id)
+        .map_err(|_| DeliveryError::Unavailable)?;
+    let key = read_key(Path::new(&route.core_credential_ref))?;
+    let key = key.trim().to_string();
+    if !(32..=4096).contains(&key.len()) || key.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(DeliveryError::Unavailable);
+    }
+    let url = Url::parse(&format!(
+        "{}/internal/usage/producers/dust-core/heartbeat",
+        route.private_route
+    ))
+    .map_err(|_| DeliveryError::Unavailable)?;
+    if !private_url(&url)
+        || url.path() != "/internal/usage/producers/dust-core/heartbeat"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(DeliveryError::Unavailable);
+    }
+    let observed_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+    let envelope = serde_json::json!({
+        "tenant_id": route.tenant_id,
+        "observed_at": observed_at,
+        "journal_checked_at": health.checked_at,
+        "reconciler_heartbeat_at": observed_at,
+        "oldest_delivery_at": health.oldest_delivery_at,
+        "journal_healthy": true,
+        "unresolved_count": health.unresolved_count,
+    })
+    .to_string();
+    let receipt = transport
+        .send(DeliveryRequest { url, key, envelope })
+        .await?;
+    let fields = receipt.as_object().ok_or(DeliveryError::Unavailable)?;
+    if fields.len() != 2
+        || fields.get("accepted") != Some(&Value::Bool(true))
+        || fields
+            .get("heartbeat_interval_seconds")
+            .and_then(Value::as_u64)
+            != Some(15)
+    {
+        return Err(DeliveryError::Unavailable);
+    }
+    Ok(())
 }
 
 async fn send_exact_with<T: Transport>(
@@ -246,6 +327,7 @@ fn private_url(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage_journal::CoreUsageAttempt;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -336,6 +418,62 @@ mod tests {
             send_exact_with(&transport, &route(), &claim, |_| Ok("a".repeat(40)))
                 .await
                 .is_err()
+        );
+        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_uses_tenant_local_journal_and_core_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).unwrap();
+        journal
+            .start(&CoreUsageAttempt {
+                attempt_id: "attempt_health".into(),
+                provider_request_id: "request_health".into(),
+                tenant_id: "tenant-a".into(),
+                workspace_id: "workspace-a".into(),
+                conversation_id: "embedding:workspace-a".into(),
+                route_id: "tenant-a:23".into(),
+                model: "gemini-embedding-2-1536".into(),
+            })
+            .unwrap();
+        let route = CoreTenantRoute {
+            tenant_id: "tenant-a".into(),
+            workspace_id: "workspace-a".into(),
+            private_route: "https://crm-a.internal".into(),
+            admission_url: "https://crm-a.internal/internal/usage/dust/admission".into(),
+            usage_ingest_url: "https://crm-a.internal/internal/usage/events".into(),
+            core_credential_ref: "/var/run/secrets/dust/tenants/tenant-a/dust-core-usage-key"
+                .into(),
+            journal_target: "tenant:tenant-a:dust-usage".into(),
+            revision: 23,
+            key_id: "pin_1".into(),
+        };
+        let transport = MockTransport {
+            sent: Mutex::new(Vec::new()),
+            receipt: json!({"accepted":true,"heartbeat_interval_seconds":15}),
+        };
+        send_heartbeat_with(&transport, &journal, &route, |_| Ok("a".repeat(40)))
+            .await
+            .unwrap();
+        let sent = transport.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].0,
+            "https://crm-a.internal/internal/usage/producers/dust-core/heartbeat"
+        );
+        let evidence: Value = serde_json::from_str(&sent[0].2).unwrap();
+        assert_eq!(evidence["tenant_id"], "tenant-a");
+        assert_eq!(evidence["unresolved_count"], 1);
+        drop(sent);
+        let mut cross_tenant = route.clone();
+        cross_tenant.tenant_id = "tenant-b".into();
+        assert!(
+            send_heartbeat_with(&transport, &journal, &cross_tenant, |_| {
+                Ok("b".repeat(40))
+            })
+            .await
+            .is_err()
         );
         assert_eq!(transport.sent.lock().unwrap().len(), 1);
     }

@@ -183,6 +183,7 @@ struct CoreVertexRuntime {
     resolver: CoreTenantRouteResolver<HttpBundleFetcher>,
     journal: CoreUsageJournal,
     admission: CoreAdmissionClient,
+    workspaces: Vec<String>,
 }
 
 static CORE_VERTEX_RUNTIME: OnceLock<Result<CoreVertexRuntime, String>> = OnceLock::new();
@@ -203,6 +204,22 @@ impl CoreVertexRuntime {
             .parse::<u64>()
             .map_err(|_| anyhow!("Core Vertex runtime configuration unavailable"))?;
         let journal_path = PathBuf::from(required("DUST_CORE_USAGE_JOURNAL_PATH")?);
+        let workspaces = required("DUST_POC_WORKSPACE_IDS")?
+            .split(',')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if workspaces.len() != 2
+            || workspaces[0] == workspaces[1]
+            || workspaces.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 128
+                    || !id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+        {
+            return Err(anyhow!("Core Vertex runtime configuration unavailable"));
+        }
         if !export_key.is_absolute() || !journal_path.is_absolute() {
             return Err(anyhow!("Core Vertex runtime configuration unavailable"));
         }
@@ -212,6 +229,7 @@ impl CoreVertexRuntime {
             resolver: CoreTenantRouteResolver::new(fetcher, vec![pin], minimum_revision)?,
             journal: CoreUsageJournal::open(journal_path)?,
             admission: CoreAdmissionClient::new()?,
+            workspaces,
         })
     }
 }
@@ -236,12 +254,30 @@ pub async fn run_core_usage_reconciler() {
     loop {
         if let Ok(runtime) = core_vertex_runtime() {
             if let Ok(client) = CoreUsageDeliveryClient::new() {
-                if client
+                match client
                     .process_due_batch(&runtime.journal, &runtime.resolver)
                     .await
-                    .is_err()
                 {
-                    tracing::warn!("Dust Core usage reconciliation unavailable");
+                    Ok(_) => {
+                        if let Ok(routes) = runtime
+                            .resolver
+                            .resolve_maintenance(&runtime.workspaces)
+                            .await
+                        {
+                            for route in routes {
+                                if client
+                                    .send_heartbeat(&runtime.journal, &route)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!("Dust Core usage heartbeat unavailable");
+                                }
+                            }
+                        } else {
+                            tracing::warn!("Dust Core usage heartbeat unavailable");
+                        }
+                    }
+                    Err(_) => tracing::warn!("Dust Core usage reconciliation unavailable"),
                 }
             } else {
                 tracing::warn!("Dust Core usage reconciliation unavailable");

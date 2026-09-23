@@ -1,7 +1,11 @@
 import { setTimeout } from "node:timers/promises";
 import { dustPocMode } from "@app/lib/api/dust_poc_mode";
-import { pocRouteResolverForMaintenance } from "@app/lib/api/dust_poc_runtime";
+import {
+  pocRouteResolverForMaintenance,
+  pocRoutesForMaintenance,
+} from "@app/lib/api/dust_poc_runtime";
 import { runFrontUsageDeliveryBatch } from "@app/lib/api/usage_delivery";
+import { sendFrontUsageHeartbeat } from "@app/lib/api/usage_heartbeat";
 import logger from "@app/logger/logger";
 
 /**
@@ -19,6 +23,8 @@ export async function runDustPocUsageReconciler(
     try {
       const resolver = await pocRouteResolverForMaintenance();
       await runFrontUsageDeliveryBatch(resolver);
+      const routes = await pocRoutesForMaintenance();
+      await Promise.all(routes.map((route) => sendFrontUsageHeartbeat(route)));
     } catch {
       logger.warn("Dust POC usage reconciliation unavailable");
     }

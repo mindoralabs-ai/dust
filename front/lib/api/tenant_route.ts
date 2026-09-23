@@ -606,6 +606,31 @@ export class DustTenantRouteResolver {
     return this.route(current, tenant);
   }
 
+  /** Server-only maintenance routes, restricted to the configured POC workspaces. */
+  listActiveRoutesForMaintenance(
+    workspaceIds: ReadonlySet<string>
+  ): readonly TenantRoute[] {
+    const current = this.snapshot;
+    if (
+      !current ||
+      !this.refreshHealthy ||
+      this.now() >= current.payload.expires_at ||
+      current.payload.revision < this.config.minimumRevision ||
+      workspaceIds.size === 0
+    ) {
+      throw new TenantRouteUnavailable();
+    }
+    return Array.from(workspaceIds, (workspaceId) => {
+      const tenant = current.payload.tenants.find(
+        (entry) => entry.active && entry.workspace_id === workspaceId
+      );
+      if (!tenant) {
+        throw new TenantRouteUnavailable();
+      }
+      return this.route(current, tenant);
+    });
+  }
+
   private route(
     current: NonNullable<DustTenantRouteResolver["snapshot"]>,
     tenant: TenantEntry

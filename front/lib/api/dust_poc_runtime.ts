@@ -1,7 +1,10 @@
 import type { AuthorizedDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
 import { authorizeDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
 import { dustPocMode } from "@app/lib/api/dust_poc_mode";
-import type { ActiveDustIdentity } from "@app/lib/api/tenant_route";
+import type {
+  ActiveDustIdentity,
+  TenantRoute,
+} from "@app/lib/api/tenant_route";
 import { DustTenantRouteResolver } from "@app/lib/api/tenant_route";
 
 const POC_GENERATION_MODEL = "gemini-3.7-flash";
@@ -32,6 +35,17 @@ export async function pocRouteResolverForMaintenance(): Promise<DustTenantRouteR
     throw new Error("Dust POC maintenance unavailable");
   }
   return (await getRuntime()).resolver;
+}
+
+export async function pocRoutesForMaintenance(): Promise<
+  readonly TenantRoute[]
+> {
+  if (!dustPocMode()) {
+    throw new Error("Dust POC maintenance unavailable");
+  }
+  const runtime = await getRuntime();
+  await runtime.resolver.refresh();
+  return runtime.resolver.listActiveRoutesForMaintenance(runtime.workspaces);
 }
 
 function required(name: string): string {

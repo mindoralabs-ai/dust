@@ -45,7 +45,7 @@ export async function runFrontUsageDeliveryBatch(
   return claims.length;
 }
 
-async function readBoundedReceipt(response: Response): Promise<unknown> {
+export async function readBoundedReceipt(response: Response): Promise<unknown> {
   if (!response.body) {
     throw new Error("Dust usage delivery unavailable");
   }

@@ -65,6 +65,13 @@ pub struct CoreUsageJournal {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoreJournalHealth {
+    pub checked_at: f64,
+    pub oldest_delivery_at: f64,
+    pub unresolved_count: u64,
+}
+
 impl CoreUsageJournal {
     /// Opens a file-backed database and commits its schema before returning.
     /// The caller owns retention, backup, and restore of the parent PVC.
@@ -93,6 +100,26 @@ impl CoreUsageJournal {
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(conn)
+    }
+
+    /// @cc [label:security;backend] dust-core-journal-health-evidence
+    /// Health evidence comes from a successful tenant-local retained SQLite
+    /// read; unknown attempts and stale exact outbox rows remain visible.
+    pub fn read_health(&self, tenant_id: &str) -> Result<CoreJournalHealth> {
+        validate_identity(tenant_id)?;
+        let conn = self.connection()?;
+        let (unresolved, oldest): (i64, Option<i64>) = conn.query_row(
+            "SELECT count(CASE WHEN state IN ('started', 'unknown', 'manual_review_required') THEN 1 END),
+                    min(CASE WHEN state = 'exact' AND delivered_at_ms IS NULL THEN created_at_ms END)
+             FROM dust_usage_attempts WHERE tenant_id = ?1",
+            params![tenant_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(CoreJournalHealth {
+            checked_at: now_ms() as f64 / 1000.0,
+            oldest_delivery_at: oldest.map(|v| v as f64 / 1000.0).unwrap_or(0.0),
+            unresolved_count: u64::try_from(unresolved)?,
+        })
     }
 
     pub fn start(&self, attempt: &CoreUsageAttempt) -> Result<StartOutcome> {
@@ -583,6 +610,28 @@ mod tests {
         assert!(j.complete_delivery(&stale).is_err());
         j.complete_delivery(&claim).unwrap();
         assert!(j.claim_due("worker_2", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn health_reports_unresolved_and_undelivered_work_per_tenant() {
+        let dir = tempdir().unwrap();
+        let j = CoreUsageJournal::open(dir.path().join("core-usage.sqlite")).unwrap();
+        let a = attempt("a1");
+        let b = attempt("a2");
+        j.start(&a).unwrap();
+        j.start(&b).unwrap();
+        j.settle_exact(&b, "receipt_2", EmbeddingUsage { input_tokens: 2 })
+            .unwrap();
+        let health = j.read_health("tenant_A").unwrap();
+        assert_eq!(health.unresolved_count, 1);
+        assert!(health.oldest_delivery_at > 0.0);
+        assert!(health.checked_at >= health.oldest_delivery_at);
+        assert_eq!(j.read_health("tenant_B").unwrap().unresolved_count, 0);
+        j.settle_no_charge("a1", "predispatch:test:a1").unwrap();
+        assert_eq!(j.read_health("tenant_A").unwrap().unresolved_count, 0);
+        let claim = j.claim_due("worker_health", 10).unwrap().remove(0);
+        j.complete_delivery(&claim).unwrap();
+        assert_eq!(j.read_health("tenant_A").unwrap().oldest_delivery_at, 0.0);
     }
 
     #[test]

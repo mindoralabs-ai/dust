@@ -150,6 +150,20 @@ describe("DustTenantRouteResolver", () => {
     ).toThrow(TenantRouteUnavailable);
   });
 
+  it("lists only configured active POC routes for server maintenance", async () => {
+    await resolver.start();
+    expect(
+      resolver.listActiveRoutesForMaintenance(new Set(["workspace-a"]))
+    ).toEqual([expect.objectContaining({ tenantId: "alpha" })]);
+    expect(() =>
+      resolver.listActiveRoutesForMaintenance(new Set(["workspace-b"]))
+    ).toThrow(TenantRouteUnavailable);
+    now = 1060;
+    expect(() =>
+      resolver.listActiveRoutesForMaintenance(new Set(["workspace-a"]))
+    ).toThrow(TenantRouteUnavailable);
+  });
+
   it.each([
     [
       "bad signature",

@@ -95,6 +95,42 @@ export function newFrontUsageAttemptId(): string {
 }
 
 /**
+ * @cc [label:security;backend] dust-front-journal-health-evidence
+ * A producer heartbeat reflects a successful tenant-local durable-journal
+ * read. Unknown attempts and stale exact deliveries remain visible to CRM.
+ */
+export async function readFrontUsageHealth(tenantId: string): Promise<{
+  checkedAt: number;
+  oldestDeliveryAt: number;
+  unresolvedCount: number;
+}> {
+  requireIdentity(tenantId);
+  const [row] = await frontSequelize.query<{
+    unresolvedCount: string;
+    oldestDeliveryAt: string | null;
+  }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE "state" IN ('started', 'unknown', 'manual_review_required')) AS "unresolvedCount",
+       EXTRACT(EPOCH FROM MIN("createdAt") FILTER
+         (WHERE "state" = 'exact' AND "deliveredAt" IS NULL)) AS "oldestDeliveryAt"
+     FROM "dust_usage_attempts" WHERE "tenantId" = :tenantId`,
+    { replacements: { tenantId }, type: QueryTypes.SELECT }
+  );
+  const unresolvedCount = Number(row?.unresolvedCount);
+  const oldestDeliveryAt =
+    row?.oldestDeliveryAt === null ? 0 : Number(row?.oldestDeliveryAt);
+  if (
+    !Number.isSafeInteger(unresolvedCount) ||
+    unresolvedCount < 0 ||
+    !Number.isFinite(oldestDeliveryAt) ||
+    oldestDeliveryAt < 0
+  ) {
+    throw new Error("Dust Front usage journal health unavailable");
+  }
+  return { checkedAt: Date.now() / 1000, oldestDeliveryAt, unresolvedCount };
+}
+
+/**
  * `created` is the only outcome permitting this caller to dispatch provider I/O.
  * A duplicate is never another allowance, even if the row is still `started`.
  * PostgreSQL's transaction commit is the durability boundary; setting

@@ -179,6 +179,41 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
         self.resolve_bundle(&raw, workspace.sid(), now)
     }
 
+    /// Fresh signed routes for the server-configured POC workspaces only.
+    /// No caller-selected tenant or browser value reaches this interface.
+    pub async fn resolve_maintenance(
+        &self,
+        workspace_ids: &[String],
+    ) -> Result<Vec<CoreTenantRoute>> {
+        if workspace_ids.is_empty() || workspace_ids.len() > 2 {
+            bail!("invalid Dust maintenance workspace selection");
+        }
+        let raw = self.fetcher.fetch().await?;
+        let envelope = self.verify_bundle(&raw, chrono::Utc::now().timestamp())?;
+        workspace_ids
+            .iter()
+            .map(|workspace_id| {
+                let entry = envelope
+                    .payload
+                    .tenants
+                    .iter()
+                    .find(|tenant| tenant.active && tenant.workspace_id == *workspace_id)
+                    .ok_or_else(|| anyhow!("inactive or unmapped Dust workspace"))?;
+                Ok(CoreTenantRoute {
+                    tenant_id: entry.tenant_id.clone(),
+                    workspace_id: entry.workspace_id.clone(),
+                    private_route: entry.private_route.clone(),
+                    admission_url: entry.admission_url.clone(),
+                    usage_ingest_url: entry.usage_ingest_url.clone(),
+                    core_credential_ref: entry.core_credential_ref.clone(),
+                    journal_target: entry.journal_target.clone(),
+                    revision: envelope.payload.revision,
+                    key_id: envelope.key_id.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Resolve only delivery for an existing exact-usage journal claim. A
     /// revoked membership may still owe accounting; this never authorizes a
     /// new admission or model request. The registry's owner transaction keeps
@@ -815,6 +850,28 @@ mod tests {
         fail.store(false, Ordering::SeqCst);
         *shared.lock().unwrap() = signed(payload(now, 6), &key);
         assert!(resolver.resolve(&workspace).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn maintenance_routes_require_fresh_signed_workspace_bindings() {
+        let key = keypair();
+        let now = chrono::Utc::now().timestamp();
+        let (resolver, _shared, fail) = resolver(signed(payload(now, 7), &key), &key, 7);
+        let routes = resolver
+            .resolve_maintenance(&["workspace_A".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].tenant_id, "alpha");
+        assert!(resolver
+            .resolve_maintenance(&["workspace_B".to_string()])
+            .await
+            .is_err());
+        fail.store(true, Ordering::SeqCst);
+        assert!(resolver
+            .resolve_maintenance(&["workspace_A".to_string()])
+            .await
+            .is_err());
     }
 
     #[test]

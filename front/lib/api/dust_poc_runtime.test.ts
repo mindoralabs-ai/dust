@@ -9,7 +9,11 @@ vi.mock("@app/lib/api/tenant_route", () => ({
   DustTenantRouteResolver: vi.fn(
     class {
       start = vi.fn().mockResolvedValue(undefined);
+      refresh = vi.fn().mockResolvedValue(undefined);
       resolve = vi.fn().mockReturnValue({ workspaceId: "workspace-a" });
+      listActiveRoutesForMaintenance = vi
+        .fn()
+        .mockReturnValue([{ tenantId: "tenant-a" }, { tenantId: "tenant-b" }]);
     }
   ),
 }));
@@ -139,5 +143,20 @@ describe("isolated Dust POC generation selection", () => {
       await selectPocEmbeddingProvider(null, "other-workspace")
     ).toBeNull();
     expect(Resolver).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the signed route before selecting both maintenance tenants", async () => {
+    const { pocRoutesForMaintenance } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    expect(await pocRoutesForMaintenance()).toEqual([
+      { tenantId: "tenant-a" },
+      { tenantId: "tenant-b" },
+    ]);
+    const instance = Resolver.mock.results[0].value;
+    expect(instance.refresh).toHaveBeenCalledTimes(1);
+    expect(instance.listActiveRoutesForMaintenance).toHaveBeenCalledWith(
+      new Set(["workspace-a", "workspace-b"])
+    );
   });
 });
