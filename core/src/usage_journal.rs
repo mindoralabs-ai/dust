@@ -331,6 +331,7 @@ impl CoreUsageJournal {
         let mut stmt = tx.prepare(
             "SELECT attempt_id FROM dust_usage_attempts
              WHERE delivered_at_ms IS NULL AND next_retry_at_ms <= ?1
+               AND manual_review_required = 0
                AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
                AND state IN ('started', 'unknown', 'exact')
              ORDER BY created_at_ms, attempt_id LIMIT ?2",
@@ -717,6 +718,42 @@ mod tests {
             .expect("test operation failed");
         assert!(j
             .claim_due("worker_3", 10)
+            .expect("test operation failed")
+            .is_empty());
+    }
+
+    #[test]
+    fn exact_row_flagged_for_manual_review_is_not_reclaimed() {
+        let dir = tempdir().expect("test operation failed");
+        let journal = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        let attempt = attempt("manual-exact");
+        journal.start(&attempt).expect("test operation failed");
+        journal
+            .settle_exact(
+                &attempt,
+                "manual-provider-operation",
+                EmbeddingUsage { input_tokens: 2 },
+            )
+            .expect("test operation failed");
+        let claim = journal
+            .claim_due("manual-worker", 1)
+            .expect("test operation failed")
+            .remove(0);
+        let conn = journal.connection().expect("test operation failed");
+        conn.execute(
+            "UPDATE dust_usage_attempts SET first_unresolved_at_ms = ?2 WHERE attempt_id = ?1",
+            params![attempt.attempt_id, now_ms() - REVIEW_DEADLINE_MS - 1],
+        )
+        .expect("test operation failed");
+        journal.defer_claim(&claim).expect("test operation failed");
+        conn.execute(
+            "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2 WHERE attempt_id = ?1",
+            params![attempt.attempt_id, now_ms() - 1],
+        )
+        .expect("test operation failed");
+        assert!(journal
+            .claim_due("another-worker", 1)
             .expect("test operation failed")
             .is_empty());
     }

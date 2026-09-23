@@ -19,7 +19,7 @@ use std::time::Duration;
 use url::Url;
 
 const DOMAIN: &[u8] = b"mindora.dust.mapping-bundle.v1\0";
-const MAX_BUNDLE_BYTES: usize = 512 * 1024;
+const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000;
 
 #[async_trait]
@@ -49,6 +49,7 @@ impl HttpBundleFetcher {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
                 .build()?,
             url: parsed,
             export_key_file,
@@ -153,7 +154,7 @@ pub struct CoreTenantRouteResolver<F> {
 
 impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
     pub fn new(fetcher: F, pins: Vec<PinnedVerifier>, required_revision: u64) -> Result<Self> {
-        if !(1..=2).contains(&pins.len()) || required_revision == 0 {
+        if !(1..=2).contains(&pins.len()) {
             bail!("invalid Dust registry verifier configuration");
         }
         let mut pinned = HashMap::new();
@@ -245,11 +246,7 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
         let parsed_revision = route_revision
             .parse::<u64>()
             .context("invalid persisted Core usage route revision")?;
-        if route_tenant != claim.tenant_id
-            || parsed_revision == 0
-            || route_revision != parsed_revision.to_string()
-            || parsed_revision < self.required_revision
-        {
+        if route_tenant != claim.tenant_id || route_revision != parsed_revision.to_string() {
             bail!("Core usage route identity mismatch");
         }
         let envelope = self.verify_bundle(raw, now)?;
@@ -393,10 +390,8 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                     bail!("Dust registry revision rollback or conflict");
                 }
                 for (tenant_id, prior_identity) in &prior.tenant_identity {
-                    if let Some(current_identity) = tenant_identity.get(tenant_id) {
-                        if prior_identity != current_identity {
-                            bail!("Dust registry tenant identity changed");
-                        }
+                    if tenant_identity.get(tenant_id) != Some(prior_identity) {
+                        bail!("Dust registry tenant identity changed or disappeared");
                     }
                 }
             }
@@ -519,8 +514,8 @@ fn validate_payload(payload: &Payload) -> Result<()> {
             || !reference(&m.workos_user_id)
             || m.revision > payload.revision
             || !member_pairs.insert((m.tenant_id.as_str(), m.employee_id.as_str()))
-            || !dust_users.insert(m.dust_user_id.as_str())
-            || !workos_users.insert(m.workos_user_id.as_str())
+            || !dust_users.insert((m.tenant_id.as_str(), m.dust_user_id.as_str()))
+            || !workos_users.insert((m.tenant_id.as_str(), m.workos_user_id.as_str()))
         {
             bail!("partial or duplicate Dust membership");
         }
@@ -873,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_tenant_identity_cannot_be_reintroduced_with_a_new_route() {
+    fn shared_user_across_tenants_is_valid_but_tenant_removal_is_rejected() {
         let key = keypair();
         let now = chrono::Utc::now().timestamp();
         let mut initial = payload(now, 7);
@@ -893,8 +888,6 @@ mod tests {
         let mut beta_member = initial["memberships"][0].clone();
         beta_member["tenant_id"] = Value::String("beta".into());
         beta_member["employee_id"] = Value::String("employee_2".into());
-        beta_member["dust_user_id"] = Value::String("dust_user_2".into());
-        beta_member["workos_user_id"] = Value::String("workos_user_2".into());
         initial["tenants"]
             .as_array_mut()
             .expect("test array")
@@ -920,7 +913,7 @@ mod tests {
         without_alpha["memberships"] = serde_json::json!([beta_member.clone()]);
         assert!(resolver
             .resolve_bundle(&signed(without_alpha, &key), "workspace_B", now + 1)
-            .is_ok());
+            .is_err());
 
         let mut reintroduced = payload(now + 2, 9);
         reintroduced["tenants"][0]["workspace_id"] = Value::String("workspace_C".into());
@@ -1065,6 +1058,10 @@ mod tests {
             delivery.usage_ingest_url,
             "https://10.1.1.2/internal/usage/events"
         );
+        let (advanced_resolver, _, _) = self::resolver(signed(revoked.clone(), &key), &key, 8);
+        assert!(advanced_resolver
+            .resolve_delivery_bundle(&signed(revoked.clone(), &key), &claim, now)
+            .is_ok());
         assert!(resolver
             .resolve_bundle(&signed(revoked.clone(), &key), "workspace_A", now)
             .is_err());
@@ -1081,6 +1078,18 @@ mod tests {
         let mut not_exact = claim.clone();
         not_exact.state = "unknown".into();
         assert!(resolver.resolve_delivery(&not_exact).await.is_err());
+    }
+
+    #[test]
+    fn canonical_zero_revision_can_deliver_when_registry_allows_it() {
+        let key = keypair();
+        let now = chrono::Utc::now().timestamp();
+        let (resolver, _, _) = resolver(signed(payload(now, 0), &key), &key, 0);
+        let mut claim = settled_claim();
+        claim.route_id = "alpha:0".into();
+        assert!(resolver
+            .resolve_delivery_bundle(&signed(payload(now, 0), &key), &claim, now)
+            .is_ok());
     }
 
     #[test]
