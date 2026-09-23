@@ -245,6 +245,39 @@ describe.runIf(enabled)(
           (claim) => claim.attemptId === attempt.attemptId
         )
       ).toBe(false);
+      await observer.query(
+        `UPDATE "dust_usage_attempts" SET "firstUnresolvedAt" = now() - interval '25 hours'
+         WHERE "attemptId" = $1`,
+        [attempt.attemptId]
+      );
+      await settleFrontUsageExact({
+        attempt,
+        providerOperationId: "vertex-test-zero",
+        counts: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const recovered = (await claimFrontUsageWork("worker-test-zero")).find(
+        (claim) => claim.attemptId === attempt.attemptId
+      );
+      if (!recovered) {
+        throw new Error("Recovered exact claim was not available");
+      }
+      expect(recovered.manualReviewRequired).toBe(false);
+      await completeFrontUsageClaim({
+        attemptId: attempt.attemptId,
+        leaseOwner: recovered.leaseOwner,
+        leaseNonce: recovered.leaseNonce,
+        delivered: false,
+      });
+      const row = await observer.query(
+        'SELECT "manualReviewRequired" FROM "dust_usage_attempts" WHERE "attemptId" = $1',
+        [attempt.attemptId]
+      );
+      expect(row.rows[0].manualReviewRequired).toBe(false);
     });
   }
 );

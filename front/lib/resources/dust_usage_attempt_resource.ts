@@ -386,6 +386,12 @@ export async function settleFrontUsageExact(input: {
         if (row.eventHash !== eventHash || row.eventEnvelope !== envelope) {
           throw new Error("Conflicting Dust usage terminal replay");
         }
+        await frontSequelize.query(
+          `UPDATE "dust_usage_attempts" SET "manualReviewRequired" = false,
+             "firstUnresolvedAt" = now(), "nextRetryAt" = now(), "updatedAt" = now()
+           WHERE "attemptId" = :attemptId AND "manualReviewRequired" = true`,
+          { replacements: { attemptId: input.attempt.attemptId }, transaction }
+        );
         return envelope;
       }
       if (row.state === "no_charge") {
@@ -395,6 +401,7 @@ export async function settleFrontUsageExact(input: {
         `UPDATE "dust_usage_attempts" SET "state" = 'exact',
          "providerOperationId" = :providerOperationId,
          "eventEnvelope" = :envelope, "eventHash" = :eventHash,
+         "firstUnresolvedAt" = now(), "manualReviewRequired" = false,
          "nextRetryAt" = now(), "updatedAt" = now()
        WHERE "attemptId" = :attemptId`,
         {
