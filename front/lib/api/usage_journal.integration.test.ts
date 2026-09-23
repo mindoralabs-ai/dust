@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import config from "@app/lib/api/config";
+import type { TenantRoute } from "@app/lib/api/tenant_route";
+import type { FrontUsageAttempt } from "@app/lib/api/usage_journal";
 import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
@@ -10,12 +12,28 @@ import {
   readFrontUsageHealth,
   settleFrontUsageExact,
   settleFrontUsageNoCharge,
-  startFrontUsageAttempt,
   startFrontUsageAttemptForAdmission,
+  startFrontUsageAttempt as startJournalAttempt,
   validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+function startFrontUsageAttempt(attempt: FrontUsageAttempt) {
+  const revision = Number(attempt.routeId.split(":")[1]);
+  const route = {
+    tenantId: attempt.tenantId,
+    workspaceId: attempt.workspaceId,
+    revision,
+    privateRoute: "https://tenant.internal",
+    admissionUrl: "https://crm.internal/internal/usage/dust/admission",
+    usageIngestUrl: "https://crm.internal/internal/usage/events",
+    journalTarget: "tenant-stream",
+    frontCredentialRef: "/run/tenant-front-key",
+    coreCredentialRef: "/run/tenant-core-key",
+  } as TenantRoute;
+  return startJournalAttempt(attempt, route);
+}
 
 // Run with the normal Front test database. Global setup installs the same
 // journal migration used by deployment before the test suite starts.

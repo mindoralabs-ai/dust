@@ -180,11 +180,18 @@ export async function readFrontUsageHealth(tenantId: string): Promise<{
  */
 export async function startFrontUsageAttempt(
   attempt: FrontUsageAttempt,
-  route?: TenantRoute
+  route: TenantRoute
 ): Promise<"created" | "duplicate"> {
   validateAttempt(attempt);
+  if (
+    route.tenantId !== attempt.tenantId ||
+    route.workspaceId !== attempt.workspaceId ||
+    `${route.tenantId}:${route.revision}` !== attempt.routeId
+  ) {
+    throw new Error("Dust usage journal route mismatch");
+  }
   const digest = identityHash(attempt);
-  const routeBindingHash = route ? frontUsageRouteBindingHash(route) : null;
+  const routeBindingHash = frontUsageRouteBindingHash(route);
   return frontSequelize.transaction(async (transaction) => {
     await frontSequelize.query("SET LOCAL synchronous_commit = on", {
       transaction,

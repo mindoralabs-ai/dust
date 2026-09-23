@@ -7,7 +7,7 @@ CREATE TABLE "dust_usage_attempts" (
   "conversationId" VARCHAR(256) NOT NULL,
   "model" VARCHAR(256) NOT NULL,
   "routeId" VARCHAR(256) NOT NULL,
-  "routeBindingHash" VARCHAR(64),
+  "routeBindingHash" VARCHAR(64) NOT NULL,
   "identityHash" VARCHAR(64) NOT NULL,
   "state" VARCHAR(32) NOT NULL DEFAULT 'started'
     CHECK ("state" IN ('started', 'unknown', 'exact', 'no_charge', 'manual_review_required')),

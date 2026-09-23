@@ -1,3 +1,4 @@
+import type { TenantRoute } from "@app/lib/api/tenant_route";
 import {
   buildFrontUsageEnvelope,
   newFrontUsageAttemptId,
@@ -19,6 +20,11 @@ const counts = {
   cacheReadTokens: 2,
   cacheWriteTokens: 0,
 };
+const route = {
+  tenantId: attempt.tenantId,
+  workspaceId: attempt.workspaceId,
+  revision: 7,
+} as TenantRoute;
 
 describe("Front Dust usage journal validation", () => {
   it("creates stable distinct retry IDs", () => {
@@ -27,10 +33,10 @@ describe("Front Dust usage journal validation", () => {
 
   it("rejects a route that cannot be resolved for its tenant", async () => {
     await expect(
-      startFrontUsageAttempt({ ...attempt, routeId: "route-a" })
+      startFrontUsageAttempt({ ...attempt, routeId: "route-a" }, route)
     ).rejects.toThrow("route identity");
     await expect(
-      startFrontUsageAttempt({ ...attempt, routeId: "tenant-b:7" })
+      startFrontUsageAttempt({ ...attempt, routeId: "tenant-b:7" }, route)
     ).rejects.toThrow("route identity");
   });
 
