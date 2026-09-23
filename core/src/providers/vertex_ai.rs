@@ -38,6 +38,17 @@ trait VertexTokenSource: Send + Sync {
 
 struct AdcTokenSource;
 
+#[derive(Debug)]
+struct PreDispatchTokenError;
+
+impl std::fmt::Display for PreDispatchTokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vertex ADC unavailable before dispatch")
+    }
+}
+
+impl std::error::Error for PreDispatchTokenError {}
+
 #[async_trait]
 impl VertexTokenSource for AdcTokenSource {
     async fn token(&self) -> Result<String> {
@@ -260,6 +271,13 @@ where
     }
     let response = match provider().await {
         Ok(response) => response,
+        Err(error) if error.downcast_ref::<PreDispatchTokenError>().is_some() => {
+            journal.settle_no_charge(
+                &attempt.attempt_id,
+                &format!("predispatch:adc-failed:{}", attempt.attempt_id),
+            )?;
+            return Err(anyhow!("Vertex ADC unavailable before dispatch"));
+        }
         Err(_) => {
             journal.mark_unknown(&attempt.attempt_id)?;
             return Err(anyhow!("Vertex embedding provider result unavailable"));
@@ -562,7 +580,10 @@ impl Embedder for VertexAIEmbedder {
                     || async move {
                         // ADC is downstream of the per-attempt journal and CRM
                         // admission. A denied tenant must not request a token.
-                        let token = token_source.token().await?;
+                        let token = token_source
+                            .token()
+                            .await
+                            .map_err(|_| anyhow!(PreDispatchTokenError))?;
                         Self::request_one(&client, &endpoint, &token, &input, task_type).await
                     },
                 )
@@ -772,6 +793,26 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("\"input_tokens\":\"7\""));
+
+        let adc_failed = run_guarded_attempt(
+            &journal,
+            &route,
+            MODEL_ID,
+            "embedding-test",
+            |_, _, _| async { Ok(()) },
+            || async { Err(anyhow!(PreDispatchTokenError)) },
+        )
+        .await;
+        assert!(adc_failed.is_err());
+        let conn = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
+        let no_charge: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM dust_usage_attempts WHERE state = 'no_charge'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(no_charge, 2); // Admission denial and ADC failure, both before dispatch.
 
         let ambiguous = run_guarded_attempt(
             &journal,
