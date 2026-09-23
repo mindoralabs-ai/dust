@@ -195,6 +195,32 @@ export async function startFrontUsageAttempt(
   });
 }
 
+/** An in-process, single-use proof tied to one committed journal insertion. */
+export type FrontUsageStartPermit = Readonly<{ attemptId: string }>;
+const issuedStartPermits = new WeakMap<FrontUsageStartPermit, string>();
+
+export async function startFrontUsageAttemptForAdmission(
+  attempt: FrontUsageAttempt
+): Promise<FrontUsageStartPermit | null> {
+  if ((await startFrontUsageAttempt(attempt)) !== "created") {
+    return null;
+  }
+  const permit = Object.freeze({ attemptId: attempt.attemptId });
+  issuedStartPermits.set(permit, attempt.attemptId);
+  return permit;
+}
+
+export function consumeFrontUsageStartPermit(
+  permit: FrontUsageStartPermit | null,
+  attemptId: string
+): boolean {
+  if (!permit || issuedStartPermits.get(permit) !== attemptId) {
+    return false;
+  }
+  issuedStartPermits.delete(permit);
+  return true;
+}
+
 async function withLockedAttempt<T>(
   attemptId: string,
   apply: (row: JournalRow, transaction: Transaction) => Promise<T>
@@ -454,17 +480,34 @@ export async function claimFrontUsageWork(
     });
     const leaseNonce = randomUUID();
     return frontSequelize.query<FrontUsageClaim>(
-      `WITH due AS (
-         SELECT "attemptId" FROM "dust_usage_attempts"
+      `WITH ranked AS (
+         SELECT "attemptId", "nextRetryAt",
+                CASE WHEN "state" = 'exact' AND "retryCount" = 0
+                     THEN 0 ELSE 1 END AS priority_class,
+                row_number() OVER (
+                  PARTITION BY CASE WHEN "state" = 'exact' AND "retryCount" = 0
+                                    THEN 0 ELSE 1 END
+                  ORDER BY "nextRetryAt", "createdAt", "attemptId"
+                ) AS priority_rank
+           FROM "dust_usage_attempts"
           WHERE "deliveredAt" IS NULL
             AND "manualReviewRequired" = false
             AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
             AND "nextRetryAt" <= now()
             AND "state" IN ('started', 'unknown', 'exact')
-          ORDER BY CASE WHEN "state" = 'exact' AND "retryCount" = 0
-                        THEN 0 ELSE 1 END,
-                   "nextRetryAt", "createdAt"
-          LIMIT :limit FOR UPDATE SKIP LOCKED
+       ), due AS (
+         SELECT j."attemptId" FROM "dust_usage_attempts" AS j
+           JOIN ranked AS r ON j."attemptId" = r."attemptId"
+          WHERE j."deliveredAt" IS NULL AND j."manualReviewRequired" = false
+            AND (j."leaseUntil" IS NULL OR j."leaseUntil" < now())
+            AND j."nextRetryAt" <= now()
+            AND j."state" IN ('started', 'unknown', 'exact')
+          ORDER BY CASE WHEN :limit = 1 THEN 0
+                        WHEN r.priority_class = 1 AND r.priority_rank = 1 THEN 0
+                        WHEN r.priority_class = 0 AND r.priority_rank < :limit THEN 1
+                        WHEN r.priority_class = 1 THEN 2 ELSE 3 END,
+                   r."nextRetryAt", r.priority_rank
+          LIMIT :limit FOR UPDATE OF j SKIP LOCKED
        )
        UPDATE "dust_usage_attempts" AS j SET "leaseOwner" = :leaseOwner,
          "leaseNonce" = :leaseNonce,
@@ -558,6 +601,8 @@ export async function deferFrontUsageClaim(input: {
 export class DustUsageAttemptResource {
   static readHealth = readFrontUsageHealth;
   static start = startFrontUsageAttempt;
+  static startForAdmission = startFrontUsageAttemptForAdmission;
+  static consumeStartPermit = consumeFrontUsageStartPermit;
   static markUnknown = markFrontUsageUnknown;
   static heartbeat = heartbeatFrontUsageAttempt;
   static settleNoCharge = settleFrontUsageNoCharge;

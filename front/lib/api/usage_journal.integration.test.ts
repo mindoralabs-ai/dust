@@ -4,12 +4,14 @@ import config from "@app/lib/api/config";
 import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
+  consumeFrontUsageStartPermit,
   markFrontUsageUnknown,
   newFrontUsageAttemptId,
   readFrontUsageHealth,
   settleFrontUsageExact,
   settleFrontUsageNoCharge,
   startFrontUsageAttempt,
+  startFrontUsageAttemptForAdmission,
 } from "@app/lib/api/usage_journal";
 import { frontSequelize } from "@app/lib/resources/storage";
 import { Client } from "pg";
@@ -118,6 +120,29 @@ describe.runIf(enabled)(
       expect(settled.rows[0].deliveredAt).not.toBeNull();
     });
 
+    it("issues one admission permit for the committed attempt only", async () => {
+      const attempt = {
+        attemptId: newFrontUsageAttemptId(),
+        tenantId: "tenant-test-permit",
+        workspaceId: "workspace-test-permit",
+        conversationId: "conversation-test-permit",
+        model: "gemini-2.5-flash",
+        routeId: "tenant-test-permit:7",
+      };
+      const permit = await startFrontUsageAttemptForAdmission(attempt);
+      expect(permit).not.toBeNull();
+      expect(consumeFrontUsageStartPermit(permit, "another-attempt")).toBe(
+        false
+      );
+      expect(consumeFrontUsageStartPermit(permit, attempt.attemptId)).toBe(
+        true
+      );
+      expect(consumeFrontUsageStartPermit(permit, attempt.attemptId)).toBe(
+        false
+      );
+      expect(await startFrontUsageAttemptForAdmission(attempt)).toBeNull();
+    });
+
     it("retains an unresolved attempt for recovery instead of inventing no-charge", async () => {
       const attemptId = newFrontUsageAttemptId();
       await startFrontUsageAttempt({
@@ -196,14 +221,38 @@ describe.runIf(enabled)(
           cacheWriteTokens: 0,
         },
       });
-      const [claimed] = await claimFrontUsageWork("worker-test-fairness", 1);
-      expect(claimed.attemptId).toBe(fresh.attemptId);
+      const claimed = (
+        await claimFrontUsageWork("worker-test-fairness", 2)
+      ).find((claim) => claim.attemptId === fresh.attemptId);
+      if (!claimed) {
+        throw new Error("Fresh exact usage was not claimed");
+      }
       await completeFrontUsageClaim({
         attemptId: fresh.attemptId,
         leaseOwner: claimed.leaseOwner,
         leaseNonce: claimed.leaseNonce,
         delivered: true,
       });
+      for (let index = 0; index < 4; index++) {
+        const next = { ...base, attemptId: newFrontUsageAttemptId() };
+        await startFrontUsageAttempt(next);
+        await settleFrontUsageExact({
+          attempt: next,
+          providerOperationId: `vertex:fair:${next.attemptId}`,
+          counts: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        });
+      }
+      const claims = await claimFrontUsageWork("worker-test-fairness-next", 3);
+      expect(claims).toHaveLength(3);
+      expect(
+        claims.some((claim) => oldAttempts.includes(claim.attemptId))
+      ).toBe(true);
+      expect(claims.filter((claim) => claim.state === "exact")).toHaveLength(2);
     });
 
     it("reports tenant-local unresolved work and undelivered exact usage to CRM", async () => {

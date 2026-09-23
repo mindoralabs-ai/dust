@@ -5,6 +5,13 @@ import {
   requireDustAdmission,
 } from "./usage_admission";
 
+vi.mock("@app/lib/api/usage_journal", () => ({
+  consumeFrontUsageStartPermit: (
+    permit: { attemptId: string } | null,
+    operationId: string
+  ) => permit?.attemptId === operationId,
+}));
+
 const ROUTE = "https://crm-private.internal/internal/usage/dust/admission";
 const KEY = "front-component-key";
 const OPERATION_ID = "attempt_01";
@@ -36,7 +43,7 @@ function options(fetchImpl: typeof fetch) {
     routeUrl: ROUTE,
     componentKey: KEY,
     operationId: OPERATION_ID,
-    startOutcome: "created" as const,
+    startPermit: { attemptId: OPERATION_ID },
     fetchImpl,
   };
 }
@@ -70,6 +77,7 @@ describe("requireDustAdmission", () => {
       routeUrl: "https://other-crm.internal/internal/usage/dust/admission",
       componentKey: "other-front-key",
       operationId: "attempt_02",
+      startPermit: { attemptId: "attempt_02" },
     });
     expect(fetchImpl.mock.calls[0][0]).toHaveProperty(
       "host",
@@ -179,7 +187,13 @@ describe("requireDustAdmission", () => {
   it("rejects a duplicate journal start before asking CRM for admission", async () => {
     const fetchImpl = fetchReturning(admission());
     await expect(
-      requireDustAdmission({ ...options(fetchImpl), startOutcome: "duplicate" })
+      requireDustAdmission({ ...options(fetchImpl), startPermit: null })
+    ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
+    await expect(
+      requireDustAdmission({
+        ...options(fetchImpl),
+        startPermit: { attemptId: "different-attempt" },
+      })
     ).rejects.toBeInstanceOf(DustAdmissionUnavailableError);
     expect(fetchImpl).not.toHaveBeenCalled();
   });

@@ -1,5 +1,7 @@
 /** Server-side Dust quota admission. The caller must select the tenant route and
  * front component key from a verified, server-controlled workspace mapping. */
+import type { FrontUsageStartPermit } from "@app/lib/api/usage_journal";
+import { consumeFrontUsageStartPermit } from "@app/lib/api/usage_journal";
 import { z } from "zod";
 
 const ADMISSION_PATH = "/internal/usage/dust/admission";
@@ -51,7 +53,7 @@ type AdmissionOptions = {
   /** Stable ID for one provider attempt; also used as journal attempt_id. */
   operationId: string;
   /** Only a newly committed journal row may authorize provider dispatch. */
-  startOutcome: "created" | "duplicate";
+  startPermit: FrontUsageStartPermit | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 };
@@ -134,13 +136,13 @@ export async function requireDustAdmission({
   routeUrl,
   componentKey,
   operationId,
-  startOutcome,
+  startPermit,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }: AdmissionOptions): Promise<void> {
   if (
-    startOutcome !== "created" ||
     !OPERATION_ID.test(operationId) ||
+    !consumeFrontUsageStartPermit(startPermit, operationId) ||
     !componentKey ||
     componentKey.trim() !== componentKey ||
     !Number.isInteger(timeoutMs) ||

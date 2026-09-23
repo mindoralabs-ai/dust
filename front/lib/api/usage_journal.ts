@@ -4,6 +4,7 @@ export type {
   FrontUsageAttempt,
   FrontUsageClaim,
   FrontUsageCounts,
+  FrontUsageStartPermit,
 } from "@app/lib/resources/dust_usage_attempt_resource";
 export {
   buildFrontUsageEnvelope,
@@ -12,6 +13,10 @@ export {
 
 export const readFrontUsageHealth = DustUsageAttemptResource.readHealth;
 export const startFrontUsageAttempt = DustUsageAttemptResource.start;
+export const startFrontUsageAttemptForAdmission =
+  DustUsageAttemptResource.startForAdmission;
+export const consumeFrontUsageStartPermit =
+  DustUsageAttemptResource.consumeStartPermit;
 export const markFrontUsageUnknown = DustUsageAttemptResource.markUnknown;
 export const heartbeatFrontUsageAttempt = DustUsageAttemptResource.heartbeat;
 export const settleFrontUsageNoCharge = DustUsageAttemptResource.settleNoCharge;
