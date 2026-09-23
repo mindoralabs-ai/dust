@@ -164,6 +164,29 @@ describe("getLlmCredentials", () => {
 
       expect(result).toEqual(BASE_VARIABLES);
     });
+
+    it("allows only configured Vertex POC workspaces to omit an OpenAI embedding key", async () => {
+      const { authenticator } = await createResourceTest({
+        role: "admin",
+        isByok: true,
+      });
+      const workspaceId = authenticator.getNonNullableWorkspace().sId;
+      vi.stubEnv("DUST_POC_MODE", "1");
+      vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "1");
+      vi.stubEnv("DUST_POC_WORKSPACE_IDS", `${workspaceId},other-workspace`);
+      try {
+        expect(await getLlmCredentials(authenticator)).toEqual(BASE_VARIABLES);
+        const { authenticator: unrelated } = await createResourceTest({
+          role: "admin",
+          isByok: true,
+        });
+        await expect(getLlmCredentials(unrelated)).rejects.toThrow(
+          "OPENAI_EMBEDDING_API_KEY"
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it("throws when OAuth fetch fails for a provider", async () => {

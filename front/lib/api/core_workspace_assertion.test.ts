@@ -8,7 +8,7 @@ import { DataSourceViewFactory } from "@app/tests/utils/DataSourceViewFactory";
 import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
 import { WorkspaceFactory } from "@app/tests/utils/WorkspaceFactory";
 import jwt from "jsonwebtoken";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const secret = "a-long-enough-test-secret-for-workspace-assertions";
 
@@ -82,7 +82,7 @@ describe("Core workspace assertion", () => {
       [`12:${sourceB}`, 12, sourceB],
     ] as const) {
       expect(
-        jwt.verify(assertions!.get(key)!, secret, {
+        jwt.verify(assertions!.get(key)!(), secret, {
           audience: "dust-core-vertex-embedding",
           algorithms: ["HS256"],
         })
@@ -90,6 +90,27 @@ describe("Core workspace assertion", () => {
         workspace_sid: workspaceSId,
         data_sources: [{ project_id: projectId, data_source_id: dataSourceId }],
       });
+    }
+  });
+
+  it("mints a single-search token when the queued request starts", async () => {
+    const assertions = await createCoreWorkspaceAssertionsForSingles(auth, [
+      { projectId: "11", dataSourceId: sourceA },
+    ]);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 70_000);
+      const token = assertions!.get(`11:${sourceA}`)!();
+      expect(
+        jwt.verify(token, secret, {
+          audience: "dust-core-vertex-embedding",
+          algorithms: ["HS256"],
+        })
+      ).toMatchObject({
+        data_sources: [{ project_id: 11, data_source_id: sourceA }],
+      });
+    } finally {
+      vi.useRealTimers();
     }
   });
 

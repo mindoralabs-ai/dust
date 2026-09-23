@@ -1000,7 +1000,7 @@ export class CoreAPI {
     target_document_tokens?: number | null,
     assertionForPairs?: (
       pairs: { projectId: string; dataSourceId: string }[]
-    ) => Promise<ReadonlyMap<string, string> | undefined>
+    ) => Promise<ReadonlyMap<string, () => string> | undefined>
   ): Promise<CoreAPIResponse<{ documents: CoreAPIDocument[] }>> {
     const workspaceAssertions = await assertionForPairs?.(searches);
     const searchResults = await concurrentExecutor(
@@ -1019,7 +1019,7 @@ export class CoreAPI {
             target_document_tokens: target_document_tokens,
             workspaceAssertion: workspaceAssertions?.get(
               `${search.projectId}:${search.dataSourceId}`
-            ),
+            )?.(),
           }
         );
 

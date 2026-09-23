@@ -29,7 +29,7 @@ function signAssertion(
 export async function createCoreWorkspaceAssertionsForSingles(
   auth: Authenticator,
   pairs: CoreDataSourcePair[]
-): Promise<ReadonlyMap<string, string> | undefined> {
+): Promise<ReadonlyMap<string, () => string> | undefined> {
   const secret = config.getCoreWorkspaceAssertionSecret();
   if (!secret) {
     return undefined;
@@ -43,7 +43,7 @@ export async function createCoreWorkspaceAssertionsForSingles(
     ...new Map(pairs.map((pair) => [pairKey(pair), pair])).values(),
   ];
   const workspace = auth.getNonNullableWorkspace();
-  const assertions = new Map<string, string>();
+  const assertions = new Map<string, () => string>();
   for (let offset = 0; offset < unique.length; offset += 100) {
     const batch = unique.slice(offset, offset + 100);
     const resources = await DataSourceResource.fetchByDustAPIDataSourceIds(
@@ -68,8 +68,7 @@ export async function createCoreWorkspaceAssertionsForSingles(
           "Core data source is not bound to the authenticated workspace"
         );
       }
-      assertions.set(
-        pairKey(pair),
+      assertions.set(pairKey(pair), () =>
         signAssertion(
           workspace.sId,
           [{ project_id: projectId, data_source_id: pair.dataSourceId }],
