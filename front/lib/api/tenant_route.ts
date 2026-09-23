@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import logger from "@app/logger/logger";
 import { z } from "zod";
 
 const DOMAIN = Buffer.from("mindora.dust.mapping-bundle.v1\0", "ascii");
@@ -315,11 +316,19 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
-/** A process-local, fail-closed snapshot. This module must only be imported server-side. */
+/**
+ * @cc [label:security;backend] dust-signed-route-fail-closed
+ * Resolve user routes only from a verified, healthy, unexpired process-local
+ * snapshot. Committed delivery may outlive membership, while maintenance
+ * requires configured workspaces; neither may use an unhealthy snapshot.
+ */
 export class DustTenantRouteResolver {
   private readonly verifiers: Map<string, ReturnType<typeof buildVerifier>>;
   private readonly fetchImpl: typeof fetch;
   private readonly nowSeconds: () => number;
+  private readonly signerUrl: string;
+  private readonly exportCredentialFile: string;
+  private readonly minimumRevision: number;
   private snapshot: {
     payload: Payload;
     keyId: string;
@@ -331,7 +340,7 @@ export class DustTenantRouteResolver {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
 
-  constructor(private readonly config: TenantRouteConfig) {
+  constructor(config: TenantRouteConfig) {
     let signerUrl: URL;
     try {
       signerUrl = new URL(config.signerUrl);
@@ -355,6 +364,9 @@ export class DustTenantRouteResolver {
     if (this.verifiers.size !== config.verifiers.length) {
       throw new TenantRouteUnavailable();
     }
+    this.signerUrl = config.signerUrl;
+    this.exportCredentialFile = config.exportCredentialFile;
+    this.minimumRevision = config.minimumRevision;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.nowSeconds =
       config.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
@@ -393,7 +405,9 @@ export class DustTenantRouteResolver {
       clearTimeout(this.timer);
     }
     this.timer = setTimeout(() => {
-      void this.refresh().catch(() => undefined);
+      void this.refresh().catch((error: unknown) => {
+        logger.error({ error }, "Dust tenant route refresh failed");
+      });
     }, Math.max(1, seconds) * 1000);
     this.timer.unref?.();
   }
@@ -402,14 +416,14 @@ export class DustTenantRouteResolver {
     let refreshed = false;
     try {
       const credential = (
-        await readFile(this.config.exportCredentialFile, "utf8").catch(() => {
+        await readFile(this.exportCredentialFile, "utf8").catch(() => {
           throw new TenantRouteUnavailable();
         })
       ).trim();
       if (credential.length < 32 || /[\r\n]/.test(credential)) {
         throw new TenantRouteUnavailable();
       }
-      const response = await this.fetchImpl(this.config.signerUrl, {
+      const response = await this.fetchImpl(this.signerUrl, {
         method: "GET",
         headers: { "X-Internal-Auth": credential, Accept: "application/json" },
         redirect: "error",
@@ -452,10 +466,7 @@ export class DustTenantRouteResolver {
       const payload = parsePayload(
         bundle.payload,
         this.nowSeconds(),
-        Math.max(
-          this.config.minimumRevision,
-          this.snapshot?.payload.revision ?? 0
-        )
+        Math.max(this.minimumRevision, this.snapshot?.payload.revision ?? 0)
       );
       if (this.stopped) {
         throw new TenantRouteUnavailable();
@@ -524,7 +535,7 @@ export class DustTenantRouteResolver {
       !current ||
       !this.refreshHealthy ||
       this.nowSeconds() >= current.payload.expires_at ||
-      current.payload.revision < this.config.minimumRevision ||
+      current.payload.revision < this.minimumRevision ||
       !Object.values(identity).every(nonempty)
     ) {
       throw new TenantRouteUnavailable();
@@ -557,12 +568,12 @@ export class DustTenantRouteResolver {
       !current ||
       !this.refreshHealthy ||
       this.nowSeconds() >= current.payload.expires_at ||
-      current.payload.revision < this.config.minimumRevision ||
+      current.payload.revision < this.minimumRevision ||
       !TENANT_ID.test(tenantId)
     ) {
       throw new TenantRouteUnavailable();
     }
-    const match = /^([a-z0-9][a-z0-9-]{0,62}):([1-9][0-9]*)$/.exec(routeId);
+    const match = /^([a-z0-9][a-z0-9-]{0,62}):(0|[1-9][0-9]*)$/.exec(routeId);
     if (!match || match[1] !== tenantId) {
       throw new TenantRouteUnavailable();
     }
@@ -590,7 +601,7 @@ export class DustTenantRouteResolver {
       !current ||
       !this.refreshHealthy ||
       this.nowSeconds() >= current.payload.expires_at ||
-      current.payload.revision < this.config.minimumRevision ||
+      current.payload.revision < this.minimumRevision ||
       workspaceIds.size === 0
     ) {
       throw new TenantRouteUnavailable();

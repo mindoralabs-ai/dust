@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -90,7 +91,7 @@ describe("DustTenantRouteResolver", () => {
   let credentialFile: string;
   let now: number;
   let responseBody: unknown;
-  let fetchImpl: ReturnType<typeof vi.fn>;
+  let fetchImpl: Mock<typeof fetch>;
   let resolver: DustTenantRouteResolver;
 
   beforeEach(async () => {
@@ -99,14 +100,16 @@ describe("DustTenantRouteResolver", () => {
     await writeFile(credentialFile, "x".repeat(32));
     now = 1000;
     responseBody = bundle();
-    fetchImpl = vi.fn(async () => Response.json(responseBody));
+    fetchImpl = vi.fn<typeof fetch>(async (_input, _init) =>
+      Response.json(responseBody)
+    );
     resolver = new DustTenantRouteResolver({
       signerUrl: "https://signer.internal/internal/dust/registry/bundle",
       exportCredentialFile: credentialFile,
       verifiers: [verifier],
       minimumRevision: 7,
       nowSeconds: () => now,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl,
     });
   });
 
@@ -424,6 +427,49 @@ describe("DustTenantRouteResolver", () => {
     expect(resolver.resolve(identity).revision).toBe(8);
     now = 1060;
     expect(resolver.resolve(identity).revision).toBe(8);
+  });
+
+  it("keeps validated signer settings after caller mutation", async () => {
+    const settings = {
+      signerUrl: "https://signer.internal/internal/dust/registry/bundle",
+      exportCredentialFile: credentialFile,
+      verifiers: [verifier],
+      minimumRevision: 7,
+      nowSeconds: () => now,
+      fetchImpl,
+    };
+    const frozenResolver = new DustTenantRouteResolver(settings);
+    settings.signerUrl = "https://example.com/internal/dust/registry/bundle";
+    settings.exportCredentialFile = "/tmp/other-credential";
+    settings.minimumRevision = 8;
+    await frozenResolver.start();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://signer.internal/internal/dust/registry/bundle",
+      expect.objectContaining({ method: "GET" })
+    );
+    expect(frozenResolver.resolve(identity).revision).toBe(7);
+    frozenResolver.stop();
+  });
+
+  it("resolves the canonical zero revision accepted by the bundle schema", async () => {
+    responseBody = bundle({
+      revision: 0,
+      tenants: [{ ...tenant, revision: 0 }],
+      memberships: [{ ...member, revision: 0 }],
+    });
+    const zeroResolver = new DustTenantRouteResolver({
+      signerUrl: "https://signer.internal/internal/dust/registry/bundle",
+      exportCredentialFile: credentialFile,
+      verifiers: [verifier],
+      minimumRevision: 0,
+      nowSeconds: () => now,
+      fetchImpl,
+    });
+    await zeroResolver.start();
+    expect(zeroResolver.resolveForDelivery("alpha", "alpha:0").tenantId).toBe(
+      "alpha"
+    );
+    zeroResolver.stop();
   });
 
   it("rejects signer redirect and public signer configuration", async () => {
