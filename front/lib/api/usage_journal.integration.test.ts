@@ -13,7 +13,6 @@ import {
   startFrontUsageAttemptForAdmission,
   validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
-import { frontSequelize } from "@app/lib/resources/storage";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -30,7 +29,7 @@ describe("Front Dust usage journal PostgreSQL durability", () => {
     const target = new URL(uri);
     if (
       !["localhost", "127.0.0.1"].includes(target.hostname) ||
-      !/^\/(?:front(?:_api)?_test(?:_shard_\d+)?|dust_journal_test)$/.test(
+      !/^\/(?:front(?:_api)?_test(?:_shard_\d+)?|dust_journal_test|dust_front_test_[A-Za-z0-9_]+)$/.test(
         target.pathname
       )
     ) {
@@ -42,7 +41,6 @@ describe("Front Dust usage journal PostgreSQL durability", () => {
 
   afterAll(async () => {
     await observer?.end();
-    await frontSequelize.close();
   });
 
   it("commits attempts before dispatch, preserves frozen outbox bytes, and idempotently delivers", async () => {

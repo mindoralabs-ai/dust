@@ -163,7 +163,6 @@ export async function requireDustAdmission({
       current.tenantId !== route.tenantId ||
       current.workspaceId !== route.workspaceId ||
       current.revision !== route.revision ||
-      current.keyId !== route.keyId ||
       current.privateRoute !== route.privateRoute ||
       current.admissionUrl !== route.admissionUrl ||
       current.frontCredentialRef !== route.frontCredentialRef ||
