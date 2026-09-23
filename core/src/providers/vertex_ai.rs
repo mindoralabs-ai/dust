@@ -753,11 +753,11 @@ impl Embedder for VertexAIEmbedder {
         Err(anyhow!("Vertex embedding is disabled until trusted tenant admission and durable usage accounting are integrated"))
     }
 
-/// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
-/// Each distinct document input is resolved from a verified workspace,
-/// durably journaled, and admitted before one provider dispatch. Repeated
-/// positions in the same batch reuse that vector without another paid call.
-/// Query inputs keep one attempt per position.
+    /// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
+    /// Each distinct document input is resolved from a verified workspace,
+    /// durably journaled, and admitted before one provider dispatch. Repeated
+    /// positions in the same batch reuse that vector without another paid call.
+    /// Query inputs keep one attempt per position.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,
@@ -774,6 +774,9 @@ impl Embedder for VertexAIEmbedder {
             return Err(anyhow!("Vertex embedding provider I/O is disabled"));
         }
         let runtime = core_vertex_runtime()?;
+        if !runtime.workspaces.iter().any(|id| id == workspace.sid()) {
+            return Err(anyhow!("Vertex embedding workspace is not enabled"));
+        }
         let project = self
             .project
             .as_deref()
@@ -831,6 +834,7 @@ impl Embedder for VertexAIEmbedder {
                         return Ok(vector);
                     }
                 }
+                let dispatch_route = route.clone();
                 run_guarded_attempt(
                     &runtime.journal,
                     &route,
@@ -862,6 +866,14 @@ impl Embedder for VertexAIEmbedder {
                             .journal
                             .heartbeat_started(&attempt.attempt_id)
                             .map_err(|_| anyhow!(PreDispatchTokenError))?;
+                        let current = runtime
+                            .resolver
+                            .resolve(workspace)
+                            .await
+                            .map_err(|_| anyhow!(PreDispatchTokenError))?;
+                        if !same_signed_route(&current, &dispatch_route) {
+                            return Err(anyhow!(PreDispatchTokenError));
+                        }
                         Self::request_one(&client, &endpoint, &token, &input, task_type).await
                     },
                 )
