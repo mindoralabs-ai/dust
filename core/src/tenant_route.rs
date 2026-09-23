@@ -484,8 +484,8 @@ fn validate_payload(payload: &Payload) -> Result<()> {
     let mut credentials = HashSet::new();
     for t in &payload.tenants {
         if !tenant_slug(&t.tenant_id)
-            || !identity(&t.workspace_id)
-            || !reference(&t.workos_organization_id)
+            || !bounded_string(&t.workspace_id)
+            || !bounded_string(&t.workos_organization_id)
             || t.revision > payload.revision
             || !tenants.insert(t.tenant_id.as_str())
             || !workspaces.insert(t.workspace_id.as_str())
@@ -572,7 +572,6 @@ fn tenant_slug(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
-        && value.as_bytes()[value.len() - 1] != b'-'
 }
 
 fn identity(value: &str) -> bool {
@@ -586,14 +585,6 @@ fn identity(value: &str) -> bool {
 
 fn bounded_string(value: &str) -> bool {
     !value.is_empty() && value.encode_utf16().count() <= 256
-}
-
-fn reference(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/'))
 }
 
 fn key_id_for_public_key(public_key: &[u8; 32]) -> String {
@@ -735,6 +726,23 @@ mod tests {
         value["memberships"][0]["workos_user_id"] = Value::String("workos.user@example.com".into());
         let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
         validate_payload(&parsed).expect("punctuated membership IDs should be valid");
+    }
+
+    #[test]
+    fn tenant_identifiers_use_front_wire_bounds() {
+        let mut value = payload(1_000, 1);
+        value["tenants"][0]["tenant_id"] = Value::String("alpha-".into());
+        value["tenants"][0]["workspace_id"] = Value::String("workspace.user@example.com".into());
+        value["tenants"][0]["workos_organization_id"] =
+            Value::String("org.user@example.com".into());
+        value["tenants"][0]["journal_target"] = Value::String("tenant:alpha-:dust-usage".into());
+        value["tenants"][0]["front_credential_ref"] =
+            Value::String("/var/run/secrets/dust/tenants/alpha-/dust-front-usage-key".into());
+        value["tenants"][0]["core_credential_ref"] =
+            Value::String("/var/run/secrets/dust/tenants/alpha-/dust-core-usage-key".into());
+        value["memberships"][0]["tenant_id"] = Value::String("alpha-".into());
+        let parsed: Payload = serde_json::from_value(value).expect("test payload failed");
+        validate_payload(&parsed).expect("Front-valid tenant identifiers should be valid");
     }
 
     fn signed(payload: Value, key: &Ed25519KeyPair) -> Vec<u8> {

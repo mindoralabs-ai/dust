@@ -1,6 +1,6 @@
 //! Core-owned, retained SQLite journal for embedding provider attempts.
 //!
-//! Callers must treat only `StartOutcome::Created` as permission to dispatch
+//! Callers must consume the `StartOutcome::Created` permit before dispatching
 //! provider I/O. This module deliberately does not dispatch or retry effects.
 //! Its SQLite path must be on the retained Core PVC, not the container layer.
 
@@ -31,10 +31,30 @@ pub struct CoreUsageAttempt {
     pub model: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct CreatedPermit {
+    attempt_id: String,
+}
+
+impl CreatedPermit {
+    pub fn matches_attempt(&self, attempt_id: &str) -> bool {
+        self.attempt_id == attempt_id
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum StartOutcome {
-    Created,
+    Created(CreatedPermit),
     Duplicate,
+}
+
+#[cfg(test)]
+impl StartOutcome {
+    pub(crate) fn created_for_test(attempt_id: &str) -> Self {
+        Self::Created(CreatedPermit {
+            attempt_id: attempt_id.to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +131,26 @@ impl CoreUsageJournal {
         current: &HashMap<String, String>,
     ) -> Result<()> {
         let mut conn = self.connection()?;
+        let unchanged: Option<(u64, Vec<u8>, String)> = conn
+            .query_row(
+                "SELECT revision, payload_digest, tenant_identity_json
+                 FROM dust_tenant_route_fence WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((prior_revision, prior_digest, prior_json)) = unchanged {
+            if revision == prior_revision && digest.as_slice() == prior_digest.as_slice() {
+                let retained: HashMap<String, String> = serde_json::from_str(&prior_json)?;
+                if retained
+                    .iter()
+                    .all(|(tenant_id, identity)| current.get(tenant_id) == Some(identity))
+                {
+                    return Ok(());
+                }
+                bail!("Dust registry tenant identity changed or disappeared");
+            }
+        }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let prior: Option<(u64, Vec<u8>, String)> = tx
             .query_row(
@@ -132,6 +172,9 @@ impl CoreUsageJournal {
                 if current.get(tenant_id) != Some(prior_identity) {
                     bail!("Dust registry tenant identity changed or disappeared");
                 }
+            }
+            if revision == prior_revision && digest.as_slice() == prior_digest.as_slice() {
+                return Ok(());
             }
         }
         retained.extend(
@@ -222,7 +265,9 @@ impl CoreUsageJournal {
         }
         tx.commit()?;
         Ok(if inserted == 1 {
-            StartOutcome::Created
+            StartOutcome::Created(CreatedPermit {
+                attempt_id: attempt.attempt_id.clone(),
+            })
         } else {
             StartOutcome::Duplicate
         })
@@ -388,37 +433,44 @@ impl CoreUsageJournal {
         if !(1..=100).contains(&limit) {
             bail!("invalid Core usage claim limit");
         }
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let conn = self.connection()?;
         let now = now_ms();
-        let mut stmt = tx.prepare(
-            "SELECT attempt_id FROM dust_usage_attempts
-             WHERE delivered_at_ms IS NULL AND next_retry_at_ms <= ?1
-               AND manual_review_required = 0
-               AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
-               AND state IN ('started', 'unknown', 'exact')
-             ORDER BY CASE WHEN state = 'exact' AND retry_count = 0 THEN 0 ELSE 1 END,
-                      next_retry_at_ms, created_at_ms, attempt_id LIMIT ?2",
+        let nonce = Uuid::new_v4().to_string();
+        let mut stmt = conn.prepare(
+            "WITH due AS (
+               SELECT attempt_id, next_retry_at_ms, created_at_ms,
+                      CASE WHEN state = 'exact' AND retry_count = 0 THEN 0 ELSE 1 END AS class
+               FROM dust_usage_attempts
+               WHERE delivered_at_ms IS NULL AND next_retry_at_ms <= ?1
+                 AND manual_review_required = 0
+                 AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
+                 AND state IN ('started', 'unknown', 'exact')
+             ), ranked AS (
+               SELECT attempt_id, class, next_retry_at_ms,
+                      row_number() OVER (
+                        PARTITION BY class
+                        ORDER BY next_retry_at_ms, created_at_ms, attempt_id
+                      ) AS rank
+               FROM due
+             ), chosen AS (
+               SELECT attempt_id FROM ranked
+               ORDER BY CASE WHEN ?2 = 1 THEN 0
+                             WHEN class = 1 AND rank = 1 THEN 0
+                             WHEN class = 0 AND rank < ?2 THEN 1
+                             WHEN class = 1 THEN 2 ELSE 3 END,
+                        next_retry_at_ms, rank
+               LIMIT ?2
+             )
+             UPDATE dust_usage_attempts SET lease_owner = ?3, lease_nonce = ?4,
+               lease_until_ms = ?5, updated_at_ms = ?1
+             WHERE attempt_id IN (SELECT attempt_id FROM chosen)
+             RETURNING attempt_id, tenant_id, workspace_id, route_id, provider_request_id,
+               provider_operation_id, state, event_envelope, first_unresolved_at_ms,
+               retry_count, manual_review_required, lease_owner, lease_nonce",
         )?;
-        let ids = stmt
-            .query_map(params![now, limit as i64], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
-        let mut claims = Vec::with_capacity(ids.len());
-        for id in ids {
-            let nonce = Uuid::new_v4().to_string();
-            tx.execute(
-                "UPDATE dust_usage_attempts SET lease_owner = ?2, lease_nonce = ?3,
-                 lease_until_ms = ?4, updated_at_ms = ?5 WHERE attempt_id = ?1",
-                params![id, lease_owner, nonce, now + CLAIM_LEASE_MS, now],
-            )?;
-            claims.push(tx.query_row(
-                "SELECT attempt_id, tenant_id, workspace_id, route_id, provider_request_id,
-                        provider_operation_id, state, event_envelope,
-                        first_unresolved_at_ms, retry_count, manual_review_required,
-                        lease_owner, lease_nonce
-                 FROM dust_usage_attempts WHERE attempt_id = ?1",
-                [id],
+        let claims = stmt
+            .query_map(
+                params![now, limit as i64, lease_owner, nonce, now + CLAIM_LEASE_MS],
                 |r| {
                     Ok(ClaimedWork {
                         attempt_id: r.get(0)?,
@@ -436,9 +488,8 @@ impl CoreUsageJournal {
                         lease_nonce: r.get(12)?,
                     })
                 },
-            )?);
-        }
-        tx.commit()?;
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(claims)
     }
 
@@ -524,13 +575,11 @@ fn validate_reference(value: &str) -> Result<()> {
 }
 
 fn validate_attempt(a: &CoreUsageAttempt) -> Result<()> {
-    for id in [
-        &a.attempt_id,
-        &a.provider_request_id,
-        &a.tenant_id,
-        &a.workspace_id,
-    ] {
+    for id in [&a.attempt_id, &a.provider_request_id, &a.tenant_id] {
         validate_identity(id)?;
+    }
+    if a.workspace_id.is_empty() || a.workspace_id.encode_utf16().count() > 256 {
+        bail!("invalid Core usage workspace");
     }
     for reference in [&a.conversation_id, &a.route_id, &a.model] {
         validate_reference(reference)?;
@@ -597,10 +646,10 @@ mod tests {
         let path = dir.path().join("core-usage.sqlite");
         let j = CoreUsageJournal::open(&path).expect("test operation failed");
         let a = attempt("a1");
-        assert_eq!(
+        assert!(matches!(
             j.start(&a).expect("test operation failed"),
-            StartOutcome::Created
-        );
+            StartOutcome::Created(_)
+        ));
         drop(j);
         let j = CoreUsageJournal::open(&path).expect("test operation failed");
         assert_eq!(
@@ -883,6 +932,59 @@ mod tests {
             .claim_due("fair-worker", 3)
             .expect("test claim failed");
         assert!(claimed.iter().any(|claim| claim.attempt_id == "fair-3"));
+    }
+
+    #[test]
+    fn older_reconciliation_keeps_a_slot_when_fresh_exact_work_is_continuous() {
+        let dir = tempdir().expect("test operation failed");
+        let journal = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        let older = attempt("older-reconciliation");
+        journal.start(&older).expect("test operation failed");
+        journal
+            .mark_unknown(&older.attempt_id)
+            .expect("test operation failed");
+        for index in 0..4 {
+            let entry = attempt(&format!("fresh-{index}"));
+            journal.start(&entry).expect("test operation failed");
+            journal
+                .settle_exact(
+                    &entry,
+                    &format!("provider-fresh-{index}"),
+                    EmbeddingUsage { input_tokens: 1 },
+                )
+                .expect("test operation failed");
+        }
+        let claims = journal
+            .claim_due("fair-worker", 3)
+            .expect("test operation failed");
+        assert_eq!(claims.len(), 3);
+        assert!(claims
+            .iter()
+            .any(|claim| claim.attempt_id == older.attempt_id));
+        assert_eq!(
+            claims.iter().filter(|claim| claim.state == "exact").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn unchanged_registry_fence_does_not_require_the_writer_lock() {
+        let dir = tempdir().expect("test operation failed");
+        let journal = CoreUsageJournal::open(dir.path().join("core-usage.sqlite"))
+            .expect("test operation failed");
+        let tenants = HashMap::from([("tenant-a".to_owned(), "identity-a".to_owned())]);
+        journal
+            .fence_registry(1, [7; 32], &tenants)
+            .expect("test operation failed");
+        let mut other = journal.connection().expect("test operation failed");
+        let writer = other
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("test operation failed");
+        journal
+            .fence_registry(1, [7; 32], &tenants)
+            .expect("unchanged fence should only read");
+        writer.rollback().expect("test operation failed");
     }
 
     #[test]
