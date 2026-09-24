@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build:migrate": "esbuild scripts/migrate.ts --bundle --platform=node --target=node22 --alias:@app=. --packages=external --outfile=dist/migrate.js --sourcemap",
+    "build:elasticsearch-bootstrap": "esbuild scripts/create_elasticsearch_index.ts --bundle --platform=node --target=node22 --alias:@app=. --packages=external --outfile=dist/create_elasticsearch_index.js --sourcemap",
     "build:temporal-bundles": "tsx scripts/temporal-build/build-temporal-bundles.ts",
     "build:workers": "tsx esbuild.worker.ts",
     "start:worker": "USE_TEMPORAL_BUNDLES=true node dist/start_worker.js",
