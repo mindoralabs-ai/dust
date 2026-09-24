@@ -8,6 +8,7 @@ import {
   createDataSourceWithoutProvider,
   registerSlackWebhookRouterEntry,
 } from "@app/lib/api/data_sources";
+import { selectPocEmbeddingProviderForAuth } from "@app/lib/api/dust_poc_runtime";
 import { checkConnectionOwnership } from "@app/lib/api/oauth";
 import {
   getLlmCredentials,
@@ -350,7 +351,9 @@ async function handleDataSourceWithProvider({
   }
 
   const dataSourceEmbedder =
-    owner.defaultEmbeddingProvider ?? DEFAULT_EMBEDDING_PROVIDER_ID;
+    (await selectPocEmbeddingProviderForAuth(auth, owner.sId)) ??
+    owner.defaultEmbeddingProvider ??
+    DEFAULT_EMBEDDING_PROVIDER_ID;
   const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];
   const coreAPI = new CoreAPI(config.getCoreAPIConfig(), logger);
 
@@ -368,7 +371,9 @@ async function handleDataSourceWithProvider({
 
   let credentials: LLMCredentialsType;
   try {
-    credentials = await getLlmCredentials(auth);
+    credentials = await getLlmCredentials(auth, {
+      skipEmbeddingApiKeyRequirement: dataSourceEmbedder === "vertex_ai",
+    });
   } catch (err) {
     logger.error(
       { error: normalizeError(err) },

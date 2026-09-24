@@ -40,6 +40,34 @@ export function getDefaultInit(): Promise<RequestInit> | null {
 }
 
 const config = {
+  getDustPocMode: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE"),
+  getDustPocWorkspaceIds: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_POC_WORKSPACE_IDS"),
+  getDustFrontRegistryMinRevision: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_MIN_REVISION"),
+  getDustFrontRegistrySignerUrl: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_SIGNER_URL"),
+  getDustFrontRegistryExportKeyFile: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_EXPORT_KEY_FILE"),
+  getDustFrontRegistryKeyId: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_KEY_ID"),
+  getDustFrontRegistryPublicKeyBase64: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_PUBLIC_KEY_BASE64"),
+  getDustFrontRegistryNextKeyId: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_FRONT_REGISTRY_NEXT_KEY_ID"),
+  getDustFrontRegistryNextPublicKeyBase64: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_FRONT_REGISTRY_NEXT_PUBLIC_KEY_BASE64"
+    ),
+  getDustFrontVertexProviderIoEnabled: (): boolean =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED"
+    ) === "1",
+  getDustFrontVertexEmbeddingSelectionEnabled: (): boolean =>
+    EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED"
+    ) === "1",
   getFrontDatabaseUriForTest: (): string | undefined =>
     EnvironmentConfig.getOptionalEnvVariable("FRONT_DATABASE_URI"),
   getCoreWorkspaceAssertionSecret: (): string | undefined =>

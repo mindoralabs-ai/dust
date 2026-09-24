@@ -1,6 +1,8 @@
-import { EMBEDDING_PROVIDER_IDS } from "@app/types/assistant/models/embedding";
-import type { ModelProviderIdType } from "@app/types/assistant/models/types";
-import { PRETTIFIED_PROVIDER_NAMES } from "@app/types/provider_selection";
+import {
+  DEFAULT_EMBEDDING_PROVIDER_ID,
+  EMBEDDING_PROVIDER_IDS,
+} from "@app/types/assistant/models/embedding";
+import type { EmbeddingProviderIdType } from "@app/types/assistant/models/types";
 import type { WorkspaceType } from "@app/types/user";
 import {
   Button,
@@ -15,11 +17,15 @@ interface EmbeddingModelSelectProps {
   workspace?: WorkspaceType;
 }
 
-const DEFAULT_EMBEDDING_PROVIDER: ModelProviderIdType = "openai";
+const EMBEDDING_PROVIDER_NAMES: Record<EmbeddingProviderIdType, string> = {
+  vertex_ai: "Google Vertex AI",
+  openai: "OpenAI",
+  mistral: "Mistral AI",
+};
 
 export function EmbeddingModelSelect({ workspace }: EmbeddingModelSelectProps) {
   const [embeddingProvider, setEmbeddingProvider] =
-    useState<ModelProviderIdType>(DEFAULT_EMBEDDING_PROVIDER);
+    useState<EmbeddingProviderIdType>(DEFAULT_EMBEDDING_PROVIDER_ID);
 
   useEffect(() => {
     if (workspace?.defaultEmbeddingProvider) {
@@ -37,7 +43,7 @@ export function EmbeddingModelSelect({ workspace }: EmbeddingModelSelectProps) {
               disabled
               tooltip="Please contact us if you want to change this setting."
               isSelect
-              label={PRETTIFIED_PROVIDER_NAMES[embeddingProvider]}
+              label={EMBEDDING_PROVIDER_NAMES[embeddingProvider]}
               variant="outline"
               size="sm"
             />
@@ -46,7 +52,7 @@ export function EmbeddingModelSelect({ workspace }: EmbeddingModelSelectProps) {
             {EMBEDDING_PROVIDER_IDS.map((provider) => (
               <DropdownMenuItem
                 key={provider}
-                label={PRETTIFIED_PROVIDER_NAMES[provider]}
+                label={EMBEDDING_PROVIDER_NAMES[provider]}
                 onClick={() => {
                   setEmbeddingProvider(provider);
                 }}

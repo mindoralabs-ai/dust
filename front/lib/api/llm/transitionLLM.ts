@@ -1,4 +1,5 @@
 import type { InferenceRegionType } from "@app/lib/api/assistant/token_pricing";
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import { withFlexProcessing } from "@app/lib/api/llm/flex_processing";
 import { LLM } from "@app/lib/api/llm/llm";
 import { withConciseOpenAIReasoningSummary } from "@app/lib/api/llm/reasoning_summary";
@@ -41,6 +42,7 @@ import type {
   BatchStatus,
 } from "@app/lib/model_constructors/batch/endpoint";
 import type { BaseEndpointConfiguration } from "@app/lib/model_constructors/configuration";
+import { GoogleAgentPlatformStream } from "@app/lib/model_constructors/stream/clients/google_agent_platform";
 import type { StreamEndpoint } from "@app/lib/model_constructors/stream/endpoint";
 import type { NoopRequest } from "@app/lib/model_constructors/stream/endpoints/noop_noop_global_noop";
 import { NoopNoopGlobalNoopStream } from "@app/lib/model_constructors/stream/endpoints/noop_noop_global_noop";
@@ -464,6 +466,11 @@ function mapErrorType(errorType: ErrorType): {
 /**
  * Converts a single new model event to its old LLM event equivalent.
  */
+/**
+ * @cc [label:security;backend] preserve-provider-accounting-certainty
+ * Converting a provider token usage event must preserve its explicit exact or
+ * unknown accounting status. Consumers must not infer exactness from counts.
+ */
 export function convertToOldEvent(
   event: ModelResponseEvent,
   metadata: LLMClientMetadata
@@ -556,6 +563,7 @@ export function convertToOldEvent(
         shortCacheCreated,
         reasoning,
         serviceTier,
+        accountingStatus,
       } = event.content;
       // `cacheCreated` is only set when the provider reports a flat total with
       // no per-duration breakdown. Otherwise the split lives in long/short.
@@ -579,6 +587,7 @@ export function convertToOldEvent(
           totalOutputTokens: totalOutput,
           ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
           totalTokens: inputTokens + totalOutput,
+          ...(accountingStatus !== undefined ? { accountingStatus } : {}),
           cachedTokens: cacheHit,
           cacheCreationTokens: totalCacheCreated,
           ...(hasDurationBreakdown
@@ -638,6 +647,9 @@ export function convertToOldEvent(
           isRetryable,
           originalError: event.content.originalError,
           errorSource: event.content.errorSource,
+          ...(event.content.providerCompleted
+            ? { providerCompleted: true }
+            : {}),
         },
         metadata
       );
@@ -900,6 +912,17 @@ export class StreamEndpointTransition extends BaseTransition {
 
   protected async *sendRequest(payload: unknown): AsyncGenerator<LLMEvent> {
     try {
+      if (dustPocMode()) {
+        if (
+          !(this.model instanceof GoogleAgentPlatformStream) ||
+          !this.pocAttemptId ||
+          !this.pocProviderPermit
+        ) {
+          throw new Error("Dust POC provider request unavailable");
+        }
+        this.model.armPocAttempt(this.pocAttemptId, this.pocProviderPermit);
+        this.pocProviderPermit = null;
+      }
       const rawStream = this.model.streamRaw(payload);
       const newEvents = this.model.rawStreamOutputToEvents(rawStream);
       yield* convertToOldEvents(newEvents, this.metadata);

@@ -2,6 +2,8 @@
 
 import { default as apiConfig, default as config } from "@app/lib/api/config";
 import { UNTITLED_TITLE } from "@app/lib/api/content_nodes";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
+import { selectPocEmbeddingProviderForAuth } from "@app/lib/api/dust_poc_runtime";
 import { sendGitHubDeletionEmail } from "@app/lib/api/email";
 import {
   getLlmCredentials,
@@ -660,9 +662,23 @@ export async function upsertDocument({
     lightDocumentOutput: light_document_output === true,
     title,
     mimeType: mime_type,
+    workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
+      {
+        projectId: dataSource.dustAPIProjectId,
+        dataSourceId: dataSource.dustAPIDataSourceId,
+      },
+    ]),
   });
 
   if (upsertRes.isErr()) {
+    if (upsertRes.error.code === "ambiguous_provider_effect") {
+      return new Err(
+        new DustError(
+          "ambiguous_provider_effect",
+          "The document upsert outcome is uncertain. Check the document before trying again."
+        )
+      );
+    }
     return new Err(
       new DustError(
         "core_api_error",
@@ -740,6 +756,12 @@ export async function handleDataSourceSearch({
           }
         : undefined,
       credentials: credentials,
+      workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
+        {
+          projectId: dataSource.dustAPIProjectId,
+          dataSourceId: dataSource.dustAPIDataSourceId,
+        },
+      ]),
     }
   );
 
@@ -1121,6 +1143,15 @@ export async function createDataSourceWithoutProvider(
     });
   }
 
+  const activeWorkspace = auth.getNonNullableWorkspace();
+  if (activeWorkspace.sId !== owner.sId) {
+    throw new Error("Dust workspace mismatch");
+  }
+  const pocEmbeddingProvider = await selectPocEmbeddingProviderForAuth(
+    auth,
+    owner.sId
+  );
+
   return withTransaction(
     async (
       t
@@ -1156,7 +1187,9 @@ export async function createDataSourceWithoutProvider(
       }
 
       const dataSourceEmbedder =
-        owner.defaultEmbeddingProvider ?? DEFAULT_EMBEDDING_PROVIDER_ID;
+        pocEmbeddingProvider ??
+        owner.defaultEmbeddingProvider ??
+        DEFAULT_EMBEDDING_PROVIDER_ID;
       const embedderConfig = EMBEDDING_CONFIGS[dataSourceEmbedder];
       const coreAPI = new CoreAPI(config.getCoreAPIConfig(), logger);
 
@@ -1172,7 +1205,9 @@ export async function createDataSourceWithoutProvider(
 
       let credentials: LLMCredentialsType;
       try {
-        credentials = await getLlmCredentials(auth);
+        credentials = await getLlmCredentials(auth, {
+          skipEmbeddingApiKeyRequirement: dataSourceEmbedder === "vertex_ai",
+        });
       } catch (err) {
         logger.error(
           { error: normalizeError(err) },

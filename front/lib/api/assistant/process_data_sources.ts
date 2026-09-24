@@ -1,6 +1,7 @@
 import type { AgentActionSpecification } from "@app/lib/actions/types/agent";
 import { runMultiActionsAgent } from "@app/lib/api/assistant/call_llm";
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertionsForSingles } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
@@ -64,7 +65,9 @@ export async function processDataSources({
     topK,
     credentials,
     true,
-    coreDataSourceSearchCriterias
+    coreDataSourceSearchCriterias,
+    undefined,
+    (pairs) => createCoreWorkspaceAssertionsForSingles(auth, pairs)
   );
 
   if (searchResults.isErr()) {

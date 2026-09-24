@@ -1,4 +1,5 @@
 import config from "@app/lib/api/config";
+import { isConfiguredPocVertexEmbeddingWorkspace } from "@app/lib/api/dust_poc_mode";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
 import { isByokTransitioningPlan } from "@app/lib/plans/plan_codes";
@@ -88,6 +89,8 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  *
  * By default, BYOK workspaces must have `OPENAI_EMBEDDING_API_KEY` configured
  * (used by search, upsert, data source creation).
+ * Configured Vertex POC workspaces omit this OpenAI-only requirement; Core's
+ * signed workspace assertion and route gate still authorize provider I/O.
  * Pass `skipEmbeddingApiKeyRequirement: true` for call sites that only need LLM
  * keys (agent loop, token counting, image generation, etc.).
  */
@@ -147,7 +150,10 @@ export async function getLlmCredentials(
     }))
   );
 
-  if (!skipEmbeddingApiKeyRequirement) {
+  if (
+    !skipEmbeddingApiKeyRequirement &&
+    !isConfiguredPocVertexEmbeddingWorkspace(auth.getNonNullableWorkspace().sId)
+  ) {
     assert(
       credentials.OPENAI_EMBEDDING_API_KEY,
       "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."

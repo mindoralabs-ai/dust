@@ -156,13 +156,46 @@ export function usageToTokenUsageEvent(
   metadata: EndpointMetadata,
   usage: GenerateContentResponseUsageMetadata | undefined
 ): TokenUsageEvent {
-  const cacheHit = usage?.cachedContentTokenCount ?? 0;
+  const isCount = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const isOptionalCount = (value: unknown): value is number | undefined =>
+    value === undefined || isCount(value);
+  const prompt = usage?.promptTokenCount;
+  const candidates = usage?.candidatesTokenCount;
+  const thoughts = usage?.thoughtsTokenCount;
+  const toolUse = usage?.toolUsePromptTokenCount;
+  const cached = usage?.cachedContentTokenCount;
+  const reportedTotal = usage?.totalTokenCount;
+
+  const basicCountsValid =
+    isCount(prompt) &&
+    isCount(candidates) &&
+    isOptionalCount(thoughts) &&
+    isOptionalCount(toolUse) &&
+    isOptionalCount(cached) &&
+    isOptionalCount(reportedTotal);
+  const safeCount = (value: unknown): number => (isCount(value) ? value : 0);
+  const rawInput = safeCount(prompt) + safeCount(toolUse);
+  const rawOutput = safeCount(candidates) + safeCount(thoughts);
+  const totalInput = Number.isSafeInteger(rawInput) ? rawInput : 0;
+  const totalOutput = Number.isSafeInteger(rawOutput) ? rawOutput : 0;
+  const exact =
+    basicCountsValid &&
+    Number.isSafeInteger(rawInput) &&
+    Number.isSafeInteger(rawOutput) &&
+    Number.isSafeInteger(totalInput + totalOutput) &&
+    (cached ?? 0) <= totalInput &&
+    // Any unexplained excess may include other modalities that these counts
+    // cannot attribute, so it is not exact billable usage.
+    (reportedTotal === undefined || reportedTotal === totalInput + totalOutput);
+
+  // Keep available safe counts for existing consumers when metadata is partial;
+  // accountingStatus tells the Dust journal these are not exact billed usage.
+  const cacheHit = Math.min(safeCount(cached), totalInput);
   // Gemini's promptTokenCount includes cached and tool-use input tokens;
   // subtract the cached portion so it is not counted twice against pricing.
-  const totalInput =
-    (usage?.promptTokenCount ?? 0) + (usage?.toolUsePromptTokenCount ?? 0);
-  const candidateTokens = usage?.candidatesTokenCount ?? 0;
-  const reasoning = usage?.thoughtsTokenCount;
+  const reasoning =
+    Number.isSafeInteger(rawOutput) && isCount(thoughts) ? thoughts : undefined;
   return {
     type: "token_usage",
     content: {
@@ -172,10 +205,11 @@ export function usageToTokenUsageEvent(
       longCacheCreated: 0,
       shortCacheCreated: 0,
       cacheHit,
-      standardInput: Math.max(0, totalInput - cacheHit),
+      standardInput: totalInput - cacheHit,
       // Gemini reports candidate and thought tokens separately, while Dust's
       // totalOutput contract is the inclusive billed output total.
-      totalOutput: candidateTokens + (reasoning ?? 0),
+      totalOutput,
+      accountingStatus: exact ? "exact" : "unknown",
       ...(reasoning !== undefined ? { reasoning } : {}),
     },
     metadata,
@@ -192,6 +226,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.MAX_TOKENS:
       return buildErrorEvent({
         errorSource: "dust",
+        providerCompleted: true,
         metadata,
         type: "stop_error",
         message: "The maximum response length was reached.",
@@ -206,6 +241,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.LANGUAGE:
       return buildErrorEvent({
         errorSource: "dust",
+        providerCompleted: true,
         metadata,
         type: "refusal_error",
         message:
@@ -215,6 +251,7 @@ export function finishReasonToErrorEvent(
     case FinishReason.UNEXPECTED_TOOL_CALL:
       return buildErrorEvent({
         errorSource: "unknown",
+        providerCompleted: true,
         metadata,
         type: "model_output_error",
         message: `Model generated an invalid tool call for ${metadata.model}.`,
@@ -224,6 +261,7 @@ export function finishReasonToErrorEvent(
     default:
       return buildErrorEvent({
         errorSource: "provider",
+        providerCompleted: true,
         metadata,
         type: "unknown_error",
         message: `Unexpected finish reason from Google: ${finishReason}.`,
@@ -457,7 +495,9 @@ export async function* rawOutputToEvents(
         candidate.finishReason
       );
       if (errorEvent) {
-        // Terminal failure: surface the error and stop without a success event.
+        // Any completed provider response can carry billable usage, including
+        // malformed tool calls and other non-success finish reasons.
+        yield converters.usageToTokenUsageEvent(metadata, usage);
         yield errorEvent;
         return;
       }

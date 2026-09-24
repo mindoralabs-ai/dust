@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock distributed lock to avoid Redis dependency
 vi.mock("@app/lib/lock", () => ({
@@ -33,6 +33,7 @@ import { DEFAULT_QDRANT_CLUSTER } from "@app/types/core/data_source";
 import { Err, Ok } from "@app/types/shared/result";
 
 describe("createDataSourceAndConnectorForProject", () => {
+  afterEach(() => vi.unstubAllEnvs());
   let workspace: Awaited<ReturnType<typeof WorkspaceFactory.basic>>;
   let adminAuth: Authenticator;
   let globalGroup: GroupResource;
@@ -445,8 +446,15 @@ describe("createDataSourceAndConnectorForProject", () => {
       );
 
       // Call again - should verify everything exists and return early without creating anything
+      // The operator uses an internal admin without a user. Existing Core
+      // components must be repairable even in a configured POC workspace.
+      vi.stubEnv("DUST_POC_MODE", "1");
+      vi.stubEnv("DUST_POC_WORKSPACE_IDS", workspace.sId);
+      const internalAdmin = await Authenticator.internalAdminForWorkspace(
+        workspace.sId
+      );
       const secondResult = await createDataSourceAndConnectorForProject(
-        adminAuth,
+        internalAdmin,
         projectSpace
       );
       expect(secondResult.isOk()).toBe(true);

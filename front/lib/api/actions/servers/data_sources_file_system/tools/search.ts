@@ -16,6 +16,7 @@ import type { ToolRunContext } from "@app/lib/actions/types";
 import { isAgentLoopRunContext } from "@app/lib/actions/types";
 import { getRefs } from "@app/lib/api/assistant/citations";
 import config from "@app/lib/api/config";
+import { prepareCoreWorkspaceAssertionsForBatches } from "@app/lib/api/core_workspace_assertion";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import { getDisplayNameForDocument } from "@app/lib/data_sources";
@@ -121,7 +122,9 @@ export async function search(
         },
         view_filter: args.view_filter,
       };
-    })
+    }),
+    undefined,
+    (pairs) => prepareCoreWorkspaceAssertionsForBatches(auth, pairs)
   );
 
   if (searchResults.isErr()) {

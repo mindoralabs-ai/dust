@@ -77,6 +77,14 @@ app.post(
 
     if (upsertResult.isErr()) {
       switch (upsertResult.error.code) {
+        case "ambiguous_provider_effect":
+          return apiError(ctx, {
+            status_code: 409,
+            api_error: {
+              type: "data_source_error",
+              message: upsertResult.error.message,
+            },
+          });
         case "data_source_quota_error":
           return apiError(ctx, {
             status_code: 401,

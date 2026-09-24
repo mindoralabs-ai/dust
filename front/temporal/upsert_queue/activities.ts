@@ -1,4 +1,5 @@
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { decodeBuffer } from "@app/lib/api/files/utils";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { Authenticator } from "@app/lib/auth";
@@ -128,9 +129,21 @@ export async function upsertDocumentActivity(
     lightDocumentOutput: true,
     mimeType: upsertQueueItem.mimeType,
     title: upsertQueueItem.title,
+    workspaceAssertion: await createCoreWorkspaceAssertion(auth, [
+      {
+        projectId: dataSource.dustAPIProjectId,
+        dataSourceId: dataSource.dustAPIDataSourceId,
+      },
+    ]),
   });
 
   if (upsertRes.isErr()) {
+    if (upsertRes.error.code === "ambiguous_provider_effect") {
+      throw ApplicationFailure.nonRetryable(
+        "Vertex embedding outcome is unknown; manual reconciliation required",
+        "ambiguous_provider_effect"
+      );
+    }
     logger.error(
       {
         error: upsertRes.error,

@@ -118,6 +118,8 @@ export interface TokenUsage {
   // Reasoning and thinking portion of totalOutputTokens.
   reasoningTokens?: number;
   totalTokens: number;
+  // Carried from provider metadata for tenant-local exact usage accounting.
+  accountingStatus?: "exact" | "unknown";
   // Raw input tokens after the last cache breakpoint (not from cache).
   // This is the raw `input_tokens` value from providers that support caching.
   uncachedInputTokens?: number;

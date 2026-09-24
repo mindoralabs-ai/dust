@@ -7,6 +7,7 @@ import { toFileContentFragment } from "@app/lib/api/assistant/conversation/conte
 import { getLightConversation } from "@app/lib/api/assistant/conversation/fetch";
 import { postUserMessageAndWaitForCompletion } from "@app/lib/api/assistant/streaming/blocking";
 import config from "@app/lib/api/config";
+import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assertion";
 import { sendEmailWithTemplate } from "@app/lib/api/email";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { Authenticator } from "@app/lib/auth";
@@ -31,6 +32,7 @@ import { isProviderWithDefaultWorkspaceConfiguration } from "@app/types/oauth/li
 import { Err } from "@app/types/shared/result";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import { isEmptyString } from "@app/types/shared/utils/general";
+import { ApplicationFailure } from "@temporalio/common";
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 import { UniqueConstraintError } from "sequelize";
@@ -449,9 +451,56 @@ export async function processTranscriptActivity(
       lightDocumentOutput: true,
       title: transcriptTitle,
       mimeType: "text/plain",
+      workspaceAssertion: await createCoreWorkspaceAssertion(workspaceAuth, [
+        {
+          projectId: dataSource.dustAPIProjectId,
+          dataSourceId: dataSource.dustAPIDataSourceId,
+        },
+      ]),
     });
 
     if (upsertRes.isErr()) {
+      if (upsertRes.error.code === "ambiguous_provider_effect") {
+        try {
+          await transcriptsConfiguration.recordHistory({
+            fileId,
+            fileName: transcriptTitle.substring(0, 255),
+            workspace: owner,
+            manualReviewRequired: true,
+          });
+        } catch (error) {
+          if (!(error instanceof UniqueConstraintError)) {
+            // A failed marker cannot authorize another paid upsert retry.
+            // Also stop future scheduled batches until an operator reconciles it.
+            try {
+              const stopped = await stopRetrieveTranscriptsWorkflow(
+                transcriptsConfiguration,
+                false
+              );
+              if (stopped.isErr()) {
+                localLogger.error(
+                  {},
+                  "[processTranscriptActivity] Could not stop transcript schedule after ambiguous embedding."
+                );
+              }
+            } catch {
+              localLogger.error(
+                {},
+                "[processTranscriptActivity] Could not stop transcript schedule after ambiguous embedding."
+              );
+            }
+            throw ApplicationFailure.nonRetryable(
+              "Transcript embedding outcome is unknown; manual reconciliation required",
+              "ambiguous_provider_effect"
+            );
+          }
+        }
+        localLogger.warn(
+          {},
+          "[processTranscriptActivity] Embedding outcome requires manual reconciliation."
+        );
+        return;
+      }
       localLogger.error(
         {
           dataSourceViewId: transcriptsConfiguration.dataSourceViewId,

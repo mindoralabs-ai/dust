@@ -35,6 +35,7 @@ export interface LLMErrorInfo {
   isRetryable: boolean;
   originalError?: unknown;
   errorSource: ErrorSource;
+  providerCompleted?: boolean;
 }
 
 export function handleGenericError(

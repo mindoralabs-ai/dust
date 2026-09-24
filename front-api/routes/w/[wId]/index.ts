@@ -433,6 +433,15 @@ app.post(
       "whiteListedProviders" in body &&
       "defaultEmbeddingProvider" in body
     ) {
+      if (body.defaultEmbeddingProvider === "vertex_ai") {
+        return apiError(ctx, {
+          status_code: 400,
+          api_error: {
+            type: "invalid_request_error",
+            message: "Vertex embedding cannot be set as a workspace default.",
+          },
+        });
+      }
       await workspace.updateWorkspaceSettings({
         whiteListedProviders: body.whiteListedProviders,
         defaultEmbeddingProvider: body.defaultEmbeddingProvider,
