@@ -1,0 +1,6 @@
+@cc [owner:jchen0824,label:architecture] search-bootstrap-runtime-assets
+The core runtime image must contain `elasticsearch_create_index`,
+`qdrant_create_collection`, and the core Elasticsearch index settings/mappings.
+The front-workers image must contain the bundled front index bootstrap and its
+settings/mappings. Deployment bootstrap runs these from their expected working
+directories with a region whose settings files are packaged in the images.

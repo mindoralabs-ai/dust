@@ -115,6 +115,22 @@ jobs:
             --build-arg NEXT_PUBLIC_DUST_API_URL=http://localhost:3000 \
             --build-arg NEXT_PUBLIC_DUST_APP_URL=http://localhost:8080 \
             --tag "mindora-dust-${BUILD_KEY}:${GITHUB_SHA}" .
+      - name: Smoke search bootstrap artifacts in built image
+        if: matrix.target == 'core' || matrix.target == 'workers'
+        env:
+          BUILD_KEY: ${{ matrix.build_key }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          image="mindora-dust-${BUILD_KEY}:${GITHUB_SHA}"
+          if [ "$TARGET" = core ]; then
+            docker run --rm --entrypoint /usr/local/bin/elasticsearch_create_index "$image" --help >/dev/null
+            docker run --rm --entrypoint /usr/local/bin/qdrant_create_collection "$image" --help >/dev/null
+            docker run --rm --entrypoint /bin/sh "$image" -ec \
+              'test -s /app/core/src/search_stores/indices/data_sources_nodes_4.settings.asia-southeast1.json'
+          else
+            docker run --rm --entrypoint /bin/sh "$image" -ec \
+              'test -s /app/front/dist/create_elasticsearch_index.js && test -s /app/front/lib/user_search/indices/user_search_1.settings.asia-southeast1.json && node --check /app/front/dist/create_elasticsearch_index.js'
+          fi
       - name: Record local build evidence
         env:
           BUILD_KEY: ${{ matrix.build_key }}

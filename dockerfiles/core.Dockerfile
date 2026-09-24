@@ -12,7 +12,8 @@ COPY /core/ .
 ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,id=core-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=core-cargo-git,target=/usr/local/cargo/git \
-    cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin core-api --bin sqlite-worker --bin check_table --bin init_db
+    cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin core-api --bin sqlite-worker --bin check_table --bin init_db \
+      --bin elasticsearch_create_index --bin qdrant_create_collection
 
 # Runtime stage — only the compiled binaries + minimal system libs
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS core
@@ -27,6 +28,10 @@ COPY --from=builder /app/target/release/core-api /usr/local/bin/core-api
 COPY --from=builder /app/target/release/sqlite-worker /usr/local/bin/sqlite-worker
 COPY --from=builder /app/target/release/check_table /usr/local/bin/check_table
 COPY --from=builder /app/target/release/init_db /usr/local/bin/init_db
+COPY --from=builder /app/target/release/elasticsearch_create_index /usr/local/bin/elasticsearch_create_index
+COPY --from=builder /app/target/release/qdrant_create_collection /usr/local/bin/qdrant_create_collection
+# elasticsearch_create_index reads its selected-region settings and mappings at runtime.
+COPY --from=builder /app/src/search_stores/indices /app/core/src/search_stores/indices
 
 ARG COMMIT_HASH
 ARG COMMIT_HASH_LONG
