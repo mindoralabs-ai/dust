@@ -1205,7 +1205,12 @@ impl Embedder for MistralEmbedder {
         batch_tokenize_async(self.tokenizer(), texts).await
     }
 
-    async fn embed(&self, text: Vec<&str>, _extras: Option<Value>) -> Result<Vec<EmbedderVector>> {
+    async fn embed(
+        &self,
+        text: Vec<&str>,
+        _task_type: crate::providers::embedder::EmbeddingTaskType,
+        _extras: Option<Value>,
+    ) -> Result<Vec<EmbedderVector>> {
         let api_key = match self.api_key.clone() {
             Some(key) => key,
             None => Err(anyhow!("MISTRAL_API_KEY is not set."))?,

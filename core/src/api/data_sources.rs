@@ -4,6 +4,7 @@ use axum::{
 };
 use futures::stream::{iter, StreamExt};
 use hyper::http::StatusCode;
+use hyper::HeaderMap;
 use regex::Regex;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -14,6 +15,10 @@ use crate::{
     api::api_state::APIState,
     data_sources::data_source::{Chunk, DataSource, Document},
     providers::embedder::EmbedderRequest,
+    providers::provider::ProviderID,
+    providers::vertex_ai::AmbiguousVertexEffect,
+    quota_admission::AdmissionError,
+    workspace_assertion::{self, DataSourcePair, VerifiedWorkspace},
 };
 use crate::{
     data_sources::{
@@ -412,6 +417,7 @@ pub struct DatasourceSearchPayload {
 pub async fn data_sources_search(
     Path((project_id, data_source_id)): Path<(i64, String)>,
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DatasourceSearchPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     let project = project::Project::new_from_id(project_id);
@@ -433,42 +439,95 @@ pub async fn data_sources_search(
                 &format!("No data source found for id `{}`", data_source_id),
                 None,
             ),
-            Some(ds) => match ds
-                .search(
-                    payload.credentials,
-                    state.store.clone(),
-                    state.qdrant_clients.clone(),
-                    &payload.query,
-                    payload.top_k,
-                    match payload.filter {
-                        Some(filter) => Some(filter.postprocess_for_data_source(&data_source_id)),
-                        None => None,
-                    },
-                    match payload.view_filter {
-                        Some(filter) => Some(filter.postprocess_for_data_source(&data_source_id)),
-                        None => None,
-                    },
-                    payload.full_text,
-                    payload.target_document_tokens,
-                )
-                .await
-            {
-                Ok(documents) => (
-                    StatusCode::OK,
-                    Json(APIResponse {
-                        error: None,
-                        response: Some(json!({
-                            "documents": documents,
-                        })),
-                    }),
-                ),
-                Err(e) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_server_error",
-                    "Failed to perform the search",
-                    Some(e),
-                ),
-            },
+            Some(ds) => {
+                let workspace = if ds.embedder_config().provider_id == ProviderID::VertexAI
+                    && payload
+                        .query
+                        .as_ref()
+                        .is_some_and(|query| !query.is_empty())
+                {
+                    match workspace_assertion::verify(
+                        headers
+                            .get(workspace_assertion::HEADER)
+                            .and_then(|h| h.to_str().ok()),
+                        &[DataSourcePair {
+                            project_id,
+                            data_source_id: data_source_id.clone(),
+                        }],
+                    ) {
+                        Some(w) => Some(w),
+                        None => {
+                            return error_response(
+                                StatusCode::FORBIDDEN,
+                                "invalid_workspace_assertion",
+                                "Vertex workspace assertion is required",
+                                None,
+                            )
+                        }
+                    }
+                } else {
+                    None
+                };
+                match ds
+                    .search(
+                        payload.credentials,
+                        workspace,
+                        state.store.clone(),
+                        state.qdrant_clients.clone(),
+                        &payload.query,
+                        payload.top_k,
+                        match payload.filter {
+                            Some(filter) => {
+                                Some(filter.postprocess_for_data_source(&data_source_id))
+                            }
+                            None => None,
+                        },
+                        match payload.view_filter {
+                            Some(filter) => {
+                                Some(filter.postprocess_for_data_source(&data_source_id))
+                            }
+                            None => None,
+                        },
+                        payload.full_text,
+                        payload.target_document_tokens,
+                    )
+                    .await
+                {
+                    Ok(documents) => (
+                        StatusCode::OK,
+                        Json(APIResponse {
+                            error: None,
+                            response: Some(json!({
+                                "documents": documents,
+                            })),
+                        }),
+                    ),
+                    Err(e)
+                        if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) =>
+                    {
+                        error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "quota_exceeded",
+                            "Dust token quota exceeded",
+                            Some(e),
+                        )
+                    }
+                    Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ambiguous_provider_effect",
+                            "Vertex provider effect requires accounting review",
+                            Some(e),
+                        )
+                    }
+                    Err(e) => error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_server_error",
+                        "Failed to perform the search",
+                        Some(e),
+                    ),
+                }
+            }
         },
     }
 }
@@ -507,6 +566,7 @@ const MAX_DATA_SOURCES_PER_REQUEST: usize = 100;
 
 pub async fn data_sources_search_bulk(
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DataSourcesSearchBulkPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     if payload.searches.len() > MAX_DATA_SOURCES_PER_REQUEST {
@@ -575,6 +635,41 @@ pub async fn data_sources_search_bulk(
         }
     }
 
+    // Check every requested pair before starting any concurrently grouped embedding.
+    let vertex_requested = !payload.query.is_empty()
+        && groups
+            .values()
+            .flatten()
+            .any(|(_, ds)| ds.embedder_config().provider_id == ProviderID::VertexAI);
+    let workspace = if vertex_requested {
+        let pairs: Vec<_> = groups
+            .values()
+            .flatten()
+            .map(|(req, _)| DataSourcePair {
+                project_id: req.project_id,
+                data_source_id: req.data_source_id.clone(),
+            })
+            .collect();
+        match workspace_assertion::verify(
+            headers
+                .get(workspace_assertion::HEADER)
+                .and_then(|h| h.to_str().ok()),
+            &pairs,
+        ) {
+            Some(w) => Some(w),
+            None => {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "invalid_workspace_assertion",
+                    "Vertex workspace assertion is required",
+                    None,
+                )
+            }
+        }
+    } else {
+        None
+    };
+
     // Embed and search for each group concurrently.
     let group_futures: Vec<_> = groups
         .into_iter()
@@ -583,37 +678,44 @@ pub async fn data_sources_search_bulk(
             let query = payload.query.clone();
             let full_text = payload.full_text;
             let state = state.clone();
+            let workspace = workspace.clone();
 
             async move {
                 // Get embedder from first data source in group.
                 let first_ds = &group[0].1;
                 let embedder_config = first_ds.embedder_config();
 
-                // Embed query once per group.
-                let embedder_request = EmbedderRequest::new(
-                    embedder_config.provider_id,
-                    &model_id,
-                    vec![&query],
-                    first_ds.config().extras.clone(),
-                );
-
-                // If any embedding fails, return error for this group.
-                let query_vector = match embedder_request.execute(credentials).await {
-                    Ok(v) => {
-                        if v.len() != 1 {
-                            return Err(format!(
-                                "Expected exactly one embedding vector, got {}",
-                                v.len()
-                            ));
-                        }
-                        Some(v[0].vector.iter().map(|v| *v as f32).collect::<Vec<f32>>())
-                    }
-                    Err(e) => {
-                        return Err(format!(
-                            "Failed to embed query with model {}: {}",
-                            model_id, e
+                // An empty query is a filter-only search and has no provider effect.
+                let query_vector = if query.is_empty() {
+                    None
+                } else {
+                    let embedder_request = EmbedderRequest::new(
+                        embedder_config.provider_id,
+                        &model_id,
+                        vec![&query],
+                        crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
+                        first_ds.config().extras.clone(),
+                    )
+                    .with_verified_workspace(workspace);
+                    let vectors = embedder_request
+                        .execute(credentials)
+                        .await
+                        .map_err(|error| {
+                            error.context(format!("Failed to embed query with model {}", model_id))
+                        })?;
+                    if vectors.len() != 1 {
+                        return Err(anyhow::anyhow!(
+                            "Expected exactly one embedding vector, got {}",
+                            vectors.len()
                         ));
                     }
+                    Some(
+                        vectors[0]
+                            .vector
+                            .iter()
+                            .map(|value| *value as f32)
+                            .collect::<Vec<f32>>(),
+                    )
                 };
 
                 // Search all data sources in this group with the same vector.
@@ -687,12 +789,28 @@ pub async fn data_sources_search_bulk(
     for group_result in group_results {
         match group_result {
             Ok(results) => all_results.extend(results),
+            Err(e) if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) => {
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "quota_exceeded",
+                    "Dust token quota exceeded",
+                    Some(e),
+                );
+            }
+            Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ambiguous_provider_effect",
+                    "Vertex provider effect requires accounting review",
+                    Some(e),
+                );
+            }
             Err(e) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "embedding_error",
-                    &e,
-                    None,
+                    "Failed to embed query",
+                    Some(e),
                 );
             }
         }
@@ -996,6 +1114,7 @@ pub struct DataSourcesDocumentsUpsertPayload {
 pub async fn data_sources_documents_upsert(
     Path((project_id, data_source_id)): Path<(i64, String)>,
     State(state): State<Arc<APIState>>,
+    headers: HeaderMap,
     Json(payload): Json<DataSourcesDocumentsUpsertPayload>,
 ) -> (StatusCode, Json<APIResponse>) {
     let project = project::Project::new_from_id(project_id);
@@ -1062,9 +1181,37 @@ pub async fn data_sources_documents_upsert(
                 None,
             ),
             Some(ds) => {
+                let vertex_requested = ds.embedder_config().provider_id == ProviderID::VertexAI
+                    || ds
+                        .shadow_embedder_config()
+                        .is_some_and(|e| e.provider_id == ProviderID::VertexAI);
+                let workspace: Option<VerifiedWorkspace> = if vertex_requested {
+                    match workspace_assertion::verify(
+                        headers
+                            .get(workspace_assertion::HEADER)
+                            .and_then(|h| h.to_str().ok()),
+                        &[DataSourcePair {
+                            project_id,
+                            data_source_id: data_source_id.clone(),
+                        }],
+                    ) {
+                        Some(w) => Some(w),
+                        None => {
+                            return error_response(
+                                StatusCode::FORBIDDEN,
+                                "invalid_workspace_assertion",
+                                "Vertex workspace assertion is required",
+                                None,
+                            )
+                        }
+                    }
+                } else {
+                    None
+                };
                 match ds
                     .upsert(
                         payload.credentials,
+                        workspace,
                         state.store.clone(),
                         state.qdrant_clients.clone(),
                         &payload.document_id,
@@ -1081,6 +1228,24 @@ pub async fn data_sources_documents_upsert(
                     )
                     .await
                 {
+                    Err(e)
+                        if e.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Denied) =>
+                    {
+                        error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "quota_exceeded",
+                            "Dust token quota exceeded",
+                            Some(e),
+                        )
+                    }
+                    Err(e) if e.downcast_ref::<AmbiguousVertexEffect>().is_some() => {
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ambiguous_provider_effect",
+                            "Vertex provider effect requires accounting review",
+                            Some(e),
+                        )
+                    }
                     Err(e) => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_server_error",

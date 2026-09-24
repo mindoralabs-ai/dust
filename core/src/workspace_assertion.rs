@@ -4,6 +4,8 @@ use std::collections::HashSet;
 
 pub const HEADER: &str = "x-dust-workspace-assertion";
 const AUDIENCE: &str = "dust-core-vertex-embedding";
+#[cfg(test)]
+pub(crate) static TEST_SECRET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct DataSourcePair {
@@ -90,6 +92,7 @@ mod tests {
 
     #[test]
     fn forged_missing_expired_and_partial_bulk_assertions_fail() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
         let secret = "test-secret-".repeat(4);
         std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
         let a = DataSourcePair {
@@ -142,7 +145,37 @@ mod tests {
     }
 
     #[test]
+    fn caller_extras_cannot_override_verified_workspace() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
+        use crate::providers::embedder::{EmbedderRequest, EmbeddingTaskType};
+        use crate::providers::provider::ProviderID;
+        let secret = "test-secret-".repeat(4);
+        std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
+        let pair = DataSourcePair {
+            project_id: 1,
+            data_source_id: "a".into(),
+        };
+        let future = (crate::utils::now() / 1000 + 60) as usize;
+        let workspace = verify(
+            Some(&token(&secret, AUDIENCE, future, vec![pair.clone()])),
+            &[pair],
+        )
+        .expect("valid workspace assertion");
+        let request = EmbedderRequest::new(
+            ProviderID::VertexAI,
+            "gemini-embedding-2-1536",
+            vec!["query"],
+            EmbeddingTaskType::RetrievalQuery,
+            Some(serde_json::json!({"workspace_sid": "forged", "_dust_verified_workspace_sid": "forged"})),
+        ).with_verified_workspace(Some(workspace));
+        assert_eq!(request.verified_workspace_sid(), Some("w-test"));
+        let serialized = serde_json::to_value(&request).expect("serializable embedder request");
+        assert!(serialized.get("verified_workspace").is_none());
+    }
+
+    #[test]
     fn repeated_authorized_pair_is_allowed_but_new_pair_is_not() {
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
         let secret = "test-secret-".repeat(4);
         std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", &secret);
         let a = DataSourcePair {

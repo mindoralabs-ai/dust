@@ -627,7 +627,12 @@ impl Embedder for AnthropicEmbedder {
         batch_tokenize_async(anthropic_base_singleton(), texts).await
     }
 
-    async fn embed(&self, _text: Vec<&str>, _extras: Option<Value>) -> Result<Vec<EmbedderVector>> {
+    async fn embed(
+        &self,
+        _text: Vec<&str>,
+        _task_type: crate::providers::embedder::EmbeddingTaskType,
+        _extras: Option<Value>,
+    ) -> Result<Vec<EmbedderVector>> {
         Err(anyhow!("Embeddings not available for provider `anthropic`"))
     }
 }

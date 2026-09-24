@@ -13,6 +13,7 @@ use crate::search_filter::{Filterable, SearchFilter};
 use crate::search_stores::search_store::{Indexable, NodeItem, SearchStore};
 use crate::stores::store::{DocumentCreateParams, Store};
 use crate::utils;
+use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -55,6 +56,15 @@ impl Section {
             self.sections.iter().map(|s| s.full_text()).join("")
         )
     }
+}
+
+fn embedding_upsert_key(data_source_id: &str, document_id_hash: &str, text: &Section) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [data_source_id, document_id_hash, &text.full_text()] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// A Chunk is a subset of a document that was inserted into vector search db. `hash` covers both
@@ -708,6 +718,7 @@ impl DataSource {
     pub async fn upsert(
         &self,
         credentials: Credentials,
+        workspace: Option<VerifiedWorkspace>,
         store: Box<dyn Store + Sync + Send>,
         qdrant_clients: QdrantClients,
         document_id: &str,
@@ -827,6 +838,7 @@ impl DataSource {
                 &text,
                 // Cache is used for the main collection.
                 true,
+                workspace.clone(),
             )
             .await?;
 
@@ -843,6 +855,7 @@ impl DataSource {
                 &text,
                 // Cache is not used when writing to the shadow collection.
                 false,
+                workspace,
             )
             .await?;
         }
@@ -890,6 +903,7 @@ impl DataSource {
         document_hash: &str,
         text: &Section,
         use_cache: bool,
+        workspace: Option<VerifiedWorkspace>,
     ) -> Result<Document> {
         let qdrant_client = self.main_qdrant_client(qdrant_clients);
 
@@ -1023,6 +1037,14 @@ impl DataSource {
 
         let mut extras = self.config.extras.clone().unwrap_or(json!({}));
         extras["enforce_rate_limit_margin"] = json!(true);
+        // The document hash can include a generated current timestamp when
+        // callers omit one. Bind the paid-input reservation to stable content
+        // instead, so retries cannot dispatch the same chunks again.
+        extras["dust_poc_upsert_key"] = json!(embedding_upsert_key(
+            &self.data_source_id,
+            document_id_hash,
+            text
+        ));
 
         // Embed batched chunks sequentially.
         for chunk in chunked_splits {
@@ -1030,11 +1052,21 @@ impl DataSource {
                 embedder_config.provider_id.clone(),
                 &embedder_config.model_id,
                 chunk.iter().map(|ci| ci.text.as_str()).collect::<Vec<_>>(),
+                crate::providers::embedder::EmbeddingTaskType::RetrievalDocument,
                 Some(extras.clone()),
-            );
+            )
+            .with_verified_workspace(workspace.clone());
 
             let v = match r.execute(credentials.clone()).await {
                 Ok(v) => v,
+                Err(e)
+                    if e.downcast_ref::<crate::quota_admission::AdmissionError>()
+                        == Some(&crate::quota_admission::AdmissionError::Denied)
+                        || e.downcast_ref::<crate::providers::vertex_ai::AmbiguousVertexEffect>()
+                            .is_some() =>
+                {
+                    return Err(e);
+                }
                 Err(e) => Err(anyhow!("DataSource chunk embedding error: {}", e))?,
             };
 
@@ -1244,6 +1276,7 @@ impl DataSource {
     pub async fn search(
         &self,
         credentials: Credentials,
+        workspace: Option<VerifiedWorkspace>,
         store: Box<dyn Store + Sync + Send>,
         qdrant_clients: QdrantClients,
         query: &Option<String>,
@@ -1286,8 +1319,10 @@ impl DataSource {
                     self.embedder_config().provider_id,
                     &self.embedder_config().model_id,
                     vec![&q],
+                    crate::providers::embedder::EmbeddingTaskType::RetrievalQuery,
                     self.config.extras.clone(),
-                );
+                )
+                .with_verified_workspace(workspace);
                 let v = r.execute(credentials).await?;
                 if v.len() != 1 {
                     return Err(anyhow!(
@@ -2534,6 +2569,35 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn embedding_upsert_key_is_stable_without_a_document_timestamp() {
+        let text = Section {
+            prefix: None,
+            content: Some("Repeated content".to_string()),
+            sections: vec![],
+        };
+        let key = embedding_upsert_key("data-source", "document-id", &text);
+        assert_eq!(
+            key,
+            embedding_upsert_key("data-source", "document-id", &text)
+        );
+        assert_ne!(
+            key,
+            embedding_upsert_key("data-source", "another-id", &text)
+        );
+        assert_ne!(
+            key,
+            embedding_upsert_key(
+                "data-source",
+                "document-id",
+                &Section {
+                    content: Some("Updated content".to_string()),
+                    ..text
+                },
+            )
+        );
     }
 
     #[test]

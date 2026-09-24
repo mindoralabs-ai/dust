@@ -17,6 +17,7 @@ const START_TIMEOUT_MS: i64 = 5 * 60 * 1000;
 const CLAIM_LEASE_MS: i64 = 60 * 1000;
 const RETRY_DELAY_MS: i64 = 60 * 1000;
 const REVIEW_DEADLINE_MS: i64 = 24 * 60 * 60 * 1000;
+const EMBEDDING_RESULT_RETRY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreUsageAttempt {
@@ -61,6 +62,17 @@ pub struct EmbeddingUsage {
     pub input_tokens: u32,
 }
 
+#[derive(Debug)]
+pub struct PaidEmbeddingRecoveryRequired;
+
+impl std::fmt::Display for PaidEmbeddingRecoveryRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "paid embedding result requires manual recovery")
+    }
+}
+
+impl std::error::Error for PaidEmbeddingRecoveryRequired {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimedWork {
     pub attempt_id: String,
@@ -103,6 +115,11 @@ impl CoreUsageJournal {
         };
         let conn = journal.connection()?;
         conn.execute_batch(MIGRATION)?;
+        conn.execute(
+            "UPDATE dust_embedding_results SET vector_json = NULL
+             WHERE created_at_ms < ?1 AND vector_json IS NOT NULL",
+            [now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS],
+        )?;
         Ok(journal)
     }
 
@@ -218,6 +235,25 @@ impl CoreUsageJournal {
     }
 
     pub fn start(&self, attempt: &CoreUsageAttempt) -> Result<StartOutcome> {
+        self.start_inner(attempt, None)
+    }
+
+    /// Reserve an upsert input in the same durable transaction as its attempt.
+    /// A duplicate may not obtain a dispatch permit, even while the first
+    /// provider request is still in flight or after an ambiguous crash.
+    pub fn start_embedding(
+        &self,
+        attempt: &CoreUsageAttempt,
+        input_hash: &[u8; 32],
+    ) -> Result<StartOutcome> {
+        self.start_inner(attempt, Some(input_hash))
+    }
+
+    fn start_inner(
+        &self,
+        attempt: &CoreUsageAttempt,
+        input_hash: Option<&[u8; 32]>,
+    ) -> Result<StartOutcome> {
         validate_attempt(attempt)?;
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -261,6 +297,20 @@ impl CoreUsageJournal {
                 bail!("conflicting Core usage attempt identity");
             }
         }
+        if inserted == 1 {
+            if let Some(input_hash) = input_hash {
+                let reserved = tx.execute(
+                    "INSERT OR IGNORE INTO dust_embedding_results
+                     (input_hash, attempt_id, vector_json, created_at_ms)
+                     VALUES (?1, ?2, NULL, ?3)",
+                    params![input_hash.as_slice(), attempt.attempt_id, now],
+                )?;
+                if reserved == 0 {
+                    // Dropping the transaction also rolls back the new attempt.
+                    return Ok(StartOutcome::Duplicate);
+                }
+            }
+        }
         tx.commit()?;
         Ok(if inserted == 1 {
             StartOutcome::Created(CreatedPermit {
@@ -279,7 +329,7 @@ impl CoreUsageJournal {
         let now = now_ms();
         let changed = conn.execute(
             "UPDATE dust_usage_attempts SET next_retry_at_ms = ?2, updated_at_ms = ?3
-             WHERE attempt_id = ?1 AND state = 'started'",
+             WHERE attempt_id = ?1 AND state = 'started' AND next_retry_at_ms > ?3",
             params![attempt_id, now + START_TIMEOUT_MS, now],
         )?;
         if changed != 1 {
@@ -291,28 +341,56 @@ impl CoreUsageJournal {
     /// A dispatched request with absent or invalid provider usage is unknown,
     /// never a synthetic zero-token charge or a no-charge conclusion.
     pub fn mark_unknown(&self, attempt_id: &str) -> Result<()> {
+        self.mark_unknown_with_operation(attempt_id, None)
+    }
+
+    /// Retain a provider response ID when an ambiguous result supplies one.
+    pub fn mark_unknown_with_operation(
+        &self,
+        attempt_id: &str,
+        provider_operation_id: Option<&str>,
+    ) -> Result<()> {
         validate_identity(attempt_id)?;
+        if let Some(operation_id) = provider_operation_id {
+            validate_reference(operation_id)?;
+        }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state: String = tx
+        let (state, existing_operation): (String, Option<String>) = tx
             .query_row(
-                "SELECT state FROM dust_usage_attempts WHERE attempt_id = ?1",
+                "SELECT state, provider_operation_id FROM dust_usage_attempts WHERE attempt_id = ?1",
                 [attempt_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| anyhow!("Core usage attempt was not durably started"))?;
+        if provider_operation_id.is_some()
+            && existing_operation
+                .as_deref()
+                .is_some_and(|id| Some(id) != provider_operation_id)
+        {
+            bail!("conflicting Core provider operation identity");
+        }
         match state.as_str() {
             "started" => {
                 let now = now_ms();
                 tx.execute(
                     "UPDATE dust_usage_attempts SET state = 'unknown',
+                     provider_operation_id = COALESCE(provider_operation_id, ?3),
                      first_unresolved_at_ms = COALESCE(first_unresolved_at_ms, ?2),
                      next_retry_at_ms = ?2, updated_at_ms = ?2 WHERE attempt_id = ?1",
-                    params![attempt_id, now],
+                    params![attempt_id, now, provider_operation_id],
                 )?;
             }
-            "unknown" | "manual_review_required" => {}
+            "unknown" | "manual_review_required" => {
+                if provider_operation_id.is_some() && existing_operation.is_none() {
+                    tx.execute(
+                        "UPDATE dust_usage_attempts SET provider_operation_id = ?2,
+                         updated_at_ms = ?3 WHERE attempt_id = ?1",
+                        params![attempt_id, provider_operation_id, now_ms()],
+                    )?;
+                }
+            }
             _ => bail!("conflicting Core usage terminal replay"),
         }
         tx.commit()?;
@@ -346,6 +424,11 @@ impl CoreUsageJournal {
             }
             _ => bail!("conflicting Core usage terminal replay"),
         }
+        tx.execute(
+            "DELETE FROM dust_embedding_results
+             WHERE attempt_id = ?1 AND vector_json IS NULL",
+            [attempt_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -357,6 +440,62 @@ impl CoreUsageJournal {
         attempt: &CoreUsageAttempt,
         provider_operation_id: &str,
         usage: EmbeddingUsage,
+    ) -> Result<String> {
+        self.settle_exact_inner(attempt, provider_operation_id, usage, None)
+    }
+
+    /// Store a paid result and its exact usage evidence in one retained commit.
+    pub fn settle_exact_with_embedding(
+        &self,
+        attempt: &CoreUsageAttempt,
+        provider_operation_id: &str,
+        usage: EmbeddingUsage,
+        input_hash: &[u8; 32],
+        vector: &[f64],
+    ) -> Result<String> {
+        if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
+            bail!("invalid retained embedding result");
+        }
+        self.settle_exact_inner(
+            attempt,
+            provider_operation_id,
+            usage,
+            Some((input_hash, vector)),
+        )
+    }
+
+    pub fn cached_embedding(&self, input_hash: &[u8; 32]) -> Result<Option<Vec<f64>>> {
+        let conn = self.connection()?;
+        let retained: Option<(Option<String>, i64)> = conn
+            .query_row(
+                "SELECT r.vector_json, r.created_at_ms FROM dust_embedding_results r
+                 JOIN dust_usage_attempts a ON a.attempt_id = r.attempt_id
+                 WHERE r.input_hash = ?1 AND a.state = 'exact'",
+                [input_hash.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((json, created_at_ms)) = retained else {
+            return Ok(None);
+        };
+        if created_at_ms < now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS {
+            return Err(PaidEmbeddingRecoveryRequired.into());
+        }
+        let json = json.ok_or(PaidEmbeddingRecoveryRequired)?;
+        let vector: Vec<f64> =
+            serde_json::from_str(&json).map_err(|_| PaidEmbeddingRecoveryRequired)?;
+        if vector.len() != 1536 || vector.iter().any(|v| !v.is_finite()) {
+            return Err(PaidEmbeddingRecoveryRequired.into());
+        }
+        Ok(Some(vector))
+    }
+
+    fn settle_exact_inner(
+        &self,
+        attempt: &CoreUsageAttempt,
+        provider_operation_id: &str,
+        usage: EmbeddingUsage,
+        embedding: Option<(&[u8; 32], &[f64])>,
     ) -> Result<String> {
         validate_attempt(attempt)?;
         validate_reference(provider_operation_id)?;
@@ -419,6 +558,27 @@ impl CoreUsageJournal {
                 )?;
             }
             _ => bail!("conflicting Core usage terminal replay"),
+        }
+        if let Some((input_hash, vector)) = embedding {
+            tx.execute(
+                "UPDATE dust_embedding_results SET vector_json = NULL
+                 WHERE created_at_ms < ?1 AND vector_json IS NOT NULL",
+                [now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS],
+            )?;
+            let updated = tx.execute(
+                "UPDATE dust_embedding_results SET vector_json = ?3, created_at_ms = ?4
+                 WHERE input_hash = ?1 AND attempt_id = ?2
+                   AND (vector_json IS NULL OR vector_json = ?3)",
+                params![
+                    input_hash.as_slice(),
+                    attempt.attempt_id,
+                    serde_json::to_string(vector)?,
+                    now_ms()
+                ],
+            )?;
+            if updated != 1 {
+                bail!("Core embedding reservation missing or conflicting");
+            }
         }
         tx.commit()?;
         Ok(envelope)
@@ -671,6 +831,136 @@ fn build_envelope(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn expired_start_cannot_be_renewed_for_provider_dispatch() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let entry = attempt("expired-start");
+        journal.start(&entry).expect("durable start");
+        journal
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_usage_attempts SET next_retry_at_ms = ?1 WHERE attempt_id = ?2",
+                params![now_ms() - 1, entry.attempt_id],
+            )
+            .expect("expire start");
+        assert!(journal.heartbeat_started(&entry.attempt_id).is_err());
+    }
+
+    #[test]
+    fn embedding_reservation_blocks_duplicate_dispatch_and_releases_proven_no_charge() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let hash = [3_u8; 32];
+        let first = attempt("first-embedding");
+        let duplicate = attempt("duplicate-embedding");
+        let other = attempt("other-document");
+        assert!(matches!(
+            journal
+                .start_embedding(&first, &hash)
+                .expect("first permit"),
+            StartOutcome::Created(_)
+        ));
+        assert_eq!(
+            journal
+                .start_embedding(&duplicate, &hash)
+                .expect("duplicate blocked"),
+            StartOutcome::Duplicate
+        );
+        assert!(journal
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT attempt_id FROM dust_usage_attempts WHERE attempt_id = ?1",
+                [&duplicate.attempt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .expect("rolled back attempt")
+            .is_none());
+        assert!(matches!(
+            journal
+                .start_embedding(&other, &[4_u8; 32])
+                .expect("different document permit"),
+            StartOutcome::Created(_)
+        ));
+        journal
+            .settle_no_charge(&first.attempt_id, "predispatch:denied")
+            .expect("proven no charge");
+        assert!(matches!(
+            journal
+                .start_embedding(&duplicate, &hash)
+                .expect("reservation released"),
+            StartOutcome::Created(_)
+        ));
+    }
+
+    #[test]
+    fn settled_embedding_survives_reopen_and_never_precedes_exact_usage() {
+        let dir = tempdir().expect("test directory");
+        let path = dir.path().join("usage.sqlite");
+        let journal = CoreUsageJournal::open(&path).expect("journal");
+        let entry = attempt("cached-embedding");
+        let hash = [7_u8; 32];
+        assert!(journal
+            .cached_embedding(&hash)
+            .expect("cache read")
+            .is_none());
+        journal
+            .start_embedding(&entry, &hash)
+            .expect("durable reservation");
+        assert!(journal
+            .cached_embedding(&hash)
+            .expect("cache read")
+            .is_none());
+        let vector = vec![0.25; 1536];
+        journal
+            .settle_exact_with_embedding(
+                &entry,
+                "client:cached-embedding",
+                EmbeddingUsage { input_tokens: 7 },
+                &hash,
+                &vector,
+            )
+            .expect("atomic settlement");
+        let reopened = CoreUsageJournal::open(&path).expect("reopen journal");
+        assert_eq!(
+            reopened.cached_embedding(&hash).expect("cache read"),
+            Some(vector)
+        );
+        assert_eq!(
+            reopened
+                .claim_due("cache-test-worker", 1)
+                .expect("usage claim")[0]
+                .state,
+            "exact"
+        );
+        reopened
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_embedding_results SET created_at_ms = ?1 WHERE input_hash = ?2",
+                params![
+                    now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS - 1,
+                    hash.as_slice()
+                ],
+            )
+            .expect("age retained vector");
+        let reopened = CoreUsageJournal::open(&path).expect("reopen and prune");
+        assert!(reopened.cached_embedding(&hash).is_err());
+        let retained_marker: Option<String> = reopened
+            .connection()
+            .expect("journal connection")
+            .query_row(
+                "SELECT vector_json FROM dust_embedding_results WHERE input_hash = ?1",
+                [hash.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("retained marker");
+        assert!(retained_marker.is_none());
+    }
 
     fn attempt(id: &str) -> CoreUsageAttempt {
         CoreUsageAttempt {

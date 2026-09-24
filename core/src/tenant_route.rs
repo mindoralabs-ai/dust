@@ -200,12 +200,23 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
         &self,
         workspace_ids: &[String],
     ) -> Result<Vec<CoreTenantRoute>> {
+        self.resolve_maintenance_each(workspace_ids)
+            .await?
+            .into_iter()
+            .collect()
+    }
+
+    /// One verified registry snapshot, with tenant-local routing outcomes.
+    pub async fn resolve_maintenance_each(
+        &self,
+        workspace_ids: &[String],
+    ) -> Result<Vec<Result<CoreTenantRoute>>> {
         if workspace_ids.is_empty() || workspace_ids.len() > 2 {
             bail!("invalid Dust maintenance workspace selection");
         }
         let raw = self.fetcher.fetch().await?;
         let envelope = self.verify_bundle(&raw, chrono::Utc::now().timestamp())?;
-        workspace_ids
+        Ok(workspace_ids
             .iter()
             .map(|workspace_id| {
                 let entry = envelope
@@ -226,7 +237,7 @@ impl<F: BundleFetcher> CoreTenantRouteResolver<F> {
                     key_id: envelope.key_id.clone(),
                 })
             })
-            .collect()
+            .collect::<Vec<_>>())
     }
 
     /// Resolve only delivery for an existing exact-usage journal claim. A
@@ -1012,7 +1023,6 @@ mod tests {
         let (resolver, shared, fail) = resolver(signed(payload(now, 7), &key), &key, 7);
         // This exercises the public path after a real signed Front assertion.
         let secret = "isolated-dust-core-route-test-secret-long-enough";
-        std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", secret);
         let pair = crate::workspace_assertion::DataSourcePair {
             project_id: 1,
             data_source_id: "data-source-1".into(),
@@ -1022,14 +1032,20 @@ mod tests {
             "exp": now + 60, "workspace_sid": "workspace_A",
             "data_sources": [pair.clone()]
         });
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .expect("test operation failed");
-        let workspace = crate::workspace_assertion::verify(Some(&token), &[pair])
+        let workspace = {
+            let _guard = crate::workspace_assertion::TEST_SECRET_LOCK
+                .lock()
+                .expect("test assertion secret lock");
+            std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", secret);
+            let token = jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+            )
             .expect("test operation failed");
+            crate::workspace_assertion::verify(Some(&token), &[pair])
+                .expect("test operation failed")
+        };
         assert_eq!(
             resolver
                 .resolve(&workspace)
@@ -1060,6 +1076,13 @@ mod tests {
             .resolve_maintenance(&["workspace_B".to_string()])
             .await
             .is_err());
+        let outcomes = resolver
+            .resolve_maintenance_each(&["workspace_A".to_string(), "workspace_B".to_string()])
+            .await
+            .expect("signed registry failed");
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].is_ok());
+        assert!(outcomes[1].is_err());
         fail.store(true, Ordering::SeqCst);
         assert!(resolver
             .resolve_maintenance(&["workspace_A".to_string()])
