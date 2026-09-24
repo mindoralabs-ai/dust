@@ -4760,6 +4760,9 @@
           "404": {
             "description": "Data source or document not found."
           },
+          "409": {
+            "description": "Upsert outcome is uncertain; check the document before retrying."
+          },
           "429": {
             "description": "Rate limit exceeded."
           },
