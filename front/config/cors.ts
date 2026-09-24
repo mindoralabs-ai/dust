@@ -1,3 +1,5 @@
+import config from "@app/lib/api/config";
+
 const STATIC_ALLOWED_ORIGINS = [
   // Front edge.
   "https://front-edge.dust.tt",
@@ -36,10 +38,16 @@ const ALLOWED_ORIGIN_PATTERNS = [
 
 type StaticAllowedOriginType = (typeof STATIC_ALLOWED_ORIGINS)[number];
 
+/**
+ * @cc [owner:jchen0824,label:security;api] configured-app-origin-exact
+ * The configured app URL may add only its exact origin to the existing CORS allowlist. Prefix,
+ * suffix, and subdomain lookalikes of that URL must not be allowed by this configuration.
+ */
 export function isAllowedOrigin(origin: string): boolean {
   return (
     STATIC_ALLOWED_ORIGINS.includes(origin as StaticAllowedOriginType) ||
-    ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin))
+    ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin)) ||
+    origin === new URL(config.getAppUrl()).origin
   );
 }
 
