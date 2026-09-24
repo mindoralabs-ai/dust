@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   isPodEditor: false,
   isPodMember: false,
   isUserLoading: true,
+  userLookupDisabled: null as boolean | null,
   user: null as typeof user | null,
 }));
 
@@ -36,11 +37,6 @@ vi.mock(
   })
 );
 
-vi.mock("@app/lib/cookies", () => ({
-  DUST_HAS_SESSION: "dust-session",
-  hasSessionIndicator: () => true,
-}));
-
 vi.mock("@app/lib/swr/frames", () => ({
   usePublicFrame: () => ({
     conversationUrl: null,
@@ -55,14 +51,10 @@ vi.mock("@app/lib/swr/frames", () => ({
 }));
 
 vi.mock("@app/lib/swr/user", () => ({
-  useUser: () => ({
-    user: mocks.user,
-    isUserLoading: mocks.isUserLoading,
-  }),
-}));
-
-vi.mock("react-cookie", () => ({
-  useCookies: () => [{ "dust-session": "1" }],
+  useUser: ({ disabled }: { disabled: boolean }) => {
+    mocks.userLookupDisabled = disabled;
+    return { user: mocks.user, isUserLoading: mocks.isUserLoading };
+  },
 }));
 
 const user = {
@@ -81,6 +73,7 @@ afterEach(() => {
   mocks.isPodEditor = false;
   mocks.isPodMember = false;
   mocks.isUserLoading = true;
+  mocks.userLookupDisabled = null;
   mocks.user = null;
 });
 
@@ -133,6 +126,7 @@ describe("PublicFrameRenderer", () => {
     const { rerender } = render(createElement(PublicFrameRenderer, props));
 
     expect(screen.queryByText("frame-iframe")).toBeNull();
+    expect(mocks.userLookupDisabled).toBe(false);
 
     mocks.isUserLoading = false;
     rerender(createElement(PublicFrameRenderer, props));
@@ -195,5 +189,6 @@ describe("PublicFrameRenderer", () => {
       scopedUserIdentity: undefined,
       viewer: null,
     });
+    expect(mocks.userLookupDisabled).toBe(true);
   });
 });

@@ -1,7 +1,6 @@
 import { VisualizationActionIframe } from "@app/components/assistant/conversation/actions/VisualizationActionIframe";
 import { CenteredState } from "@app/components/assistant/conversation/interactive_content/CenteredState";
 import { PublicInteractiveContentHeader } from "@app/components/assistant/conversation/interactive_content/PublicInteractiveContentHeader";
-import { DUST_HAS_SESSION, hasSessionIndicator } from "@app/lib/cookies";
 import { usePublicFrame } from "@app/lib/swr/frames";
 import { useUser } from "@app/lib/swr/user";
 import type {
@@ -11,7 +10,6 @@ import type {
 import { Spinner } from "@dust-tt/sparkle";
 // biome-ignore lint/correctness/noUnusedImports: ignored using `--suppress`
 import React from "react";
-import { useCookies } from "react-cookie";
 
 interface PublicFrameRendererProps {
   fileId: string;
@@ -60,6 +58,11 @@ export function getPublicFrameUserIdentity(
   };
 }
 
+/**
+ * @cc [owner:jchen0824,label:react;security] frame-member-api-authority
+ * When the Frame API confirms workspace membership, load the viewer identity before enabling
+ * function calls. An app-origin cookie must not suppress that lookup.
+ */
 export function PublicFrameRenderer({
   fileId,
   frameId,
@@ -85,13 +88,10 @@ export function PublicFrameRenderer({
     shareToken,
   });
 
-  const [cookies] = useCookies([DUST_HAS_SESSION]);
-  const hasSession = hasSessionIndicator(cookies[DUST_HAS_SESSION]);
-
   const { user, isUserLoading } = useUser({
     revalidateOnFocus: false,
     revalidateIfStale: false,
-    disabled: !hasSession,
+    disabled: !isAuthenticatedMember,
     redirectOnUnauthenticated: false,
   });
   const publicUserIdentity = getPublicFrameUserIdentity(
@@ -111,10 +111,7 @@ export function PublicFrameRenderer({
       ? { owner: viewerWorkspace, user }
       : null;
 
-  if (
-    isFrameLoading ||
-    (isAuthenticatedMember && hasSession && isUserLoading)
-  ) {
+  if (isFrameLoading || (isAuthenticatedMember && isUserLoading)) {
     return (
       <CenteredState>
         <Spinner size="sm" />

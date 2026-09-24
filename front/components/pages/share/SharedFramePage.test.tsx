@@ -4,10 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   frameError: null as unknown,
-  hasSession: false,
   isUserError: null as unknown,
   isUserLoading: false,
   requiresEmailVerification: false,
+  userLookupDisabled: null as boolean | null,
   user: null as { sId: string } | null,
 }));
 
@@ -56,11 +56,6 @@ vi.mock("@app/lib/api/config", () => ({
   },
 }));
 
-vi.mock("@app/lib/cookies", () => ({
-  DUST_HAS_SESSION: "dust-has-session",
-  hasSessionIndicator: () => mocks.hasSession,
-}));
-
 vi.mock("@app/lib/platform", () => ({
   usePathParam: () => "share-token",
 }));
@@ -93,11 +88,14 @@ vi.mock("@app/lib/swr/share", () => ({
 }));
 
 vi.mock("@app/lib/swr/user", () => ({
-  useUser: () => ({
-    isUserError: mocks.isUserError,
-    isUserLoading: mocks.isUserLoading,
-    user: mocks.user,
-  }),
+  useUser: ({ disabled }: { disabled: boolean }) => {
+    mocks.userLookupDisabled = disabled;
+    return {
+      isUserError: mocks.isUserError,
+      isUserLoading: mocks.isUserLoading,
+      user: mocks.user,
+    };
+  },
 }));
 
 vi.mock("@app/lib/utils", () => ({
@@ -113,17 +111,13 @@ vi.mock("posthog-js/react", () => ({
   usePostHog: () => ({ capture: vi.fn() }),
 }));
 
-vi.mock("react-cookie", () => ({
-  useCookies: () => [{}],
-}));
-
 afterEach(() => {
   cleanup();
   mocks.frameError = null;
-  mocks.hasSession = false;
   mocks.isUserError = null;
   mocks.isUserLoading = false;
   mocks.requiresEmailVerification = false;
+  mocks.userLookupDisabled = null;
   mocks.user = null;
   window.history.replaceState({}, "", "/");
 });
@@ -152,25 +146,35 @@ describe("SharedFramePage", () => {
     expect(screen.queryByText("frame content")).toBeNull();
   });
 
-  it("keeps the non-enumerating 404 for a signed-in viewer without access", () => {
+  it("keeps the non-enumerating 404 for a signed-in viewer without an app cookie", () => {
     mocks.frameError = new Error("not found");
-    mocks.hasSession = true;
     mocks.user = { sId: "usr_123" };
 
     render(<SharedFramePage />);
 
     expect(screen.getByText("404")).toBeDefined();
     expect(screen.queryByText("Sign in to open this Frame")).toBeNull();
+    expect(mocks.userLookupDisabled).toBe(false);
   });
 
-  it("treats a stale session indicator as logged out", () => {
+  it("treats an API authentication error as logged out", () => {
     mocks.frameError = new Error("not found");
-    mocks.hasSession = true;
     mocks.isUserError = new Error("not authenticated");
 
     render(<SharedFramePage />);
 
     expect(screen.getByText("Sign in to open this Frame")).toBeDefined();
+  });
+
+  it("waits for the API session check before showing an access error", () => {
+    mocks.frameError = new Error("not found");
+    mocks.isUserLoading = true;
+
+    render(<SharedFramePage />);
+
+    expect(screen.getByText("loading")).toBeDefined();
+    expect(screen.queryByText("Sign in to open this Frame")).toBeNull();
+    expect(screen.queryByText("404")).toBeNull();
   });
 
   it("preserves the email verification flow for invited viewers", () => {
@@ -181,6 +185,7 @@ describe("SharedFramePage", () => {
 
     expect(screen.getByText("email verification")).toBeDefined();
     expect(screen.queryByText("Sign in to open this Frame")).toBeNull();
+    expect(mocks.userLookupDisabled).toBe(true);
   });
 
   it("renders a public Frame without asking the viewer to sign in", () => {
@@ -188,5 +193,6 @@ describe("SharedFramePage", () => {
 
     expect(screen.getByText("frame content")).toBeDefined();
     expect(screen.queryByText("Sign in to open this Frame")).toBeNull();
+    expect(mocks.userLookupDisabled).toBe(true);
   });
 });
