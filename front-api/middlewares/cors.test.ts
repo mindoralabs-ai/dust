@@ -1,10 +1,11 @@
+import config from "@app/lib/api/config";
 import {
   DUST_FILE_CONTENT_TYPE_HEADER,
   DUST_FILE_ID_HEADER,
 } from "@app/types/files";
 import { cors } from "@front-api/middlewares/cors";
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const APP_ORIGIN = "https://app.dust.tt";
 
@@ -57,6 +58,46 @@ describe("cors middleware", () => {
 
     expect(response.status).toBe(403);
     expect(response.headers.get("X-CORS-Reason")).toBe("origin");
+  });
+
+  it("allows the configured app origin with credentials but rejects lookalikes", async () => {
+    const appUrl = vi
+      .spyOn(config, "getAppUrl")
+      .mockReturnValue("https://dust-sit.oktocrew.ai/");
+    try {
+      const accepted = await createApp().request("/", {
+        headers: { Origin: "https://dust-sit.oktocrew.ai" },
+      });
+      expect(accepted.status).toBe(200);
+      expect(accepted.headers.get("Access-Control-Allow-Origin")).toBe(
+        "https://dust-sit.oktocrew.ai"
+      );
+      expect(accepted.headers.get("Access-Control-Allow-Credentials")).toBe(
+        "true"
+      );
+
+      const preflight = await createApp().request("/", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://dust-sit.oktocrew.ai",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      });
+      expect(preflight.status).toBe(200);
+      expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe(
+        "https://dust-sit.oktocrew.ai"
+      );
+      expect(preflight.headers.get("Access-Control-Allow-Credentials")).toBe(
+        "true"
+      );
+
+      const rejected = await createApp().request("/", {
+        headers: { Origin: "https://dust-sit.oktocrew.ai.evil.example" },
+      });
+      expect(rejected.status).toBe(403);
+    } finally {
+      appUrl.mockRestore();
+    }
   });
 
   it("allows any origin on /mcp without credentials", async () => {
