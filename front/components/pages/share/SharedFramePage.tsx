@@ -4,7 +4,6 @@ import CustomErrorPage from "@app/components/pages/CustomErrorPage";
 import { EmailVerificationFlow } from "@app/components/pages/share/EmailVerificationFlow";
 import { useDocumentTitle } from "@app/hooks/useDocumentTitle";
 import config from "@app/lib/api/config";
-import { DUST_HAS_SESSION, hasSessionIndicator } from "@app/lib/cookies";
 import { usePathParam } from "@app/lib/platform";
 import { usePublicFrame } from "@app/lib/swr/frames";
 import { useShareFrameMetadata } from "@app/lib/swr/share";
@@ -13,27 +12,23 @@ import { getFaviconPath } from "@app/lib/utils";
 import { LogIn01, Spinner } from "@dust-tt/sparkle";
 import { usePostHog } from "posthog-js/react";
 import { useEffect, useMemo, useState } from "react";
-import { useCookies } from "react-cookie";
 
 // Origins from which the share frame is considered as embedded.
 // We hide the header for embedded origins.
 const EMBEDDED_ORIGINS = ["https://dust.tt/blog/"];
 
+/**
+ * @cc [owner:jchen0824,label:react;security] frame-session-api-authority
+ * On a Frame access error, resolve the viewer's API session before choosing the sign-in prompt
+ * or the non-enumerating 404. An app-origin cookie must not decide whether the viewer is signed in.
+ */
 export function SharedFramePage() {
   const token = usePathParam("token");
   const posthog = usePostHog();
 
   const [isVerified, setIsVerified] = useState(false);
-  const [cookies] = useCookies([DUST_HAS_SESSION]);
-  const hasSession = hasSessionIndicator(cookies[DUST_HAS_SESSION]);
-  const {
-    user,
-    isUserLoading,
-    isUserError: userError,
-  } = useUser({
-    disabled: !hasSession,
-    redirectOnUnauthenticated: false,
-  });
+  const [isRevalidatingVerifiedFrame, setIsRevalidatingVerifiedFrame] =
+    useState(false);
 
   const hideHeader = useMemo(() => {
     if (typeof window === "undefined" || !document.referrer) {
@@ -57,6 +52,16 @@ export function SharedFramePage() {
     mutateFrame,
   } = usePublicFrame({
     shareToken: shareMetadata ? token : null,
+  });
+  const shouldCheckSession =
+    !!frameError && !shareMetadata?.requiresEmailVerification;
+  const {
+    user,
+    isUserLoading,
+    isUserError: userError,
+  } = useUser({
+    disabled: !shouldCheckSession,
+    redirectOnUnauthenticated: false,
   });
 
   // Track frame view once the frame successfully loads.
@@ -151,8 +156,12 @@ export function SharedFramePage() {
 
   const handleVerified = () => {
     setIsVerified(true);
+    setIsRevalidatingVerifiedFrame(true);
     // Refetch the frame now that the cookie is set.
-    void mutateFrame();
+    void mutateFrame().then(
+      () => setIsRevalidatingVerifiedFrame(false),
+      () => setIsRevalidatingVerifiedFrame(false)
+    );
   };
 
   if (isShareMetadataLoading) {
@@ -175,7 +184,10 @@ export function SharedFramePage() {
   }
 
   if (frameError) {
-    if (hasSession && isUserLoading && !userError) {
+    if (
+      isRevalidatingVerifiedFrame ||
+      (shouldCheckSession && isUserLoading && !userError)
+    ) {
       return (
         <div className="flex h-dvh w-full items-center justify-center">
           <Spinner size="lg" />
@@ -183,7 +195,11 @@ export function SharedFramePage() {
       );
     }
 
-    if (!hasSession || userError || !user) {
+    if (shareMetadata?.requiresEmailVerification) {
+      return <Custom404 />;
+    }
+
+    if (userError || !user) {
       const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
       const loginUrl = `${config.getApiBaseUrl()}/api/workos/login?returnTo=${encodeURIComponent(returnTo)}`;
 
