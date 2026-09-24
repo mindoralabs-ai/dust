@@ -1,5 +1,5 @@
 import { SharedFramePage } from "@app/components/pages/share/SharedFramePage";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -43,7 +43,11 @@ vi.mock("@app/components/pages/CustomErrorPage", () => ({
 }));
 
 vi.mock("@app/components/pages/share/EmailVerificationFlow", () => ({
-  EmailVerificationFlow: () => <div>email verification</div>,
+  EmailVerificationFlow: ({ onVerified }: { onVerified: () => void }) => (
+    <button onClick={onVerified} type="button">
+      email verification
+    </button>
+  ),
 }));
 
 vi.mock("@app/hooks/useDocumentTitle", () => ({
@@ -185,6 +189,19 @@ describe("SharedFramePage", () => {
 
     expect(screen.getByText("email verification")).toBeDefined();
     expect(screen.queryByText("Sign in to open this Frame")).toBeNull();
+    expect(mocks.userLookupDisabled).toBe(true);
+  });
+
+  it("does not wait on a disabled session lookup after email verification", () => {
+    mocks.frameError = new Error("not found");
+    mocks.requiresEmailVerification = true;
+    mocks.isUserLoading = true;
+
+    render(<SharedFramePage />);
+    fireEvent.click(screen.getByRole("button", { name: "email verification" }));
+
+    expect(screen.getByText("404")).toBeDefined();
+    expect(screen.queryByText("loading")).toBeNull();
     expect(mocks.userLookupDisabled).toBe(true);
   });
 

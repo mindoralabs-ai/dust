@@ -51,12 +51,14 @@ export function SharedFramePage() {
   } = usePublicFrame({
     shareToken: shareMetadata ? token : null,
   });
+  const shouldCheckSession =
+    !!frameError && !shareMetadata?.requiresEmailVerification;
   const {
     user,
     isUserLoading,
     isUserError: userError,
   } = useUser({
-    disabled: !frameError || !!shareMetadata?.requiresEmailVerification,
+    disabled: !shouldCheckSession,
     redirectOnUnauthenticated: false,
   });
 
@@ -176,7 +178,11 @@ export function SharedFramePage() {
   }
 
   if (frameError) {
-    if (isUserLoading && !userError) {
+    if (shareMetadata?.requiresEmailVerification) {
+      return <Custom404 />;
+    }
+
+    if (shouldCheckSession && isUserLoading && !userError) {
       return (
         <div className="flex h-dvh w-full items-center justify-center">
           <Spinner size="lg" />
