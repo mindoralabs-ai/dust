@@ -53,8 +53,12 @@ pub mod databases {
 pub mod gcp_auth;
 pub mod gcs_client;
 pub mod project;
+pub mod quota_admission;
 pub mod run;
 pub mod search_filter;
+pub mod tenant_route;
+pub mod usage_delivery;
+pub mod usage_journal;
 pub mod utils;
 pub mod workspace_assertion;
 pub mod types {
