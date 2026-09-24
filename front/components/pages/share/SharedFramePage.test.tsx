@@ -1,5 +1,11 @@
 import { SharedFramePage } from "@app/components/pages/share/SharedFramePage";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -68,7 +74,7 @@ vi.mock("@app/lib/swr/frames", () => ({
   usePublicFrame: () => ({
     error: mocks.frameError,
     frameMetadata: null,
-    mutateFrame: vi.fn(),
+    mutateFrame: vi.fn().mockResolvedValue(undefined),
   }),
 }));
 
@@ -192,7 +198,7 @@ describe("SharedFramePage", () => {
     expect(mocks.userLookupDisabled).toBe(true);
   });
 
-  it("does not wait on a disabled session lookup after email verification", () => {
+  it("shows progress for Frame revalidation, then stops after a failed retry", async () => {
     mocks.frameError = new Error("not found");
     mocks.requiresEmailVerification = true;
     mocks.isUserLoading = true;
@@ -200,9 +206,10 @@ describe("SharedFramePage", () => {
     render(<SharedFramePage />);
     fireEvent.click(screen.getByRole("button", { name: "email verification" }));
 
-    expect(screen.getByText("404")).toBeDefined();
-    expect(screen.queryByText("loading")).toBeNull();
+    expect(screen.getByText("loading")).toBeDefined();
     expect(mocks.userLookupDisabled).toBe(true);
+    await waitFor(() => expect(screen.getByText("404")).toBeDefined());
+    expect(screen.queryByText("loading")).toBeNull();
   });
 
   it("renders a public Frame without asking the viewer to sign in", () => {

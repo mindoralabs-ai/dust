@@ -27,6 +27,8 @@ export function SharedFramePage() {
   const posthog = usePostHog();
 
   const [isVerified, setIsVerified] = useState(false);
+  const [isRevalidatingVerifiedFrame, setIsRevalidatingVerifiedFrame] =
+    useState(false);
 
   const hideHeader = useMemo(() => {
     if (typeof window === "undefined" || !document.referrer) {
@@ -154,8 +156,12 @@ export function SharedFramePage() {
 
   const handleVerified = () => {
     setIsVerified(true);
+    setIsRevalidatingVerifiedFrame(true);
     // Refetch the frame now that the cookie is set.
-    void mutateFrame();
+    void mutateFrame().then(
+      () => setIsRevalidatingVerifiedFrame(false),
+      () => setIsRevalidatingVerifiedFrame(false)
+    );
   };
 
   if (isShareMetadataLoading) {
@@ -178,16 +184,19 @@ export function SharedFramePage() {
   }
 
   if (frameError) {
-    if (shareMetadata?.requiresEmailVerification) {
-      return <Custom404 />;
-    }
-
-    if (shouldCheckSession && isUserLoading && !userError) {
+    if (
+      isRevalidatingVerifiedFrame ||
+      (shouldCheckSession && isUserLoading && !userError)
+    ) {
       return (
         <div className="flex h-dvh w-full items-center justify-center">
           <Spinner size="lg" />
         </div>
       );
+    }
+
+    if (shareMetadata?.requiresEmailVerification) {
+      return <Custom404 />;
     }
 
     if (userError || !user) {
