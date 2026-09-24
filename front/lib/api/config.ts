@@ -40,6 +40,8 @@ export function getDefaultInit(): Promise<RequestInit> | null {
 }
 
 const config = {
+  getFrontDatabaseUriForTest: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("FRONT_DATABASE_URI"),
   getCoreWorkspaceAssertionSecret: (): string | undefined =>
     EnvironmentConfig.getOptionalEnvVariable(
       "DUST_CORE_WORKSPACE_ASSERTION_SECRET"
