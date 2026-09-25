@@ -125,7 +125,7 @@ fn guess_mime_type(node_string_id: &str, node_type: NodeType) -> String {
 }
 
 async fn create_nodes(
-    pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>>,
+    pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<postgres_openssl::MakeTlsConnector>>,
     created: i64,
     data_source: i64,
     timestamp: i64,
@@ -173,7 +173,7 @@ async fn create_nodes(
 async fn process_batch(
     data: Vec<(i64, i64, String, i64, String, String, Vec<String>)>,
     execute: bool,
-    pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>>,
+    pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<postgres_openssl::MakeTlsConnector>>,
     node_type: NodeType,
 ) -> Result<bool> {
     if !execute {
@@ -237,8 +237,9 @@ async fn main() -> Result<()> {
                 next_id, batch_size
             );
 
-            let pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>> =
-                store.raw_pool();
+            let pool: &bb8::Pool<
+                bb8_postgres::PostgresConnectionManager<postgres_openssl::MakeTlsConnector>,
+            > = store.raw_pool();
 
             let c = pool.get().await?;
 
@@ -322,8 +323,9 @@ async fn main() -> Result<()> {
         NodeType::Table => loop {
             println!("Getting tables batch : {} / {}", next_id, batch_size);
 
-            let pool: &bb8::Pool<bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>> =
-                store.raw_pool();
+            let pool: &bb8::Pool<
+                bb8_postgres::PostgresConnectionManager<postgres_openssl::MakeTlsConnector>,
+            > = store.raw_pool();
 
             let c = pool.get().await?;
 
