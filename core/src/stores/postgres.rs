@@ -3,14 +3,18 @@ use async_trait::async_trait;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use futures::future::try_join_all;
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use postgres_openssl::MakeTlsConnector;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::path::Path;
 use std::str::FromStr;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{NoTls, Transaction};
+use tokio_postgres::{Config, Transaction};
 use tracing::info;
 
 use crate::data_sources::data_source::DocumentStatus;
@@ -45,7 +49,7 @@ use super::store::{DocumentCreateParams, FolderUpsertParams, TableUpsertParams};
 
 #[derive(Clone)]
 pub struct PostgresStore {
-    pool: Pool<PostgresConnectionManager<NoTls>>,
+    pool: Pool<PostgresConnectionManager<MakeTlsConnector>>,
 }
 
 pub struct UpsertNode<'a> {
@@ -61,9 +65,45 @@ pub struct UpsertNode<'a> {
     pub text_size: &'a Option<i64>,
 }
 
+/// @cc [owner:jchen0824,label:security;backend] core-postgres-tls
+/// A URI requesting `sslmode=require` must have a readable CA certificate and
+/// verify the PostgreSQL peer and hostname. Missing or invalid trust material
+/// must fail before connecting; legacy URIs without required TLS stay plaintext.
+fn postgres_manager(
+    db_uri: &str,
+    ca_cert_path: Option<&Path>,
+) -> Result<PostgresConnectionManager<MakeTlsConnector>> {
+    let mut config: Config = db_uri
+        .parse()
+        .map_err(|_| anyhow!("invalid CORE_DATABASE_URI"))?;
+    let mut tls = SslConnector::builder(SslMethod::tls())?;
+
+    match (config.get_ssl_mode(), ca_cert_path) {
+        (SslMode::Require, Some(path)) => {
+            tls.set_ca_file(path)?;
+            tls.set_verify(SslVerifyMode::PEER);
+        }
+        (SslMode::Require, None) => {
+            return Err(anyhow!("CORE_DATABASE_CA_CERT is required for TLS"));
+        }
+        (_, Some(_)) => {
+            return Err(anyhow!("CORE_DATABASE_CA_CERT requires sslmode=require"));
+        }
+        (_, None) => {
+            config.ssl_mode(SslMode::Disable);
+        }
+    }
+
+    Ok(PostgresConnectionManager::new(
+        config,
+        MakeTlsConnector::new(tls.build()),
+    ))
+}
+
 impl PostgresStore {
     pub async fn new(db_uri: &str) -> Result<Self> {
-        let manager = PostgresConnectionManager::new_from_stringlike(db_uri, NoTls)?;
+        let ca_cert_path = std::env::var_os("CORE_DATABASE_CA_CERT");
+        let manager = postgres_manager(db_uri, ca_cert_path.as_deref().map(Path::new))?;
         let pool = Pool::builder().max_size(16).build(manager).await?;
         Ok(PostgresStore { pool })
     }
@@ -210,7 +250,7 @@ impl PostgresStore {
 
 #[async_trait]
 impl Store for PostgresStore {
-    fn raw_pool(&self) -> &Pool<PostgresConnectionManager<NoTls>> {
+    fn raw_pool(&self) -> &Pool<PostgresConnectionManager<MakeTlsConnector>> {
         return &self.pool;
     }
 
@@ -4135,5 +4175,64 @@ impl Store for PostgresStore {
 
     fn clone_box(&self) -> Box<dyn Store + Sync + Send> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::postgres_manager;
+    use anyhow::Result;
+    use openssl::asn1::{Asn1Integer, Asn1Time};
+    use openssl::bn::BigNum;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::x509::{X509Name, X509};
+    use std::io::Write;
+
+    const URI: &str = "postgresql://dust_core:test@localhost:5432/dust_core";
+
+    #[test]
+    fn required_tls_rejects_missing_or_invalid_ca() -> Result<()> {
+        assert!(postgres_manager(&format!("{URI}?sslmode=require"), None).is_err());
+
+        let mut invalid_ca = tempfile::NamedTempFile::new()?;
+        invalid_ca.write_all(b"not a CA certificate")?;
+        assert!(
+            postgres_manager(&format!("{URI}?sslmode=require"), Some(invalid_ca.path())).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_tls_accepts_a_valid_ca() -> Result<()> {
+        let key = PKey::from_rsa(Rsa::generate(2048)?)?;
+        let mut name = X509Name::builder()?;
+        name.append_entry_by_text("CN", "Test PostgreSQL CA")?;
+        let name = name.build();
+        let serial_number = BigNum::from_u32(1)?;
+        let serial = Asn1Integer::from_bn(&serial_number)?;
+        let mut cert = X509::builder()?;
+        cert.set_version(2)?;
+        cert.set_serial_number(&serial)?;
+        cert.set_subject_name(&name)?;
+        cert.set_issuer_name(&name)?;
+        cert.set_pubkey(&key)?;
+        cert.set_not_before(Asn1Time::days_from_now(0)?.as_ref())?;
+        cert.set_not_after(Asn1Time::days_from_now(1)?.as_ref())?;
+        cert.sign(&key, MessageDigest::sha256())?;
+
+        let mut ca = tempfile::NamedTempFile::new()?;
+        ca.write_all(&cert.build().to_pem()?)?;
+        assert!(postgres_manager(&format!("{URI}?sslmode=require"), Some(ca.path())).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_plaintext_does_not_accept_a_ca_setting() -> Result<()> {
+        assert!(postgres_manager(URI, None).is_ok());
+        let ca = tempfile::NamedTempFile::new()?;
+        assert!(postgres_manager(URI, Some(ca.path())).is_err());
+        Ok(())
     }
 }
