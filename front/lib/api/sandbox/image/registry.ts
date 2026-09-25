@@ -3,6 +3,7 @@ import {
   getRootConsumedPathHardeningCommand,
   getSandboxServicePathHardeningCommand,
 } from "@app/lib/api/sandbox/hardening";
+import { withPocEgressProxyCa } from "@app/lib/api/sandbox/image/poc_egress_ca";
 import {
   buildPodPackage,
   POD_PACKAGE_IMAGE_DIR,
@@ -26,7 +27,7 @@ import fs from "fs";
 import path from "path";
 
 const DUST_BEDROCK_IMAGE_VERSION = "1.11.0";
-const DUST_BASE_IMAGE_VERSION = "0.8.107";
+const DUST_BASE_IMAGE_VERSION = "0.8.108";
 const DSBX_CLI_VERSION = "0.1.57";
 // Identity, not coverage list: agent-proxied is a specific Linux user. The
 // nftables ruleset covers SANDBOX_EGRESS_CONTROLLED_UIDS; this constant is
@@ -302,7 +303,7 @@ function getSshHardeningCommand(): string {
   ].join(" && ");
 }
 
-const DUST_BASE_IMAGE = SandboxImage.fromDocker(
+const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
   `dust-sbx-bedrock:${DUST_BEDROCK_IMAGE_VERSION}`
 )
   // Create agent user first so e2b creates /home/agent with correct ownership.
@@ -883,7 +884,9 @@ const DUST_BASE_IMAGE = SandboxImage.fromDocker(
   .withCapability("dust_filesystem")
   .withResources({ vcpu: 2, memoryMb: 2048 })
   .withNetwork(PROXY_ONLY_NETWORK_POLICY)
-  .setWorkdir("/home/agent")
+  .setWorkdir("/home/agent");
+
+const DUST_BASE_IMAGE = withPocEgressProxyCa(DUST_BASE_IMAGE_BEFORE_POC_CA)
   .withToolManifest()
   .register({
     imageName: "dust-base",
