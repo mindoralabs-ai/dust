@@ -2,8 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
+use postgres_openssl::MakeTlsConnector;
 use std::collections::HashMap;
-use tokio_postgres::NoTls;
 
 use crate::data_sources::node::NodeESDocument;
 use crate::{
@@ -89,7 +89,7 @@ pub struct FolderUpsertParams {
 
 #[async_trait]
 pub trait Store {
-    fn raw_pool(&self) -> &Pool<PostgresConnectionManager<NoTls>>;
+    fn raw_pool(&self) -> &Pool<PostgresConnectionManager<MakeTlsConnector>>;
     // Projects
     async fn create_project(&self) -> Result<Project>;
     async fn delete_project(&self, project: &Project) -> Result<()>;

@@ -7,8 +7,8 @@ use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use futures::prelude::*;
 use futures::{StreamExt, TryStreamExt};
+use postgres_openssl::MakeTlsConnector;
 use std::time::Duration;
-use tokio_postgres::NoTls;
 use tokio_stream::{self as stream};
 
 pub async fn with_retryable_back_off<F, O>(
@@ -42,7 +42,7 @@ where
 }
 
 async fn fetch_data_sources_documents_batch(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     data_source_id: i64,
     last_id: u64,
     limit: usize,
