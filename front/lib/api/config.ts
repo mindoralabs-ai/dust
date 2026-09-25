@@ -364,6 +364,11 @@ const config = {
   getEgressProxyTlsName: (): string | undefined => {
     return EnvironmentConfig.getOptionalEnvVariable("EGRESS_PROXY_TLS_NAME");
   },
+  getDustPocEgressCaCertPath: (): string | undefined => {
+    return EnvironmentConfig.getOptionalEnvVariable(
+      "DUST_POC_EGRESS_CA_CERT_PATH"
+    );
+  },
   getEgressPolicyBucket: (): string => {
     return EnvironmentConfig.getEnvVariable("EGRESS_PROXY_POLICY_BUCKET");
   },
