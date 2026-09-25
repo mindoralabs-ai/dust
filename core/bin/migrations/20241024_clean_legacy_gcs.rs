@@ -13,11 +13,11 @@ use tokio_postgres::Row;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use futures::{StreamExt, TryStreamExt};
-use tokio_postgres::NoTls;
+use postgres_openssl::MakeTlsConnector;
 use tokio_stream::{self as stream};
 
 async fn fetch_data_sources_batch(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     last_id: u64,
     limit: usize,
 ) -> Result<Vec<Row>, anyhow::Error> {
@@ -32,7 +32,7 @@ async fn fetch_data_sources_batch(
 }
 
 async fn fetch_data_sources_documents_versions(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     data_source_id: i64,
     last_id: u64,
     limit: usize,

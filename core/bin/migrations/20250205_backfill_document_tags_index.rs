@@ -7,8 +7,8 @@ use dust::{
 };
 use elasticsearch::{http::request::JsonBody, indices::IndicesExistsParts, BulkParts};
 use http::StatusCode;
+use postgres_openssl::MakeTlsConnector;
 use serde_json::json;
-use tokio_postgres::NoTls;
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum NodeType {
@@ -59,7 +59,7 @@ async fn main() {
 }
 
 async fn list_data_source_documents(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     id_cursor: i64,
     batch_size: i64,
 ) -> Result<Vec<(i64, String, Vec<String>, String, String)>, Box<dyn std::error::Error>> {
@@ -197,7 +197,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn get_node_batch(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     next_cursor: i64,
     batch_size: usize,
 ) -> Result<

@@ -8,8 +8,8 @@ use dust::{
 };
 use elasticsearch::{indices::IndicesExistsParts, BulkOperation, BulkParts};
 use http::StatusCode;
+use postgres_openssl::MakeTlsConnector;
 use serde_json::{json, Value};
-use tokio_postgres::NoTls;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -50,7 +50,7 @@ async fn main() {
 }
 
 async fn list_data_source_nodes(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     id_cursor: i64,
     batch_size: i64,
 ) -> Result<Vec<(Node, i64, i64)>, Box<dyn std::error::Error>> {
@@ -232,7 +232,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn get_node_batch(
-    pool: &Pool<PostgresConnectionManager<NoTls>>,
+    pool: &Pool<PostgresConnectionManager<MakeTlsConnector>>,
     next_cursor: i64,
     batch_size: usize,
 ) -> Result<(Vec<Node>, Option<i64>), Box<dyn std::error::Error>> {
