@@ -44,13 +44,6 @@ const {
   mockFetchActionById: vi.fn(),
 }));
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getApiBaseUrl: () => "https://dust.tt",
-    getSandboxDevFrontHostName: () => undefined,
-  },
-}));
-
 vi.mock("@app/lib/api/sandbox/egress", () => ({
   readNewDenyLogEntries: mockReadNewDenyLogEntries,
 }));
@@ -304,6 +297,41 @@ describe("runSandboxBashTool", () => {
       signal: new AbortController().signal,
     } as unknown as ToolHandlerExtra;
   }
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("uses the public callback origin when the server has an internal API URL", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://dust-api.example.com");
+    vi.stubEnv("DUST_INTERNAL_API_URL", "http://dust-front-api.dust-poc.svc");
+    const exec = vi
+      .fn()
+      .mockResolvedValue(new Ok({ exitCode: 0, stdout: "hello", stderr: "" }));
+    mockEnsureSandboxReady.mockResolvedValue(
+      new Ok({
+        sandbox: { providerId: "provider-id", sId: "sandbox-id", exec },
+        freshlyCreated: false,
+      })
+    );
+
+    const result = await runSandboxBashTool(
+      { command: "echo hello", description: "Run command" },
+      makeExtra()
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(exec).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({
+        envVars: {
+          DUST_SANDBOX_TOKEN: "sandbox-token",
+          DUST_API_URL: "https://dust-api.example.com/api/v1/w/workspace-id",
+        },
+      })
+    );
+  });
 
   it("executes as agent-proxied when the forwarder is healthy", async () => {
     const sandbox = {

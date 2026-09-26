@@ -69,7 +69,6 @@ import {
   getPodSandboxFunctionsMountPoint,
   sandboxDatabaseExecEnvVars,
 } from "@app/types/mount_path";
-import { isDevelopment } from "@app/types/shared/env";
 import type { ModelId } from "@app/types/shared/model_id";
 import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
@@ -227,12 +226,6 @@ function safeParseStoredInvocationData(
   }
 
   return new Ok(parseResult.data);
-}
-
-function dustAPIBaseUrlForSandbox(): string {
-  return isDevelopment() && config.getSandboxDevFrontHostName()
-    ? `https://${config.getSandboxDevFrontHostName()}`
-    : config.getApiBaseUrl();
 }
 
 function buildSandboxFunctionRunCommand(slug: string): string {
@@ -618,6 +611,11 @@ export class SandboxFunctionInvocationResource extends BaseResource<SandboxFunct
    * free to restart the invocation durably. And execution is bounded by a much shorter timeout, so
    * a function that never returns cannot hold the request open for the workflow's ceiling.
    */
+  /**
+   * @cc [owner:jchen0824,label:backend] sandbox-public-callback-origin
+   * DUST_API_URL passed to function invocations must use the sandbox-facing API
+   * origin, including its development tunnel override, never the internal API URL.
+   */
   async execute(
     auth: Authenticator,
     { inline = false }: { inline?: boolean } = {}
@@ -897,7 +895,7 @@ export class SandboxFunctionInvocationResource extends BaseResource<SandboxFunct
           return sandbox.exec(auth, command, {
             workingDirectory: SANDBOX_FUNCTION_WORKING_DIRECTORY,
             envVars: {
-              DUST_API_URL: `${dustAPIBaseUrlForSandbox()}/api/v1/w/${auth.getNonNullableWorkspace().sId}`,
+              DUST_API_URL: `${config.getSandboxApiBaseUrl()}/api/v1/w/${auth.getNonNullableWorkspace().sId}`,
               DUST_FUNCTIONS_DIR: functionsDirectory,
               // The app prefix comes from the slug, so `db("chat")` in the bundle resolves to this
               // app's own database without the source naming the app.

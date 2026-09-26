@@ -59,7 +59,6 @@ import { isPodConversation } from "@app/types/assistant/conversation";
 import type { ModelProviderIdType } from "@app/types/assistant/models/types";
 import type { EgressPolicy } from "@app/types/sandbox/egress_policy";
 import { normalizeEgressPolicyDomain } from "@app/types/sandbox/egress_policy";
-import { isDevelopment } from "@app/types/shared/env";
 import { isComputerFeatureEnabled } from "@app/types/shared/feature_flags";
 import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
@@ -342,6 +341,11 @@ export async function buildDescribeToolsetOutput(
   return new Ok([{ type: "text" as const, text: output }]);
 }
 
+/**
+ * @cc [owner:jchen0824,label:backend] sandbox-public-callback-origin
+ * DUST_API_URL passed to sandbox commands must use the sandbox-facing API origin,
+ * including its development tunnel override, never the server's internal API URL.
+ */
 export async function runSandboxBashTool(
   {
     command,
@@ -443,10 +447,7 @@ export async function runSandboxBashTool(
     ? buildWaitAndCollectCommand(execId)
     : wrapCommandWithCapture(command, execId, providerId, { timeoutSec });
 
-  const sandboxAPIBase =
-    isDevelopment() && config.getSandboxDevFrontHostName()
-      ? `https://${config.getSandboxDevFrontHostName()}`
-      : config.getApiBaseUrl();
+  const sandboxAPIBase = config.getSandboxApiBaseUrl();
 
   const execResult = await sandbox.exec(auth, commandToRun, {
     workingDirectory: workingDirectory ?? DEFAULT_WORKING_DIRECTORY,
