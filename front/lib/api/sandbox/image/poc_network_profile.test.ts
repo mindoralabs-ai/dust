@@ -28,6 +28,7 @@ beforeEach(() => {
   ]);
   expect(result.status).toBe(0);
   vi.stubEnv("DUST_POC_MODE", "1");
+  vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://dust-api-sit.oktocrew.ai");
   vi.stubEnv("DUST_POC_EGRESS_CA_CERT_PATH", certPath);
   vi.stubEnv("DUST_POC_SANDBOX_NETWORK_PROFILE", "dust-poc");
 });
@@ -80,6 +81,11 @@ describe("bounded POC sandbox network profile", () => {
     await expect(registeredImage()).rejects.toThrow("sandbox network profile");
   });
 
+  test("rejects a public API origin outside the fixed hostname mapping", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://unexpected.example.com");
+    await expect(registeredImage()).rejects.toThrow("sandbox network profile");
+  });
+
   test("requires explicit POC mode", async () => {
     vi.stubEnv("DUST_POC_MODE", "0");
     await expect(registeredImage()).rejects.toThrow("sandbox network profile");
@@ -97,6 +103,11 @@ describe("bounded POC sandbox network profile", () => {
     vi.stubEnv("SBX_DEV_UNRESTRICTED_EGRESS", "true");
     vi.stubEnv("SBX_DEV_FRONT_URL", "https://tunnel.example.com");
     vi.stubEnv("SBX_DEV_IMAGE_SUFFIX", "developer");
+    const { default: config } = await import("@app/lib/api/config");
+    expect(config.getSandboxDevUnrestrictedEgress()).toBe(false);
+    expect(config.getSandboxApiBaseUrl()).toBe(
+      "https://dust-api-sit.oktocrew.ai"
+    );
     const { getSandboxImage } = await import("./index");
     const image = getSandboxImage();
     if (image.isErr()) {

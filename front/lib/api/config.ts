@@ -717,6 +717,10 @@ const config = {
     return EnvironmentConfig.getOptionalEnvVariable("SANDBOX_DD_API_KEY");
   },
   getSandboxDevFrontHostName: (): string | undefined => {
+    // The bounded profile resolves only its fixed public API hostname.
+    if (config.getDustPocSandboxNetworkProfile() === "dust-poc") {
+      return undefined;
+    }
     return EnvironmentConfig.getOptionalEnvVariable(
       "SBX_DEV_FRONT_URL"
     )?.replace(/^https?:\/\//, "");
@@ -726,7 +730,11 @@ const config = {
   // allow all outbound traffic. Only honored when isDevelopment() to avoid
   // accidental enablement in production.
   getSandboxDevUnrestrictedEgress: (): boolean => {
-    if (!isDevelopment()) {
+    // All lifecycle callers must retain the authenticated proxy in POC mode.
+    if (
+      config.getDustPocSandboxNetworkProfile() === "dust-poc" ||
+      !isDevelopment()
+    ) {
       return false;
     }
     return (

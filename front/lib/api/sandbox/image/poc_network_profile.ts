@@ -12,7 +12,11 @@ export function isPocSandboxNetworkProfile(): boolean {
   if (profile === undefined) {
     return false;
   }
-  if (profile !== "dust-poc" || !dustPocMode()) {
+  if (
+    profile !== "dust-poc" ||
+    !dustPocMode() ||
+    config.getSandboxApiBaseUrl() !== "https://dust-api-sit.oktocrew.ai"
+  ) {
     throw new Error("Dust POC sandbox network profile is unavailable");
   }
   return true;
