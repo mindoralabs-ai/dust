@@ -325,7 +325,10 @@ describe("buildSandboxImage()", () => {
     const result = await buildSandboxImage(
       image,
       { imageName: "dust-base", tag: "test" },
-      { preinstalledImage }
+      {
+        preinstalledImage,
+        preinstalledBaseImage: `registry.example/base@sha256:${"b".repeat(64)}`,
+      }
     );
     expect(result.isOk()).toBe(true);
     expect(mockE2BTemplateFactory.fromImage).toHaveBeenCalledWith(
@@ -337,6 +340,7 @@ describe("buildSandboxImage()", () => {
         expect.stringContaining("preinstalled-dependencies.sha256"),
         { user: "root" },
       ],
+      ["/usr/bin/chown root:root / && /usr/bin/chmod 0755 /", { user: "root" }],
       ["harden-accounts", { user: "root" }],
     ]);
   });
@@ -350,6 +354,19 @@ describe("buildSandboxImage()", () => {
       )
     ).rejects.toThrow("sha256");
     expect(mockE2BTemplateFactory.fromImage).not.toHaveBeenCalled();
+    expect(mockBuild).not.toHaveBeenCalled();
+  });
+
+  test("requires the expected immutable base before invoking E2B", async () => {
+    await expect(
+      buildSandboxImage(
+        createTestImage(),
+        { imageName: "dust-base", tag: "test" },
+        {
+          preinstalledImage: `registry.example/deps@sha256:${"a".repeat(64)}`,
+        }
+      )
+    ).rejects.toThrow("preinstalledBaseImage is required");
     expect(mockBuild).not.toHaveBeenCalled();
   });
 

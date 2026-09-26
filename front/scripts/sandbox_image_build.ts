@@ -23,6 +23,7 @@ interface BuildArgs {
   skipCache: boolean;
   dockerRegistry: string;
   preinstalledImage?: string;
+  preinstalledBaseImage?: string;
   rebuild: boolean;
   confirm: boolean;
   release: boolean;
@@ -85,6 +86,7 @@ async function buildImage(args: BuildArgs): Promise<void> {
     skipCache,
     dockerRegistry,
     preinstalledImage,
+    preinstalledBaseImage,
     rebuild,
     confirm,
     release,
@@ -188,6 +190,7 @@ async function buildImage(args: BuildArgs): Promise<void> {
     skipCache,
     dockerRegistryFactory,
     preinstalledImage,
+    preinstalledBaseImage,
   });
 
   if (result.isErr()) {
@@ -245,6 +248,10 @@ yargs(hideBin(process.argv))
     describe:
       "Digest-pinned OCI dependency image for an offline self-hosted builder (keyless registry access)",
   })
+  .option("preinstalled-base-image", {
+    type: "string",
+    describe: "Expected bedrock digest used to build the dependency image",
+  })
   .option("rebuild", {
     type: "boolean",
     default: false,
@@ -274,6 +281,7 @@ yargs(hideBin(process.argv))
       skipCache: args["skip-cache"],
       dockerRegistry: getDockerRegistry(args["docker-registry"]),
       preinstalledImage: args["preinstalled-image"],
+      preinstalledBaseImage: args["preinstalled-base-image"],
       rebuild: args.rebuild,
       confirm: args.confirm,
       release: args.release,

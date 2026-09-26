@@ -35,19 +35,24 @@ describe("offline dependency image", () => {
     expect(dockerfile).not.toContain("lock-accounts");
     expect(dockerfile).not.toContain("harden-paths");
     expect(dockerfile).not.toContain("private service config");
-    const offline = offlineImageOperations(image);
-    expect(offline.slice(1)).toEqual([
+    const offline = offlineImageOperations(image, BASE);
+    expect(offline.slice(2)).toEqual([
       original[0],
       original[1],
       original[3],
       original[5],
     ]);
+    expect(offline[1]).toEqual({
+      type: "run",
+      user: "root",
+      command: "/usr/bin/chown root:root / && /usr/bin/chmod 0755 /",
+    });
     expect(image.operations).toEqual(original);
     expect(offline[0]).toEqual(
       expect.objectContaining({
         type: "run",
         user: "root",
-        command: expect.stringContaining(dependencyRecipeSha256(image)),
+        command: expect.stringContaining(dependencyRecipeSha256(image, BASE)),
       })
     );
   });
@@ -57,14 +62,31 @@ describe("offline dependency image", () => {
     const changed = image.runCmd("install-new-dependency", {
       preinstall: true,
     });
-    expect(dependencyRecipeSha256(changed)).not.toBe(
-      dependencyRecipeSha256(image)
+    expect(dependencyRecipeSha256(changed, BASE)).not.toBe(
+      dependencyRecipeSha256(image, BASE)
     );
     expect(
-      dependencyRecipeSha256(SandboxImage.fromDocker("bedrock:2"))
-    ).not.toBe(dependencyRecipeSha256(SandboxImage.fromDocker("bedrock:1")));
+      dependencyRecipeSha256(SandboxImage.fromDocker("bedrock:2"), BASE)
+    ).not.toBe(
+      dependencyRecipeSha256(SandboxImage.fromDocker("bedrock:1"), BASE)
+    );
     expect(dependencyDockerfile(image, BASE)).toContain(
-      dependencyRecipeSha256(image)
+      dependencyRecipeSha256(image, BASE)
+    );
+  });
+
+  it("rejects a receipt built from a different immutable base", () => {
+    const otherBase = `registry.example/dust/bedrock@sha256:${"b".repeat(64)}`;
+    const image = fixture();
+    const originalReceipt = dependencyRecipeSha256(image, BASE);
+    const otherReceipt = dependencyRecipeSha256(image, otherBase);
+    expect(originalReceipt).not.toBe(otherReceipt);
+    expect(dependencyDockerfile(image, BASE)).toContain(originalReceipt);
+    expect(dependencyDockerfile(image, BASE)).not.toContain(otherReceipt);
+    expect(offlineImageOperations(image, otherBase)[0]).toEqual(
+      expect.objectContaining({
+        command: expect.stringContaining(otherReceipt),
+      })
     );
   });
 

@@ -39,11 +39,16 @@ function dependencyCommands(image: SandboxImage): string[] {
   });
 }
 
-export function dependencyRecipeSha256(image: SandboxImage): string {
+export function dependencyRecipeSha256(
+  image: SandboxImage,
+  baseImage: string
+): string {
+  requireImmutableImage(baseImage);
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: 1,
+        version: 2,
+        baseDigest: baseImage,
         base: image.baseImage.imageRef,
         packages: PROVISION_PACKAGES,
         commands: dependencyCommands(image),
@@ -90,7 +95,7 @@ export function dependencyDockerfile(
     ),
     ...commands.map(run),
     run(
-      `mkdir -p /etc/dust && printf '%s\\n' '${dependencyRecipeSha256(image)}' > ${RECEIPT_PATH} && chmod 644 ${RECEIPT_PATH}`
+      `mkdir -p /etc/dust && printf '%s\\n' '${dependencyRecipeSha256(image, baseImage)}' > ${RECEIPT_PATH} && chmod 644 ${RECEIPT_PATH}`
     ),
     "",
   ].join("\n");
@@ -99,16 +104,27 @@ export function dependencyDockerfile(
 /**
  * @cc [owner:jchen0824,label:security;cli] verify-before-skipping-installs
  * An offline template must verify its embedded dependency recipe receipt before
- * skipping marked installs. Preserve every other operation in its original order.
+ * skipping marked installs. The receipt must bind the selected immutable base image
+ * as well as the recipe. Normalize only the imported filesystem root to root:root
+ * mode 0755 so workload users can traverse it. Preserve every other operation
+ * in its original order and do not widen descendant permissions.
  */
 export function offlineImageOperations(
-  image: SandboxImage
+  image: SandboxImage,
+  baseImage: string
 ): readonly Operation[] {
   return [
     {
       type: "run",
       user: "root",
-      command: `test "$(/usr/bin/cat ${RECEIPT_PATH})" = '${dependencyRecipeSha256(image)}'`,
+      command: `test "$(/usr/bin/cat ${RECEIPT_PATH})" = '${dependencyRecipeSha256(image, baseImage)}'`,
+    },
+    {
+      type: "run",
+      user: "root",
+      // The self-hosted OCI import can inherit the host's private directory mode.
+      // Fix only /; recursive permission changes would undo Dust hardening.
+      command: "/usr/bin/chown root:root / && /usr/bin/chmod 0755 /",
     },
     ...image.operations.filter((op) => op.type !== "run" || !op.preinstall),
   ];

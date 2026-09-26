@@ -58,6 +58,7 @@ interface E2BBuildConfig {
   skipCache?: boolean;
   dockerRegistryFactory?: DockerRegistryFactory;
   preinstalledImage?: string;
+  preinstalledBaseImage?: string;
 }
 
 class ContentMaterializer {
@@ -359,9 +360,14 @@ export async function buildSandboxImage(
 
   if (buildConfig.preinstalledImage) {
     requireImmutableImage(buildConfig.preinstalledImage);
+    if (!buildConfig.preinstalledBaseImage) {
+      throw new Error(
+        "preinstalledBaseImage is required for offline image builds"
+      );
+    }
   }
   const operations = buildConfig.preinstalledImage
-    ? offlineImageOperations(image)
+    ? offlineImageOperations(image, buildConfig.preinstalledBaseImage ?? "")
     : image.operations;
 
   try {

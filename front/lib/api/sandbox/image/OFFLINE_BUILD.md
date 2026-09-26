@@ -28,7 +28,8 @@ Import the resulting digest through the self-hosted builder's registry identity:
 ```sh
 npx tsx scripts/sandbox_image_build.ts \
   --image dust-base --tag 0.8.109 \
-  --preinstalled-image REGISTRY/dust-base-dependencies@sha256:DEPENDENCY_DIGEST
+  --preinstalled-image REGISTRY/dust-base-dependencies@sha256:DEPENDENCY_DIGEST \
+  --preinstalled-base-image REGISTRY/dust-sbx-bedrock@sha256:BEDROCK_DIGEST
 ```
 
 Use the existing `SBX_DEV_IMAGE_SUFFIX` for candidate builds. Only the reviewed
@@ -37,11 +38,15 @@ secret environment. The E2B SDK supports `E2B_API_URL` for a private operator tu
 no service-account JSON key is uploaded by the preinstalled-image path. Registry
 access must already be configured on the self-hosted E2B host.
 
-The OCI image carries a dependency recipe checksum. E2B verifies it before
+The OCI image carries a checksum binding the dependency recipe and selected bedrock
+digest. Pass that same expected base digest during import. E2B verifies it before
 skipping any install, so a changed recipe rejects a stale image. This is a
 consistency check, not image authentication: the trusted build receipt and pinned
 digest are still required. E2B retains all unmarked operations in order, including
-user setup, copied tools/assets, service configuration and Dust hardening. Do not
+user setup, copied tools/assets, service configuration and Dust hardening. The
+import path normalizes only `/` to root:root mode 0755; a private host directory
+mode must not prevent non-root workloads from traversing the guest filesystem.
+Descendant permissions are retained. Do not
 remove or mark those operations as preinstallable to make a build pass.
 
 The dependency OCI image is not a finished Dust sandbox and intentionally contains
