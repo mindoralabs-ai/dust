@@ -27,7 +27,7 @@ Import the resulting digest through the self-hosted builder's registry identity:
 
 ```sh
 npx tsx scripts/sandbox_image_build.ts \
-  --image dust-base --tag 0.8.109 \
+  --image dust-base --tag 0.8.110 \
   --preinstalled-image REGISTRY/dust-base-dependencies@sha256:DEPENDENCY_DIGEST \
   --preinstalled-base-image REGISTRY/dust-sbx-bedrock@sha256:BEDROCK_DIGEST
 ```

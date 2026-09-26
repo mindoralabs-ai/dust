@@ -94,7 +94,7 @@ describe("sandbox image registry", () => {
   test("pins the current dust-base and sbx bedrock image tags", () => {
     expect(getDustBaseImage().imageId).toEqual({
       imageName: "dust-base",
-      tag: "0.8.109",
+      tag: "0.8.110",
     });
     expect(getDustBaseImage().baseImage).toEqual({
       type: "docker",
@@ -428,6 +428,28 @@ describe("sandbox image registry", () => {
       nftablesScript,
       "tcp dport 22 drop",
       "meta l4proto udp drop"
+    );
+  });
+
+  test("allows only established TCP replies before private destination drops", () => {
+    const script = getCopiedContent(
+      getCopyOperations(getDustBaseImageOperations()),
+      "/etc/dust/egress-nftables.sh"
+    );
+    const replyRules = script
+      .split("\n")
+      .filter(
+        (line) =>
+          line.startsWith("  /usr/sbin/nft") && line.includes("ct state")
+      );
+    expect(replyRules).toEqual([
+      "  /usr/sbin/nft add rule ip dust-egress filter_output meta skuid $CONTROLLED_UID meta l4proto tcp ct state established ct direction reply accept",
+    ]);
+    expectContentInOrder(script, replyRules[0], "ip daddr 10.0.0.0/8 drop");
+    expectContentInOrder(
+      script,
+      replyRules[0],
+      "ip daddr 169.254.169.254 drop"
     );
   });
 

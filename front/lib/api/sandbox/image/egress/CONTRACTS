@@ -1,0 +1,7 @@
+@cc [owner:jchen0824,label:security] inbound-app-replies-only
+The IPv4 TCP reply exception in egress-nftables.sh must be restricted to controlled
+workload UIDs, ESTABLISHED conntrack state and REPLY direction. It must precede the
+private-destination drops so private E2B proxies can receive application replies.
+It must not admit NEW, RELATED or ORIGINAL-direction traffic, or widen the IPv6,
+metadata, token-broker or private-destination restrictions on workload-initiated
+connections.

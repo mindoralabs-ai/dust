@@ -25,6 +25,11 @@ SYSTEM_RESOLV_CONF=/run/systemd/resolve/stub-resolv.conf
 /usr/sbin/nft add chain ip6 dust-egress filter_output '{ type filter hook output priority 0 ; policy accept ; }'
 
 for CONTROLLED_UID in $CONTROLLED_UIDS; do
+  # Self-hosted E2B proxies can initiate app connections from private IPs.
+  # Permit only TCP replies to those established inbound connections; never
+  # accept NEW, RELATED or ORIGINAL-direction workload-initiated traffic here.
+  /usr/sbin/nft add rule ip dust-egress filter_output meta skuid $CONTROLLED_UID meta l4proto tcp ct state established ct direction reply accept
+
   # DNS interception must run before loopback/private exemptions and before
   # the broad TCP redirect so every port-53 packet lands on the local stub.
   /usr/sbin/nft add rule ip dust-egress nat_output meta skuid $CONTROLLED_UID udp dport 53 redirect to :$DNS_STUB_PORT
