@@ -4,6 +4,7 @@ import {
   getSandboxServicePathHardeningCommand,
 } from "@app/lib/api/sandbox/hardening";
 import { withPocEgressProxyCa } from "@app/lib/api/sandbox/image/poc_egress_ca";
+import { withPocSandboxNetwork } from "@app/lib/api/sandbox/image/poc_network_profile";
 import {
   buildPodPackage,
   POD_PACKAGE_IMAGE_DIR,
@@ -894,7 +895,9 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
   .withNetwork(PROXY_ONLY_NETWORK_POLICY)
   .setWorkdir("/home/agent");
 
-const DUST_BASE_IMAGE = withPocEgressProxyCa(DUST_BASE_IMAGE_BEFORE_POC_CA)
+const DUST_BASE_IMAGE = withPocSandboxNetwork(
+  withPocEgressProxyCa(DUST_BASE_IMAGE_BEFORE_POC_CA)
+)
   .withToolManifest()
   .register({
     imageName: "dust-base",

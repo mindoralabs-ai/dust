@@ -21,9 +21,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@app/lib/file_storage/config", () => ({
   default: { getGcsPrivateUploadsBucket: vi.fn(() => "test-bucket") },
 }));
-vi.mock("@app/lib/api/config", () => ({
-  default: { getApiBaseUrl: vi.fn(() => "https://dust.tt") },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    default: {
+      ...actual.default,
+      getApiBaseUrl: vi.fn(() => "https://dust.tt"),
+    },
+  };
+});
 
 async function sessionAuthForUser(
   user: UserResource,

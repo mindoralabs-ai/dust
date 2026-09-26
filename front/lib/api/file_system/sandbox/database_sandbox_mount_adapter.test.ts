@@ -21,11 +21,15 @@ vi.mock(
   }
 );
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getSandboxApiBaseUrl: vi.fn(() => "https://api.example.test"),
-  },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    default: {
+      ...actual.default,
+      getSandboxApiBaseUrl: vi.fn(() => "https://api.example.test"),
+    },
+  };
+});
 
 const mounts: FileSystemMount[] = [
   {

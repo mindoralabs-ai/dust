@@ -59,11 +59,15 @@ vi.mock("@app/lib/file_storage/config", () => ({
   },
 }));
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getApiBaseUrl: vi.fn(() => "https://dust.tt"),
-  },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    default: {
+      ...actual.default,
+      getApiBaseUrl: vi.fn(() => "https://dust.tt"),
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // forConversation

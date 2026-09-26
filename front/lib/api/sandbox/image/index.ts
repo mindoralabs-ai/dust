@@ -1,4 +1,5 @@
 import config from "@app/lib/api/config";
+import { isPocSandboxNetworkProfile } from "@app/lib/api/sandbox/image/poc_network_profile";
 import { providerToProfile } from "@app/lib/api/sandbox/image/profile";
 import {
   getRegisteredImages,
@@ -82,7 +83,7 @@ export function getSandboxImage(
     return imageResult;
   }
 
-  if (!isDevelopment()) {
+  if (isPocSandboxNetworkProfile() || !isDevelopment()) {
     return imageResult;
   }
 

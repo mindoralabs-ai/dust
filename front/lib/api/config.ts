@@ -42,6 +42,9 @@ export function getDefaultInit(): Promise<RequestInit> | null {
 const config = {
   getDustPocMode: (): string | undefined =>
     EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE"),
+  // Preserve empty values so a mistyped security profile fails closed.
+  getDustPocSandboxNetworkProfile: (): string | undefined =>
+    process.env.DUST_POC_SANDBOX_NETWORK_PROFILE,
   getDustPocWorkspaceIds: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_POC_WORKSPACE_IDS"),
   getDustFrontRegistryMinRevision: (): string =>

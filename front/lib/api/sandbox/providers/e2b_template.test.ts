@@ -27,14 +27,19 @@ function createTestImage(): SandboxImage {
     .setWorkdir("/workspace");
 }
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getE2BSandboxConfig: () => ({
-      apiKey: "default-api-key",
-      domain: "e2b.dev",
-    }),
-  },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      getE2BSandboxConfig: () => ({
+        apiKey: "default-api-key",
+        domain: "e2b.dev",
+      }),
+    },
+  };
+});
 
 const mockDockerRegistryBuilder = {
   copy: vi.fn().mockReturnThis(),
