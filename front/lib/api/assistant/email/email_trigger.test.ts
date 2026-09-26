@@ -28,12 +28,16 @@ const {
   mockSendEmailToRecipients: vi.fn(),
 }));
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getAppUrl: mockGetAppUrl,
-    getEmailValidationSecret: mockGetEmailValidationSecret,
-  },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    default: {
+      ...actual.default,
+      getAppUrl: mockGetAppUrl,
+      getEmailValidationSecret: mockGetEmailValidationSecret,
+    },
+  };
+});
 
 vi.mock("@app/lib/api/email", () => ({
   sendEmail: mockSendEmail,

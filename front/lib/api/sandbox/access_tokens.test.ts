@@ -24,11 +24,12 @@ import { describe, expect, it, vi } from "vitest";
 
 const TEST_SECRET = "test-sandbox-jwt-secret";
 
-vi.mock("@app/lib/api/config", () => ({
-  default: {
-    getSandboxJwtSecret: () => TEST_SECRET,
-  },
-}));
+vi.mock("@app/lib/api/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@app/lib/api/config")>();
+  return {
+    default: { ...actual.default, getSandboxJwtSecret: () => TEST_SECRET },
+  };
+});
 
 async function setupTest() {
   const user = await UserFactory.basic();

@@ -27,7 +27,7 @@ Import the resulting digest through the self-hosted builder's registry identity:
 
 ```sh
 npx tsx scripts/sandbox_image_build.ts \
-  --image dust-base --tag 0.8.110 \
+  --image dust-base --tag 0.8.111 \
   --preinstalled-image REGISTRY/dust-base-dependencies@sha256:DEPENDENCY_DIGEST \
   --preinstalled-base-image REGISTRY/dust-sbx-bedrock@sha256:BEDROCK_DIGEST
 ```
@@ -55,3 +55,12 @@ account/path state; Dust's existing create-time hardening remains mandatory befo
 untrusted execution. Acceptance requires the completed template, a real Dust
 sandbox, runtime hardening and network-isolation tests. A successful OCI build or
 an E2B template listed without a successful build is insufficient.
+
+For the bounded POC profile, use `DUST_POC_MODE=1`,
+`DUST_POC_SANDBOX_NETWORK_PROFILE=dust-poc` and
+`NEXT_PUBLIC_DUST_API_URL=https://dust-api-sit.oktocrew.ai` for both the template
+build and the running Front API/workers. Build the new `0.8.111` release alias;
+`0.8.110` templates do not contain the required hostname mappings. After deployment,
+use `/poke/kill` to retire older versions if any exist, and verify that new app
+invocations use the newly qualified template ID. Do not force-replace the old
+alias or treat image-list presence as build compatibility proof.
