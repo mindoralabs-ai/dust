@@ -37,7 +37,7 @@ import {
 } from "@app/types/files";
 import { Err, Ok } from "@app/types/shared/result";
 import type { JSONSchema7 as JSONSchema } from "json-schema";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tracerMocks = vi.hoisted(() => {
   const setTag = vi.fn();
@@ -151,6 +151,10 @@ const SUCCEEDED_STDOUT = stdoutEnvelope({
 beforeEach(() => {
   vi.clearAllMocks();
   fileStorageMock.reset();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 async function setupExecutionTest(
@@ -797,6 +801,30 @@ describe("SandboxFunctionInvocationResource", () => {
     );
     expect(refetched?.error).toBeUndefined();
     expect(refetched?.input).toBeUndefined();
+  });
+
+  it("uses the public callback origin when the server has an internal API URL", async () => {
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://dust-api.example.com");
+    vi.stubEnv("DUST_INTERNAL_API_URL", "http://dust-front-api.dust-poc.svc");
+    const { authenticator, sandbox, invocation } = await setupExecutionTest();
+    const execSpy = vi
+      .spyOn(sandbox, "exec")
+      .mockResolvedValue(
+        new Ok({ exitCode: 0, stdout: SUCCEEDED_STDOUT, stderr: "" })
+      );
+
+    const result = await invocation.execute(authenticator);
+
+    expect(result.isOk()).toBe(true);
+    expect(execSpy).toHaveBeenCalledWith(
+      authenticator,
+      expect.any(String),
+      expect.objectContaining({
+        envVars: expect.objectContaining({
+          DUST_API_URL: `https://dust-api.example.com/api/v1/w/${authenticator.getNonNullableWorkspace().sId}`,
+        }),
+      })
+    );
   });
 
   it("executes an invocation on the pod sandbox", async () => {
