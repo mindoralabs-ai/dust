@@ -7,6 +7,10 @@
 
 import config from "@app/lib/api/config";
 import type { SandboxImage } from "@app/lib/api/sandbox/image";
+import {
+  offlineImageOperations,
+  requireImmutableImage,
+} from "@app/lib/api/sandbox/image/preinstalled_dependencies";
 import type {
   ContentGenerator,
   Operation,
@@ -53,6 +57,7 @@ interface E2BBuildConfig {
   domain?: string;
   skipCache?: boolean;
   dockerRegistryFactory?: DockerRegistryFactory;
+  preinstalledImage?: string;
 }
 
 class ContentMaterializer {
@@ -111,12 +116,20 @@ class E2BTemplateBuilder {
 
   static fromSandboxImage(
     image: SandboxImage,
-    options: { dockerRegistryFactory: DockerRegistryFactory }
+    options: {
+      dockerRegistryFactory?: DockerRegistryFactory;
+      preinstalledImage?: string;
+      operations: readonly Operation[];
+    }
   ): E2BTemplateBuilder {
-    const builder = options.dockerRegistryFactory(image.baseImage.imageRef);
+    const builder = options.preinstalledImage
+      ? E2BTemplate().fromImage(options.preinstalledImage)
+      : options.dockerRegistryFactory?.(image.baseImage.imageRef);
+    if (!builder) {
+      throw new Error("A registry factory or preinstalled image is required");
+    }
     const e2bBuilder = new E2BTemplateBuilder(builder);
-
-    for (const op of image.operations) {
+    for (const op of options.operations) {
       e2bBuilder.applyOperation(op);
     }
 
@@ -338,15 +351,24 @@ export async function buildSandboxImage(
     "Building E2B sandbox image"
   );
 
-  if (!buildConfig?.dockerRegistryFactory) {
+  if (!buildConfig?.dockerRegistryFactory && !buildConfig?.preinstalledImage) {
     return new Err(
       new Error("dockerRegistryFactory is required to build sandbox images")
     );
   }
 
+  if (buildConfig.preinstalledImage) {
+    requireImmutableImage(buildConfig.preinstalledImage);
+  }
+  const operations = buildConfig.preinstalledImage
+    ? offlineImageOperations(image)
+    : image.operations;
+
   try {
     const e2bBuilder = E2BTemplateBuilder.fromSandboxImage(image, {
       dockerRegistryFactory: buildConfig.dockerRegistryFactory,
+      preinstalledImage: buildConfig.preinstalledImage,
+      operations,
     });
 
     const result = await e2bBuilder.build(imageId, {

@@ -318,7 +318,10 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
   .runCmd(getAgentProxiedSetupCommand(), { user: "root" })
   .runCmd(getSshHardeningCommand(), { user: "root" })
   // The root-owned token broker requires /usr/bin/python3.
-  .runCmd("apt-get update && apt-get install -y python3", { user: "root" })
+  .runCmd("apt-get update && apt-get install -y python3", {
+    user: "root",
+    preinstall: true,
+  })
   // The per-mount broker helpers live outside the agent's group-writable home and serve
   // mode-0600 tokens from /run/dust-gcs.
   .runCmd("mkdir -p /usr/local/bin", { user: "root" })
@@ -350,6 +353,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
     "apt-get update && apt-get install -y ripgrep fd-find sd systemd-resolved",
     {
       user: "root",
+      preinstall: true,
     }
   )
   // Create profile directory and copy profile scripts
@@ -360,7 +364,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
   .runCmd(
     "apt-get update && apt-get install -y software-properties-common && " +
       `add-apt-repository -y ${LIBREOFFICE_PPA} && apt-get update`,
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   // Metric-compatible font substitutes so soffice lays text out at the same
   // positions as the MS fonts it stands in for - Carlito=Calibri,
@@ -375,7 +379,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "sqlite3 libreoffice libeot0 poppler-utils qpdf " +
       "fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2 " +
       "fonts-noto-core && fc-cache -f",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool([
     { name: "git", description: "Version control system", runtime: "system" },
@@ -422,7 +426,10 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
     description: "Python interpreter",
     runtime: "python",
   })
-  .registerTool(getPythonToolEntries(), { installCmd: getPythonInstallCmd() })
+  .registerTool(getPythonToolEntries(), {
+    installCmd: getPythonInstallCmd(),
+    preinstall: true,
+  })
   .registerTool(
     [
       {
@@ -464,6 +471,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       },
     ],
     {
+      preinstall: true,
       installCmd:
         "npm install -g typescript tsx pptxgenjs@4.0.1 zod@4.4.3 drizzle-orm@0.45.2 drizzle-kit@0.31.10 @libsql/client@0.17.4",
     }
@@ -475,7 +483,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "chmod +x /tmp/dsbx && " +
       "mv /tmp/dsbx /opt/bin/dsbx && " +
       "chown root:root /opt/bin/dsbx && chmod 755 /opt/bin/dsbx",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool({
     name: DSBX_TOOL_NAME,
@@ -490,7 +498,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "grep apply_patch-linux-x86_64 /tmp/checksums-sha256.txt | awk '{print $1 \"  /tmp/apply_patch\"}' | sha256sum -c - && " +
       "chmod +x /tmp/apply_patch && " +
       "mv /tmp/apply_patch /opt/bin/apply_patch",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool({
     name: "apply_patch",
@@ -510,7 +518,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "unzip -j /tmp/bun.zip bun-linux-x64/bun -d /tmp && " +
       "mv /tmp/bun /opt/bin/bun && " +
       "chown root:root /opt/bin/bun && chmod 755 /opt/bin/bun",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool({
     name: "bun",
@@ -525,7 +533,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "rm /tmp/dbt.tar.gz /tmp/dbt-checksums.txt && " +
       "mv /tmp/dbt /opt/bin/dbt && " +
       "chown root:root /opt/bin/dbt && chmod 755 /opt/bin/dbt",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool({
     name: "dbt",
@@ -541,7 +549,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "ln -sf /usr/lib/snowflake/snowflake-cli/snow /opt/bin/snow && " +
       "chown -h root:root /opt/bin/snow && " +
       "rm -f /tmp/snowflake-cli.deb",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   .registerTool({
     name: "snow",
@@ -556,7 +564,7 @@ const DUST_BASE_IMAGE_BEFORE_POC_CA = SandboxImage.fromDocker(
       "rm /tmp/litestream.tar.gz && " +
       "mv /tmp/litestream /opt/bin/litestream && " +
       "chown root:root /opt/bin/litestream && chmod 755 /opt/bin/litestream",
-    { user: "root" }
+    { user: "root", preinstall: true }
   )
   // Litestream unit + STATIC config (all paths are sandbox-state contract
   // constants), both baked at build. The unit is deliberately NOT enabled:

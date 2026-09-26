@@ -92,11 +92,21 @@ export class SandboxImage {
     });
   }
 
-  runCmd(command: string, options?: { user?: string }): SandboxImage {
+  /**
+   * @cc [owner:jchen0824,label:cli] preinstall-independent-dependencies
+   * A preinstall-marked command must install shared runtime dependencies as root
+   * without depending on prior account, copy, workdir or environment operations.
+   * The normal E2B build must still execute it at its original position.
+   */
+  runCmd(
+    command: string,
+    options?: { user?: string; preinstall?: boolean }
+  ): SandboxImage {
     const operation: Operation = {
       type: "run",
       command,
       user: options?.user,
+      ...(options?.preinstall ? { preinstall: true } : {}),
     };
 
     return this.clone({
@@ -117,14 +127,18 @@ export class SandboxImage {
 
   registerTool(
     tools: ToolEntry | ToolEntry[],
-    options?: { installCmd?: string }
+    options?: { installCmd?: string; preinstall?: boolean }
   ): SandboxImage {
     const toolsArray = Array.isArray(tools) ? tools : [tools];
 
     const newOperations = options?.installCmd
       ? [
           ...this.operations,
-          { type: "run" as const, command: options.installCmd },
+          {
+            type: "run" as const,
+            command: options.installCmd,
+            ...(options.preinstall ? { preinstall: true } : {}),
+          },
         ]
       : this.operations;
 

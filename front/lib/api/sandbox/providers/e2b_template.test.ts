@@ -61,6 +61,7 @@ const mockDockerRegistryBuilder = {
 };
 
 const mockE2BTemplateFactory = {
+  fromImage: vi.fn().mockReturnValue(mockDockerRegistryBuilder),
   fromTemplate: vi.fn().mockReturnValue(mockDockerRegistryBuilder),
 };
 
@@ -313,6 +314,57 @@ describe("deleteUnbuiltE2BTemplate()", () => {
 describe("buildSandboxImage()", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  test("imports an immutable dependency image and verifies its receipt before offline steps", async () => {
+    mockBuild.mockResolvedValueOnce({ templateId: "offline-template" });
+    const image = SandboxImage.fromDocker("bedrock:1")
+      .runCmd("download-tools", { preinstall: true })
+      .runCmd("harden-accounts", { user: "root" });
+    const preinstalledImage = `registry.example/deps@sha256:${"a".repeat(64)}`;
+    const result = await buildSandboxImage(
+      image,
+      { imageName: "dust-base", tag: "test" },
+      { preinstalledImage }
+    );
+    expect(result.isOk()).toBe(true);
+    expect(mockE2BTemplateFactory.fromImage).toHaveBeenCalledWith(
+      preinstalledImage
+    );
+    expect(mockDockerRegistryFactory).not.toHaveBeenCalled();
+    expect(mockDockerRegistryBuilder.runCmd.mock.calls).toEqual([
+      [
+        expect.stringContaining("preinstalled-dependencies.sha256"),
+        { user: "root" },
+      ],
+      ["harden-accounts", { user: "root" }],
+    ]);
+  });
+
+  test("rejects a mutable offline image before invoking E2B", async () => {
+    await expect(
+      buildSandboxImage(
+        createTestImage(),
+        { imageName: "dust-base", tag: "test" },
+        { preinstalledImage: "deps:latest" }
+      )
+    ).rejects.toThrow("sha256");
+    expect(mockE2BTemplateFactory.fromImage).not.toHaveBeenCalled();
+    expect(mockBuild).not.toHaveBeenCalled();
+  });
+
+  test("keeps marked dependency installs in the normal E2B build", async () => {
+    mockBuild.mockResolvedValueOnce({ templateId: "normal-template" });
+    await buildSandboxImage(
+      SandboxImage.fromDocker("bedrock:1").runCmd("download-tools", {
+        preinstall: true,
+      }),
+      { imageName: "dust-base", tag: "test" },
+      { dockerRegistryFactory: mockDockerRegistryFactory }
+    );
+    expect(mockDockerRegistryBuilder.runCmd).toHaveBeenCalledWith(
+      "download-tools"
+    );
   });
 
   test("calls E2B Template builder methods in operation order", async () => {
