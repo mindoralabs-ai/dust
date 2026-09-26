@@ -22,6 +22,8 @@ interface BuildArgs {
   tag: string;
   skipCache: boolean;
   dockerRegistry: string;
+  preinstalledImage?: string;
+  preinstalledBaseImage?: string;
   rebuild: boolean;
   confirm: boolean;
   release: boolean;
@@ -83,6 +85,8 @@ async function buildImage(args: BuildArgs): Promise<void> {
     tag,
     skipCache,
     dockerRegistry,
+    preinstalledImage,
+    preinstalledBaseImage,
     rebuild,
     confirm,
     release,
@@ -133,7 +137,8 @@ async function buildImage(args: BuildArgs): Promise<void> {
     `Building E2B template '${formatSandboxImageId(imageId)}' from registry config`
   );
 
-  const usesDockerBase = sandboxImage.baseImage.type === "docker";
+  const usesDockerBase =
+    sandboxImage.baseImage.type === "docker" && !preinstalledImage;
   if (usesDockerBase && !dockerRegistry) {
     logger.error(
       { imageName },
@@ -184,6 +189,8 @@ async function buildImage(args: BuildArgs): Promise<void> {
   const result = await buildSandboxImage(sandboxImage, imageId, {
     skipCache,
     dockerRegistryFactory,
+    preinstalledImage,
+    preinstalledBaseImage,
   });
 
   if (result.isErr()) {
@@ -236,6 +243,15 @@ yargs(hideBin(process.argv))
     describe:
       "Docker registry URL (fallback: SBX_GCP_ARTIFACT_REGISTRY env var)",
   })
+  .option("preinstalled-image", {
+    type: "string",
+    describe:
+      "Digest-pinned OCI dependency image for an offline self-hosted builder (keyless registry access)",
+  })
+  .option("preinstalled-base-image", {
+    type: "string",
+    describe: "Expected bedrock digest used to build the dependency image",
+  })
   .option("rebuild", {
     type: "boolean",
     default: false,
@@ -264,6 +280,8 @@ yargs(hideBin(process.argv))
       tag: args.tag,
       skipCache: args["skip-cache"],
       dockerRegistry: getDockerRegistry(args["docker-registry"]),
+      preinstalledImage: args["preinstalled-image"],
+      preinstalledBaseImage: args["preinstalled-base-image"],
       rebuild: args.rebuild,
       confirm: args.confirm,
       release: args.release,

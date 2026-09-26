@@ -95,7 +95,12 @@ export type CopySource =
   | { readonly type: "content"; readonly getContent: ContentGenerator };
 
 export type Operation =
-  | { readonly type: "run"; readonly command: string; readonly user?: string }
+  | {
+      readonly type: "run";
+      readonly command: string;
+      readonly user?: string;
+      readonly preinstall?: boolean;
+    }
   | {
       readonly type: "copy";
       readonly src: CopySource;
