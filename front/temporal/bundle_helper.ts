@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import logger from "@app/logger/logger";
 import { isDevelopment } from "@app/types/shared/env";
 import { normalizeError } from "@app/types/shared/utils/error_utils";
@@ -12,14 +13,51 @@ import type { WorkerName } from "./worker_registry";
 // dev; worker.run() still overlaps once each bundle is ready.
 let workflowBundleQueue: Promise<void> = Promise.resolve();
 
+const workerNameContext = new AsyncLocalStorage<WorkerName>();
+const runningWorkers = new Map<WorkerName, Set<Worker>>();
+
+/**
+ * @cc [owner:jchen0824,label:performance;error-handling] selected-worker-readiness
+ * A selected worker is ready only after its Temporal Worker has entered RUNNING;
+ * an uncreated, stopped, draining, or failed Worker must never report ready.
+ */
+export function areTemporalWorkersRunning(workerNames: WorkerName[]): boolean {
+  return (
+    workerNames.length > 0 &&
+    workerNames.every((name) => {
+      const workers = runningWorkers.get(name);
+      return (
+        workers &&
+        workers.size > 0 &&
+        [...workers].every((worker) => worker.getState() === "RUNNING")
+      );
+    })
+  );
+}
+
+export function runInWorkerContext<T>(workerName: WorkerName, run: () => T): T {
+  return workerNameContext.run(workerName, run);
+}
+
 export function createTemporalWorker(
   ...args: Parameters<typeof Worker.create>
 ): ReturnType<typeof Worker.create> {
+  const workerName = workerNameContext.getStore();
+  const register = (worker: Worker) => {
+    if (workerName) {
+      const workers = runningWorkers.get(workerName) ?? new Set<Worker>();
+      workers.add(worker);
+      runningWorkers.set(workerName, workers);
+    }
+    return worker;
+  };
   if (!isDevelopment() || process.env.USE_TEMPORAL_BUNDLES === "true") {
-    return Worker.create(...args);
+    return Worker.create(...args).then(register);
   }
 
-  const worker = workflowBundleQueue.then(() => Worker.create(...args));
+  const worker = workflowBundleQueue
+    .then(() => Worker.create(...args))
+    .then(register);
   workflowBundleQueue = worker.then(
     () => undefined,
     () => undefined
