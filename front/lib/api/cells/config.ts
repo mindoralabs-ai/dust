@@ -1,3 +1,4 @@
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { CellInfo, CellType } from "@app/types/cell";
 import { isCellType, SUPPORTED_CELLS } from "@app/types/cell";
 import { isDevelopment } from "@app/types/shared/env";
@@ -64,8 +65,7 @@ const ISOLATED_POC_CELL: CellInfo = {
   url:
     EnvironmentConfig.getOptionalEnvVariable("NEXT_PUBLIC_DUST_API_URL") ?? "",
 };
-const isIsolatedPocCell = () =>
-  EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE") === "1";
+const isIsolatedPocCell = dustPocMode;
 
 /**
  * @cc [owner:jchen0824,label:security] poc-cell-isolation

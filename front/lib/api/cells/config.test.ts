@@ -75,4 +75,25 @@ describe("cell catalog", () => {
       "The isolated POC must use the Singapore region"
     );
   });
+
+  it("fails closed on an invalid POC mode before exposing hosted cells", async () => {
+    vi.stubEnv("DUST_POC_MODE", "true");
+    vi.stubEnv("CELL", "cell-00000");
+    vi.stubEnv("REGION", "asia-southeast1");
+
+    const { config } = await import("@app/lib/api/cells/config");
+    const { config: regionConfig } = await import(
+      "@app/lib/api/regions/config"
+    );
+
+    expect(() => config.getAllCells()).toThrow(
+      "Dust POC mode configuration unavailable"
+    );
+    expect(() => config.getCellInfo("cell-00001")).toThrow(
+      "Dust POC mode configuration unavailable"
+    );
+    expect(() => regionConfig.getDustRegionSyncEnabled()).toThrow(
+      "Dust POC mode configuration unavailable"
+    );
+  });
 });

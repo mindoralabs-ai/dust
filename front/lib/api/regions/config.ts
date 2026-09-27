@@ -1,3 +1,4 @@
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { RegionType } from "@app/types/region";
 import { isDevelopment } from "@app/types/shared/env";
 import { EnvironmentConfig } from "@app/types/shared/utils/config";
@@ -17,7 +18,7 @@ export const config = {
     return EnvironmentConfig.getEnvVariable("REGION") as RegionType;
   },
   getDustRegionSyncEnabled: (): boolean => {
-    if (EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE") === "1") {
+    if (dustPocMode()) {
       return false;
     }
     return (
