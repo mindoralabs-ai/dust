@@ -670,6 +670,20 @@ const config = {
       ) !== "false"
     );
   },
+  /**
+   * @cc [owner:jchen0824,label:backend;error-handling] worker-health-port
+   * Worker health MUST bind to a valid TCP port, defaulting to 8081 when the
+   * port is not configured. Invalid nonempty values MUST fail startup.
+   */
+  getWorkerHealthPort: (): number => {
+    const value =
+      EnvironmentConfig.getOptionalEnvVariable("WORKER_HEALTH_PORT") ?? "8081";
+    const port = Number(value);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error("WORKER_HEALTH_PORT must be a valid TCP port.");
+    }
+    return port;
+  },
   getTemporalConnectorsNamespace: () => {
     return EnvironmentConfig.getOptionalEnvVariable(
       "TEMPORAL_CONNECTORS_NAMESPACE"

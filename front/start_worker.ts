@@ -67,10 +67,7 @@ async function runWorkers(workers: WorkerName[]) {
       )
       .end();
   });
-  const healthPort = Number(process.env.WORKER_HEALTH_PORT ?? "8081");
-  if (!Number.isInteger(healthPort) || healthPort < 1 || healthPort > 65535) {
-    throw new Error("WORKER_HEALTH_PORT must be a valid TCP port.");
-  }
+  const healthPort = config.getWorkerHealthPort();
   await new Promise<void>((resolve, reject) => {
     healthServer.once("error", reject);
     healthServer.listen(healthPort, "127.0.0.1", () => {
