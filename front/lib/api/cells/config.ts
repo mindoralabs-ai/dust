@@ -61,6 +61,8 @@ const MAIN_CELL: CellType = "cell-00000";
 const ISOLATED_POC_CELL: CellInfo = {
   ...CELLS[MAIN_CELL],
   region: "asia-southeast1",
+  url:
+    EnvironmentConfig.getOptionalEnvVariable("NEXT_PUBLIC_DUST_API_URL") ?? "",
 };
 const isIsolatedPocCell = () =>
   EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE") === "1";
@@ -69,7 +71,8 @@ const isIsolatedPocCell = () =>
  * @cc [owner:jchen0824,label:security] poc-cell-isolation
  * When DUST_POC_MODE is 1, cell discovery and lookup MUST expose only the configured local
  * main cell in asia-southeast1, peer-cell sync MUST be disabled, and a missing local URL
- * MUST fail closed.
+ * MUST fail closed. Its URL comes from the public API URL already required by
+ * the deployment, rather than the hosted main-cell catalog.
  */
 export const config = {
   getCurrentCell: (): CellInfo => {
@@ -84,8 +87,10 @@ export const config = {
       if (EnvironmentConfig.getEnvVariable("REGION") !== "asia-southeast1") {
         throw new Error("The isolated POC must use the Singapore region");
       }
-      if (!EnvironmentConfig.getOptionalEnvVariable("DUST_US_URL")) {
-        throw new Error("DUST_US_URL is required in the isolated POC");
+      if (!ISOLATED_POC_CELL.url) {
+        throw new Error(
+          "NEXT_PUBLIC_DUST_API_URL is required in the isolated POC"
+        );
       }
     }
     return isIsolatedPocCell() ? ISOLATED_POC_CELL : CELLS[cell];
@@ -94,9 +99,8 @@ export const config = {
     return EnvironmentConfig.getEnvVariable("REGION_RESOLVER_SECRET");
   },
   getCellInfo(cell: CellType): CellInfo {
-    if (isIsolatedPocCell() && cell !== this.getCurrentCell().name) {
-      throw new Error(`Cell ${cell} is unavailable in the isolated POC`);
-    }
+    // Existing WorkOS sessions may carry an old hosted-cell claim. Keep the
+    // callback on this isolated deployment without exposing a hosted URL.
     return isIsolatedPocCell() ? this.getCurrentCell() : CELLS[cell];
   },
   getCellUrl(cell: CellType): string {
@@ -124,6 +128,6 @@ export const config = {
     );
   },
   getDustCellSyncMasterUrl: (): string => {
-    return CELLS[MAIN_CELL].url;
+    return isIsolatedPocCell() ? ISOLATED_POC_CELL.url : CELLS[MAIN_CELL].url;
   },
 };

@@ -10,7 +10,7 @@ describe("cell catalog", () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     vi.stubEnv("CELL", "cell-00000");
     vi.stubEnv("REGION", "asia-southeast1");
-    vi.stubEnv("DUST_US_URL", "https://dust-api-sit.oktocrew.ai");
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://dust-api-sit.oktocrew.ai");
 
     const { config } = await import("@app/lib/api/cells/config");
 
@@ -25,6 +25,9 @@ describe("cell catalog", () => {
     expect(config.getCurrentCell()).toBe(config.getCurrentCell());
     expect(config.getCellInfo("cell-00000")).toBe(config.getCurrentCell());
     expect(config.getDustCellSyncEnabled()).toBe(false);
+    expect(config.getDustCellSyncMasterUrl()).toBe(
+      "https://dust-api-sit.oktocrew.ai"
+    );
     const { config: regionConfig, REGION_TIMEZONES } = await import(
       "@app/lib/api/regions/config"
     );
@@ -33,9 +36,7 @@ describe("cell catalog", () => {
     expect(REGION_TIMEZONES["asia-southeast1"]).toBe("Asia/Singapore");
     const { getRegionDisplay } = await import("@app/lib/poke/regions");
     expect(getRegionDisplay(regionConfig.getCurrentRegion())).toBe("🇸🇬 SG");
-    expect(() => config.getCellInfo("cell-00001")).toThrow(
-      "unavailable in the isolated POC"
-    );
+    expect(config.getCellInfo("cell-00001")).toBe(config.getCurrentCell());
   });
 
   it("keeps the upstream peer catalog outside the isolated POC", async () => {
@@ -53,12 +54,12 @@ describe("cell catalog", () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     vi.stubEnv("CELL", "cell-00000");
     vi.stubEnv("REGION", "asia-southeast1");
-    vi.stubEnv("DUST_US_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "");
 
     const { config } = await import("@app/lib/api/cells/config");
 
     expect(() => config.getCurrentCell()).toThrow(
-      "DUST_US_URL is required in the isolated POC"
+      "NEXT_PUBLIC_DUST_API_URL is required in the isolated POC"
     );
   });
 
@@ -66,7 +67,7 @@ describe("cell catalog", () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     vi.stubEnv("CELL", "cell-00000");
     vi.stubEnv("REGION", "us-central1");
-    vi.stubEnv("DUST_US_URL", "https://dust-api-sit.oktocrew.ai");
+    vi.stubEnv("NEXT_PUBLIC_DUST_API_URL", "https://dust-api-sit.oktocrew.ai");
 
     const { config } = await import("@app/lib/api/cells/config");
 

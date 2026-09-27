@@ -496,13 +496,16 @@ export async function getOutputFromLLMStream(
           });
 
           const currentRegion = regionsConfig.getCurrentRegion();
-          let region: "us" | "eu";
+          let region: "us" | "eu" | "asia-southeast1";
           switch (currentRegion) {
             case "europe-west1":
               region = "eu";
               break;
             case "us-central1":
               region = "us";
+              break;
+            case "asia-southeast1":
+              region = "asia-southeast1";
               break;
             default:
               throw new Error(`Unexpected region: ${currentRegion}`);

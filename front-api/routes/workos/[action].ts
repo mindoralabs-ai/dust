@@ -455,9 +455,7 @@ async function handleCallback(ctx: Context) {
       }
     }
 
-    // The isolated POC has one local cell; hosted-cell claims and affinity must
-    // not redirect its WorkOS callback to Dust's hosted deployments.
-    if (config.getDustPocMode() === "1" || invite) {
+    if (invite) {
       targetCell = currentCell;
     } else if (userSessionCellName) {
       targetCell = cellsConfig.getCellInfo(userSessionCellName);
