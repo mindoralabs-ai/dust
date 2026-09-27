@@ -166,10 +166,11 @@ async function runAgentLoopWorkerForQueue({
   });
 
   // TODO(2025-11-12 INSTRUMENTATION): Drain Langfuse data before shutdown.
-  process.on("SIGTERM", () => {
+  const onShutdown = () => {
     markShuttingDownWithDelayedAbort(SHUTDOWN_TOOL_ABORT_DELAY_MS);
     void worker.shutdown();
-  });
+  };
+  process.on("SIGTERM", onShutdown);
 
   try {
     await worker.run(); // this resolves after shutdown completes
@@ -178,8 +179,9 @@ async function runAgentLoopWorkerForQueue({
       { err: normalizeError(error), taskQueue },
       "Agent loop worker error"
     );
+    throw error;
   } finally {
+    process.off("SIGTERM", onShutdown);
     await connection.close();
-    process.exit(0);
   }
 }
