@@ -23,6 +23,7 @@ export function RegionalFlag({
         />
       );
     case "us-central1":
+    case "asia-southeast1":
       return null;
     default:
       assertNeverAndIgnore(region);

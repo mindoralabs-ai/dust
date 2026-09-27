@@ -1,4 +1,3 @@
-import { SUPPORTED_REGIONS } from "@app/types/region";
 import { z } from "zod";
 import type { WhitelistableFeature } from "../../shared/feature_flags";
 import { isWhitelistableFeature } from "../../shared/feature_flags";
@@ -138,7 +137,11 @@ export const ModelConfigurationSchema = z.object({
   // based on a feature flag alone, since unsupported models reject the request.
   supportsToolSearch: z.boolean().optional(),
   // Specify if the model is available in specific regions.
-  regionalAvailability: z.record(z.enum(SUPPORTED_REGIONS), z.boolean()),
+  regionalAvailability: z.object({
+    "us-central1": z.boolean(),
+    "europe-west1": z.boolean(),
+    "asia-southeast1": z.boolean().optional(),
+  }),
   availableIfOneOf: AvailabilityConditionSchema.optional(),
   unavailableIfOneOf: UnavailabilityConditionSchema.optional(),
   customAvailableIf: CustomAvailabilityConditionSchema.optional(),

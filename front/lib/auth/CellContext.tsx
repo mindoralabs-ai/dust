@@ -22,6 +22,7 @@ const LEGACY_REGION_STORAGE_KEY =
   import.meta.env?.VITE_DUST_REGION_STORAGE_KEY ?? "dust-region-api";
 
 const DEFAULT_URL = import.meta.env?.VITE_DUST_API_URL ?? "";
+const IS_ISOLATED_POC = import.meta.env?.VITE_DUST_POC_MODE === "1";
 
 const DEFAULT_CELL: CellType = isCellType(import.meta.env?.VITE_DUST_CELL ?? "")
   ? (import.meta.env?.VITE_DUST_CELL as CellType)
@@ -34,7 +35,7 @@ function getCellInfo(cell: CellType): CellInfo {
     case "cell-00000":
       return {
         name: cell,
-        region: "us-central1",
+        region: IS_ISOLATED_POC ? "asia-southeast1" : "us-central1",
         url: import.meta.env?.VITE_DUST_API_URL_US ?? DEFAULT_URL,
       };
     case "cell-00001":
@@ -55,6 +56,9 @@ function getCellInfo(cell: CellType): CellInfo {
 }
 
 function getAllCells(): CellInfo[] {
+  if (IS_ISOLATED_POC) {
+    return [DEFAULT_CELL_INFO];
+  }
   return SUPPORTED_CELLS.map((cell) => getCellInfo(cell));
 }
 
@@ -153,6 +157,11 @@ interface CellContextValue {
 
 const CellContext = createContext<CellContextValue | null>(null);
 
+/**
+ * @cc [owner:jchen0824,label:security] poc-browser-cell-isolation
+ * When VITE_DUST_POC_MODE is 1, restored or selected cell state MUST resolve to the
+ * build-configured local API URL, and this provider MUST NOT offer another cell.
+ */
 export function CellProvider({ children }: { children: React.ReactNode }) {
   const { mutate } = useSWRConfig();
   const [currentCellInfo, setCurrentCellInfo] =
@@ -191,7 +200,9 @@ export function CellProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    const resolvedCellInfo = cellInfo ?? DEFAULT_CELL_INFO;
+    const resolvedCellInfo = IS_ISOLATED_POC
+      ? DEFAULT_CELL_INFO
+      : (cellInfo ?? DEFAULT_CELL_INFO);
     setCurrentCellInfo(resolvedCellInfo);
     currentUrlRef.current = resolvedCellInfo.url;
 
@@ -206,12 +217,16 @@ export function CellProvider({ children }: { children: React.ReactNode }) {
 
   const setCellInfo = useCallback(
     (cellInfo: CellInfo, options?: { keepInStorage?: boolean }) => {
-      currentUrlRef.current = cellInfo.url;
+      if (IS_ISOLATED_POC && cellInfo.name !== DEFAULT_CELL) {
+        throw new Error("Other cells are unavailable in the isolated POC");
+      }
+      const selectedCell = IS_ISOLATED_POC ? DEFAULT_CELL_INFO : cellInfo;
+      currentUrlRef.current = selectedCell.url;
 
       if (options?.keepInStorage) {
-        setStoredCellInfo(cellInfo);
+        setStoredCellInfo(selectedCell);
       }
-      setCurrentCellInfo(cellInfo);
+      setCurrentCellInfo(selectedCell);
 
       void mutate(() => true, undefined, { revalidate: true });
     },

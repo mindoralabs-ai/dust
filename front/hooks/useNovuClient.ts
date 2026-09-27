@@ -47,6 +47,8 @@ const getNovuEnvForCell = ({
         apiUrl = process.env.NEXT_PUBLIC_NOVU_API_URL_EU;
         socketUrl = process.env.NEXT_PUBLIC_NOVU_WEBSOCKET_API_URL_EU;
         break;
+      case "asia-southeast1":
+        break;
       default:
         assertNeverAndIgnore(cell.region);
         break;

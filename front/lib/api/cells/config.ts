@@ -1,3 +1,4 @@
+import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import type { CellInfo, CellType } from "@app/types/cell";
 import { isCellType, SUPPORTED_CELLS } from "@app/types/cell";
 import { isDevelopment } from "@app/types/shared/env";
@@ -58,25 +59,57 @@ const CELLS: Record<CellType, CellInfo> = Object.fromEntries(
 ) satisfies Record<CellType, CellInfo>;
 
 const MAIN_CELL: CellType = "cell-00000";
+const ISOLATED_POC_CELL: CellInfo = {
+  ...CELLS[MAIN_CELL],
+  region: "asia-southeast1",
+  url:
+    EnvironmentConfig.getOptionalEnvVariable("NEXT_PUBLIC_DUST_API_URL") ?? "",
+};
+const isIsolatedPocCell = dustPocMode;
 
+/**
+ * @cc [owner:jchen0824,label:security] poc-cell-isolation
+ * When DUST_POC_MODE is 1, cell discovery and lookup MUST expose only the configured local
+ * main cell in asia-southeast1, peer-cell sync MUST be disabled, and a missing local URL
+ * MUST fail closed. Its URL comes from the public API URL already required by
+ * the deployment, rather than the hosted main-cell catalog.
+ */
 export const config = {
   getCurrentCell: (): CellInfo => {
     const cell = EnvironmentConfig.getEnvVariable("CELL");
     if (!isCellType(cell)) {
       throw new Error(`Invalid cell: ${cell}`);
     }
-    return CELLS[cell];
+    if (isIsolatedPocCell()) {
+      if (cell !== MAIN_CELL) {
+        throw new Error("The isolated POC must use the main cell");
+      }
+      if (EnvironmentConfig.getEnvVariable("REGION") !== "asia-southeast1") {
+        throw new Error("The isolated POC must use the Singapore region");
+      }
+      if (!ISOLATED_POC_CELL.url) {
+        throw new Error(
+          "NEXT_PUBLIC_DUST_API_URL is required in the isolated POC"
+        );
+      }
+    }
+    return isIsolatedPocCell() ? ISOLATED_POC_CELL : CELLS[cell];
   },
   getLookupApiSecret: (): string => {
     return EnvironmentConfig.getEnvVariable("REGION_RESOLVER_SECRET");
   },
   getCellInfo(cell: CellType): CellInfo {
-    return CELLS[cell];
+    // Existing WorkOS sessions may carry an old hosted-cell claim. Keep the
+    // callback on this isolated deployment without exposing a hosted URL.
+    return isIsolatedPocCell() ? this.getCurrentCell() : CELLS[cell];
   },
   getCellUrl(cell: CellType): string {
     return this.getCellInfo(cell).url;
   },
   getAllCells(): CellInfo[] {
+    if (isIsolatedPocCell()) {
+      return [this.getCurrentCell()];
+    }
     return SUPPORTED_CELLS.map((cell) => this.getCellInfo(cell));
   },
   isMainCell(): boolean {
@@ -87,11 +120,14 @@ export const config = {
     return this.getAllCells().filter((cell) => cell.name !== currentCell.name);
   },
   getDustCellSyncEnabled: (): boolean => {
+    if (isIsolatedPocCell()) {
+      return false;
+    }
     return (
       EnvironmentConfig.getEnvVariable("CELL") !== MAIN_CELL || isDevelopment()
     );
   },
   getDustCellSyncMasterUrl: (): string => {
-    return CELLS[MAIN_CELL].url;
+    return isIsolatedPocCell() ? ISOLATED_POC_CELL.url : CELLS[MAIN_CELL].url;
   },
 };

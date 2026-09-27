@@ -20,6 +20,7 @@ import { SANDBOX_TRUST_ENV_VARS } from "@app/lib/api/sandbox/trust_env";
 import type { Authenticator } from "@app/lib/auth";
 import type { SandboxResource } from "@app/lib/resources/sandbox_resource";
 import logger from "@app/logger/logger";
+import type { RegionType } from "@app/types/region";
 import { isDevelopment } from "@app/types/shared/env";
 import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
@@ -57,14 +58,23 @@ const MITM_SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
 // moment the sandbox boots and the bundle self-heal never fires.
 const MITM_CA_BUNDLE_MARKER_PATH = "/etc/dust/.ca-bundle.merged";
 
-const REGION_PROXY_PREFIX = {
+const REGION_PROXY_PREFIX: Partial<Record<RegionType, string>> = {
   "europe-west1": "eu",
   "us-central1": "us",
 } as const;
 
+/**
+ * @cc [owner:jchen0824,label:security] singapore-explicit-egress
+ * Singapore sandboxes MUST use an explicitly configured proxy host rather than a
+ * hosted Dust proxy fallback.
+ */
 function getDefaultProxyHost(): string {
   const region = regionConfig.getCurrentRegion();
-  return `${REGION_PROXY_PREFIX[region]}.sandbox-egress.dust.tt`;
+  const prefix = REGION_PROXY_PREFIX[region];
+  if (!prefix) {
+    throw new Error(`An explicit egress proxy host is required in ${region}`);
+  }
+  return `${prefix}.sandbox-egress.dust.tt`;
 }
 
 function getProxyHost(): string {
