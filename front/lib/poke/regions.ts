@@ -7,6 +7,8 @@ export const getRegionDisplay = (region: RegionType): string => {
       return "🇪🇺 EU";
     case "us-central1":
       return "🇺🇸 US";
+    case "asia-southeast1":
+      return "🇸🇬 SG";
     default:
       assertNever(region);
   }
@@ -19,6 +21,8 @@ export const getRegionChipColor = (
     case "europe-west1":
       return "highlight";
     case "us-central1":
+      return "success";
+    case "asia-southeast1":
       return "success";
     default:
       assertNever(region);

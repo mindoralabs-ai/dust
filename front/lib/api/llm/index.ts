@@ -53,10 +53,18 @@ function withEapAnthropicKey(
   return { ...credentials, ANTHROPIC_API_KEY: eapApiKey };
 }
 
+/**
+ * @cc [owner:jchen0824,label:product;security] singapore-regional-only-fails-closed
+ * A Singapore workspace marked regional-models-only MUST NOT fall back to EU or global
+ * endpoints until a Singapore-only provider is explicitly qualified.
+ */
 function getRegionFilter(auth: Authenticator): ValueFilter<Region> | undefined {
   const dustRegion = multiRegionsConfig.getCurrentRegion();
 
   const regionalModelsOnly = auth.getNonNullableWorkspace().regionalModelsOnly;
+  if (dustRegion === "asia-southeast1" && regionalModelsOnly) {
+    throw new Error("Regional-only models are not configured for Singapore");
+  }
   if (dustRegion === "us-central1" || !regionalModelsOnly) {
     return undefined;
   }

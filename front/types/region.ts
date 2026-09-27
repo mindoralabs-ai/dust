@@ -1,4 +1,8 @@
-export const SUPPORTED_REGIONS = ["europe-west1", "us-central1"] as const;
+export const SUPPORTED_REGIONS = [
+  "europe-west1",
+  "us-central1",
+  "asia-southeast1",
+] as const;
 export type RegionType = (typeof SUPPORTED_REGIONS)[number];
 
 export interface RegionInfo {

@@ -26,10 +26,18 @@ export const REGION_TO_ELEVENLABS_ENVIRONMENT = {
   },
 };
 
+/**
+ * @cc [owner:jchen0824,label:security] singapore-transcription-fails-closed
+ * Singapore POC transcription MUST fail before contacting a US or EU ElevenLabs
+ * endpoint until its data residency choice is explicitly configured.
+ */
 export function getElevenLabs() {
   const credentials = dustManagedServiceCredentials();
   const apiKey = credentials.ELEVENLABS_API_KEY;
   const region = regionsConfig.getCurrentRegion();
+  if (region === "asia-southeast1") {
+    throw new Error("ElevenLabs transcription is not configured for Singapore");
+  }
 
   const elevenLabsEnvironment =
     REGION_TO_ELEVENLABS_ENVIRONMENT[region].environment;

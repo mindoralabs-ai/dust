@@ -58,25 +58,54 @@ const CELLS: Record<CellType, CellInfo> = Object.fromEntries(
 ) satisfies Record<CellType, CellInfo>;
 
 const MAIN_CELL: CellType = "cell-00000";
+const ISOLATED_POC_CELL: CellInfo = {
+  ...CELLS[MAIN_CELL],
+  region: "asia-southeast1",
+};
+const isIsolatedPocCell = () =>
+  EnvironmentConfig.getOptionalEnvVariable("DUST_POC_MODE") === "1";
 
+/**
+ * @cc [owner:jchen0824,label:security] poc-cell-isolation
+ * When DUST_POC_MODE is 1, cell discovery and lookup MUST expose only the configured local
+ * main cell in asia-southeast1, peer-cell sync MUST be disabled, and a missing local URL
+ * MUST fail closed.
+ */
 export const config = {
   getCurrentCell: (): CellInfo => {
     const cell = EnvironmentConfig.getEnvVariable("CELL");
     if (!isCellType(cell)) {
       throw new Error(`Invalid cell: ${cell}`);
     }
-    return CELLS[cell];
+    if (isIsolatedPocCell()) {
+      if (cell !== MAIN_CELL) {
+        throw new Error("The isolated POC must use the main cell");
+      }
+      if (EnvironmentConfig.getEnvVariable("REGION") !== "asia-southeast1") {
+        throw new Error("The isolated POC must use the Singapore region");
+      }
+      if (!EnvironmentConfig.getOptionalEnvVariable("DUST_US_URL")) {
+        throw new Error("DUST_US_URL is required in the isolated POC");
+      }
+    }
+    return isIsolatedPocCell() ? ISOLATED_POC_CELL : CELLS[cell];
   },
   getLookupApiSecret: (): string => {
     return EnvironmentConfig.getEnvVariable("REGION_RESOLVER_SECRET");
   },
   getCellInfo(cell: CellType): CellInfo {
-    return CELLS[cell];
+    if (isIsolatedPocCell() && cell !== this.getCurrentCell().name) {
+      throw new Error(`Cell ${cell} is unavailable in the isolated POC`);
+    }
+    return isIsolatedPocCell() ? this.getCurrentCell() : CELLS[cell];
   },
   getCellUrl(cell: CellType): string {
     return this.getCellInfo(cell).url;
   },
   getAllCells(): CellInfo[] {
+    if (isIsolatedPocCell()) {
+      return [this.getCurrentCell()];
+    }
     return SUPPORTED_CELLS.map((cell) => this.getCellInfo(cell));
   },
   isMainCell(): boolean {
@@ -87,6 +116,9 @@ export const config = {
     return this.getAllCells().filter((cell) => cell.name !== currentCell.name);
   },
   getDustCellSyncEnabled: (): boolean => {
+    if (isIsolatedPocCell()) {
+      return false;
+    }
     return (
       EnvironmentConfig.getEnvVariable("CELL") !== MAIN_CELL || isDevelopment()
     );

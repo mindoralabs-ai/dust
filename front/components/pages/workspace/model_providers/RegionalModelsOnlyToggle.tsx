@@ -23,6 +23,7 @@ const REGIONAL_MODELS_ONLY_TOGGLE_CONFIG: Record<
     icon: <RegionalFlag region="europe-west1" size={32} />,
   },
   "us-central1": null,
+  "asia-southeast1": null,
 };
 
 interface RegionalModelsOnlyToggleProps {

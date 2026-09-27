@@ -41,11 +41,15 @@ app.get("/", async (ctx): HandlerResult<GetTranscribeTokenResponseBody> => {
   }
 
   try {
+    const region = regionsConfig.getCurrentRegion();
+    if (region === "asia-southeast1") {
+      throw new Error(
+        "ElevenLabs transcription is not configured for Singapore"
+      );
+    }
     const elevenlabs = getElevenLabs();
     const { token } =
       await elevenlabs.tokens.singleUse.create("realtime_scribe");
-    const region = regionsConfig.getCurrentRegion();
-
     const baseUri = REGION_TO_ELEVENLABS_ENVIRONMENT[region].websocketUrl;
 
     return ctx.json({ token, baseUri });
