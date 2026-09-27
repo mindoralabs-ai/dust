@@ -48,3 +48,27 @@ describe("worker metrics configuration", () => {
     expect(config.getTemporalDatadogMetricsEnabled()).toBe(value !== "false");
   });
 });
+
+describe("worker health port configuration", () => {
+  it("defaults to 8081 and accepts an explicit valid port", () => {
+    vi.spyOn(EnvironmentConfig, "getOptionalEnvVariable")
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce("8083");
+    expect(config.getWorkerHealthPort()).toBe(8081);
+    expect(config.getWorkerHealthPort()).toBe(8083);
+  });
+
+  it.each([
+    "0",
+    "65536",
+    "8081junk",
+    "1.5",
+  ])("rejects invalid explicit port %s", (value) => {
+    vi.spyOn(EnvironmentConfig, "getOptionalEnvVariable").mockReturnValue(
+      value
+    );
+    expect(() => config.getWorkerHealthPort()).toThrow(
+      "WORKER_HEALTH_PORT must be a valid TCP port."
+    );
+  });
+});
