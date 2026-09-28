@@ -65,13 +65,12 @@ function Empty() {
 // Fixed sizes: jsdom has no layout.
 const MOCK_SIZES = { viewportHeight: 1000, itemHeight: 50 };
 
-function List({
-  data,
-  methodsRef,
-}: {
+interface ListProps {
   data: Message[] | undefined;
   methodsRef?: Ref<VirtuosoMessageListMethods<Message, string>>;
-}) {
+}
+
+function List({ data, methodsRef }: ListProps) {
   return (
     <VirtuosoMockContext.Provider value={MOCK_SIZES}>
       <VirtuosoMessageListLicense licenseKey="">

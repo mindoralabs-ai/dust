@@ -117,6 +117,8 @@ export interface MessageListView<Context> {
   getContext(): Context;
   getScrollLocation(): ListScrollLocation;
   isScrollInProgress(): boolean;
+  // Called after a data change whose scroll policy asked for no scroll.
+  keepViewport(): void;
 }
 
 // react-virtuoso keeps the viewport stable on prepend when the first item
@@ -200,6 +202,7 @@ export class MessageListStore<Data, Context> {
     append: (items, scrollToBottom) => {
       this.commit([...this.items, ...items]);
       this.applyScrollPolicy(scrollToBottom, items);
+      this.keepViewportUnlessScrolling();
     },
     batch: (callback, scrollToBottom) => {
       this.batchDepth += 1;
@@ -212,6 +215,7 @@ export class MessageListStore<Data, Context> {
         this.applyScrollPolicy(scrollToBottom, this.items);
         if (this.changedDuringBatch) {
           this.changedDuringBatch = false;
+          this.keepViewportUnlessScrolling();
           this.emit();
         }
       }
@@ -235,13 +239,18 @@ export class MessageListStore<Data, Context> {
         ...this.items.slice(at),
       ]);
       this.applyScrollPolicy(scrollToBottom, items);
+      this.keepViewportUnlessScrolling();
     },
     map: (callback, scrollToBottom) => {
       const next = this.items.map(callback);
-      if (next.some((item, index) => item !== this.items[index])) {
+      const changed = next.some((item, index) => item !== this.items[index]);
+      if (changed) {
         this.commit(next);
       }
       this.applyScrollPolicy(scrollToBottom, next);
+      if (changed) {
+        this.keepViewportUnlessScrolling();
+      }
     },
     prepend: (items) => {
       if (items.length === 0) {
@@ -289,6 +298,14 @@ export class MessageListStore<Data, Context> {
       this.requestScroll(bottomLocation(decision));
     } else {
       this.requestScroll(decision);
+    }
+  }
+
+  // Without a requested scroll, a data change keeps the viewport, even at the
+  // bottom. Inside a batch, the batch's policy decides once it ends.
+  private keepViewportUnlessScrolling(): void {
+    if (this.batchDepth === 0 && this.pendingScroll === null) {
+      this.view?.keepViewport();
     }
   }
 

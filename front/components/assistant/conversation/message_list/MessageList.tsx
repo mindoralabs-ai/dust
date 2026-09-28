@@ -333,6 +333,9 @@ class ListController<Data, Context> {
   private rendered: Data[] = [];
   private flushScheduled = false;
   private locationScheduled = false;
+  // False once the list unmounts: queued frames must not scroll a page the
+  // list no longer owns, such as the window after a conversation switch.
+  private attached = true;
 
   constructor(
     store: MessageListStore<Data, Context>,
@@ -350,6 +353,9 @@ class ListController<Data, Context> {
     };
     store.view = {
       beforeStructuralChange: () => this.captureChangeAnchor(),
+      keepViewport: () => {
+        this.pinnedToBottom = false;
+      },
       getContext: () => this.context,
       getScrollLocation: () => this.readLocation(),
       isScrollInProgress: () => this.smoothScroll !== null,
@@ -409,6 +415,9 @@ class ListController<Data, Context> {
 
   // Publishes the location to useVirtuosoLocation, and to onScroll for scrolls.
   publishLocation(fromScroll: boolean): void {
+    if (!this.attached) {
+      return;
+    }
     const next = this.readLocation();
     this.location.set(next);
     if (fromScroll && this.initialized) {
@@ -423,6 +432,9 @@ class ListController<Data, Context> {
     this.locationScheduled = true;
     requestAnimationFrame(() => {
       this.locationScheduled = false;
+      if (!this.attached) {
+        return;
+      }
       if (this.smoothScroll === null && this.changeAnchor === null) {
         this.pinnedToBottom = this.readLocation().bottomOffset === 0;
       }
@@ -457,7 +469,7 @@ class ListController<Data, Context> {
     const target: HTMLElement | Window | null = this.windowMode
       ? window
       : this.scroller;
-    if (!target) {
+    if (!target || !this.attached) {
       return;
     }
     if (typeof target.scrollTo === "function") {
@@ -693,7 +705,22 @@ class ListController<Data, Context> {
     });
   }
 
+  attach(): void {
+    this.attached = true;
+  }
+
+  // Invalidates queued scrolls and anchor restores.
+  detach(): void {
+    this.attached = false;
+    this.scrollToken++;
+    this.smoothScroll = null;
+    this.changeAnchor = null;
+  }
+
   private flush(): void {
+    if (!this.attached) {
+      return;
+    }
     const items = this.store.current();
     if (items.length > 0 && !this.virtuoso) {
       // Not mounted yet; the next render flushes again.
@@ -1050,6 +1077,10 @@ function MessageListComponent<Data, Context>({
     [store, controller]
   );
   useImperativeHandle(methodsRef, () => controller.methods, [controller]);
+  useLayoutEffect(() => {
+    controller.attach();
+    return () => controller.detach();
+  }, [controller]);
 
   const version = useSyncExternalStore(
     store.subscribe,
@@ -1348,6 +1379,12 @@ function MessageListComponent<Data, Context>({
 }
 
 // Generic forwardRef component, as Sparkle's SearchInputWithPopover.
+/**
+ * @cc [owner:jchen0824,label:react] pinned-bottom-follows-resizes
+ * While the view is at the bottom, resizes of the footer, the viewport or rendered content MUST
+ * keep it at the bottom. It stops following once the user scrolls away, or once a data change
+ * whose policy requested no scroll keeps the viewport.
+ */
 export const VirtuosoMessageList = forwardRef<
   VirtuosoMessageListMethods<unknown, unknown>,
   VirtuosoMessageListProps<unknown, unknown>

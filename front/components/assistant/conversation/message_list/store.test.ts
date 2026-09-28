@@ -32,6 +32,7 @@ function makeStore(
   store.reset(items);
   store.view = {
     beforeStructuralChange: () => {},
+    keepViewport: () => {},
     getContext: () => "context",
     getScrollLocation: () => location(),
     isScrollInProgress: () => false,
@@ -192,5 +193,49 @@ describe("MessageListStore scroll policies", () => {
     store.data.append([{ id: "b" }], () => true);
 
     expect(versions).toEqual([before + 1]);
+  });
+});
+
+describe("MessageListStore viewport keeping", () => {
+  it("keeps the viewport after a data change that requests no scroll", () => {
+    const keepViewport = vi.fn();
+    const store = makeStore([{ id: "a" }], { keepViewport });
+
+    store.data.append([{ id: "b" }]);
+    store.data.insert([{ id: "x" }], 1, false);
+    store.data.map((item) => ({ ...item, text: "changed" }));
+    expect(keepViewport).toHaveBeenCalledTimes(3);
+
+    // Nothing changed: nothing to keep.
+    store.data.map((item) => item);
+    expect(keepViewport).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not keep the viewport when the change requests a scroll", () => {
+    const keepViewport = vi.fn();
+    const store = makeStore([{ id: "a" }], { keepViewport });
+
+    store.data.append([{ id: "b" }], true);
+
+    expect(keepViewport).not.toHaveBeenCalled();
+    expect(store.takePendingScroll()).not.toBeNull();
+  });
+
+  it("lets a batch decide once, from its own policy", () => {
+    const keepViewport = vi.fn();
+    const store = makeStore([{ id: "a" }], { keepViewport });
+
+    store.data.batch(
+      () => store.data.map((item) => ({ ...item, text: "x" })),
+      () => ({ index: "LAST" as const, align: "end" as const })
+    );
+    expect(keepViewport).not.toHaveBeenCalled();
+    store.takePendingScroll();
+
+    store.data.batch(
+      () => store.data.map((item) => ({ ...item, text: "y" })),
+      () => false
+    );
+    expect(keepViewport).toHaveBeenCalledTimes(1);
   });
 });
