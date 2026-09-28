@@ -23,7 +23,7 @@ import {
   MessageListStore,
   normalizeLocation,
 } from "@app/components/assistant/conversation/message_list/store";
-import { assertNever } from "@app/types/shared/utils/assert_never";
+import { assertNeverAndIgnore } from "@app/types/shared/utils/assert_never";
 import type {
   ComponentType,
   CSSProperties,
@@ -124,8 +124,9 @@ const SETTLE_FRAMES = 8;
 // Resizes do not pull the viewport back to the bottom right after the user
 // starts scrolling, before the scroll event is processed.
 const USER_SCROLL_GRACE_MS = 150;
-// Frames spent keeping the first visible item in place after a prepend.
-const PREPEND_ANCHOR_FRAMES = 12;
+// Frames spent keeping the first visible item in place after rows are added
+// or removed above it.
+const ANCHOR_RESTORE_FRAMES = 12;
 // A smooth scroll is over once the position is unchanged for this many frames.
 const SCROLL_END_STABLE_FRAMES = 3;
 const SCROLL_END_TIMEOUT_MS = 1500;
@@ -169,7 +170,8 @@ function toListAlign(align: ItemAlign | undefined): ListAlign {
     case "end":
       return align;
     default:
-      return assertNever(align);
+      assertNeverAndIgnore(align);
+      return "start";
   }
 }
 
@@ -189,7 +191,8 @@ function alignedScrollTop(
     case "end":
       return top + height - visible;
     default:
-      return assertNever(align);
+      assertNeverAndIgnore(align);
+      return top;
   }
 }
 
@@ -203,7 +206,8 @@ function footerClearance(align: ListAlign, footerHeight: number): number {
     case "end":
       return footerHeight;
     default:
-      return assertNever(align);
+      assertNeverAndIgnore(align);
+      return 0;
   }
 }
 
@@ -303,13 +307,14 @@ class ListController<Data, Context> {
   // The running programmatic smooth scroll, if any.
   private smoothScroll: { token: number; toBottom: boolean } | null = null;
   private scrollToken = 0;
-  private lastUserScrollAt = 0;
+  private lastUserScrollAtMs = 0;
   // Whether content resizes keep the viewport at the bottom. Only scrolling
   // (the user's or the list's) changes it.
   private pinnedToBottom = false;
-  // The first visible item before a prepend, kept in place once rendered.
-  private prependAnchor: {
-    capturedAt: number;
+  // The first visible item before rows were added or removed, kept in place
+  // once the change is rendered.
+  private changeAnchor: {
+    capturedAtMs: number;
     identity: unknown;
     offset: number;
   } | null = null;
@@ -344,7 +349,7 @@ class ListController<Data, Context> {
       scrollToItem: (target) => store.requestScroll(target),
     };
     store.view = {
-      beforePrepend: () => this.capturePrependAnchor(),
+      beforeStructuralChange: () => this.captureChangeAnchor(),
       getContext: () => this.context,
       getScrollLocation: () => this.readLocation(),
       isScrollInProgress: () => this.smoothScroll !== null,
@@ -418,7 +423,7 @@ class ListController<Data, Context> {
     this.locationScheduled = true;
     requestAnimationFrame(() => {
       this.locationScheduled = false;
-      if (this.smoothScroll === null && this.prependAnchor === null) {
+      if (this.smoothScroll === null && this.changeAnchor === null) {
         this.pinnedToBottom = this.readLocation().bottomOffset === 0;
       }
       this.viewAnchor = this.firstVisibleItem();
@@ -433,7 +438,7 @@ class ListController<Data, Context> {
       this.pinnedToBottom &&
       this.initialized &&
       this.smoothScroll === null &&
-      performance.now() - this.lastUserScrollAt > USER_SCROLL_GRACE_MS
+      performance.now() - this.lastUserScrollAtMs > USER_SCROLL_GRACE_MS
     ) {
       this.scrollTop(this.maxScrollTop(), "instant");
     }
@@ -444,7 +449,7 @@ class ListController<Data, Context> {
     if (
       isScrollIntent(event, this.windowMode ? null : this.scroller, this.footer)
     ) {
-      this.lastUserScrollAt = performance.now();
+      this.lastUserScrollAtMs = performance.now();
     }
   };
 
@@ -488,7 +493,7 @@ class ListController<Data, Context> {
   // Stays at the bottom while rendered items replace size estimates.
   private settleAtBottom(
     token: number,
-    startedAt: number,
+    startedAtMs: number,
     framesLeft: number,
     stableFrames: number,
     onSettled: (() => void) | undefined
@@ -498,7 +503,7 @@ class ListController<Data, Context> {
       return;
     }
     requestAnimationFrame(() => {
-      if (token !== this.scrollToken || this.lastUserScrollAt > startedAt) {
+      if (token !== this.scrollToken || this.lastUserScrollAtMs > startedAtMs) {
         onSettled?.();
         return;
       }
@@ -508,7 +513,7 @@ class ListController<Data, Context> {
       }
       this.settleAtBottom(
         token,
-        startedAt,
+        startedAtMs,
         framesLeft - 1,
         atBottom ? stableFrames + 1 : 0,
         onSettled
@@ -526,8 +531,8 @@ class ListController<Data, Context> {
     onDone?: () => void
   ): void {
     const token = ++this.scrollToken;
-    const startedAt = performance.now();
-    const deadline = startedAt + SCROLL_END_TIMEOUT_MS;
+    const startedAtMs = performance.now();
+    const deadlineMs = startedAtMs + SCROLL_END_TIMEOUT_MS;
     this.smoothScroll = { token, toBottom: followBottom };
     this.pinnedToBottom = false;
     start();
@@ -547,7 +552,7 @@ class ListController<Data, Context> {
       if (token !== this.scrollToken) {
         return;
       }
-      const interrupted = this.lastUserScrollAt > startedAt;
+      const interrupted = this.lastUserScrollAtMs > startedAtMs;
       if (interrupted) {
         finish();
         return;
@@ -565,7 +570,7 @@ class ListController<Data, Context> {
       lastTop = top;
       if (
         stableFrames >= SCROLL_END_STABLE_FRAMES ||
-        performance.now() > deadline
+        performance.now() > deadlineMs
       ) {
         if (followBottom && this.readLocation().bottomOffset > 0) {
           this.scrollTop(this.maxScrollTop(), "instant");
@@ -694,12 +699,13 @@ class ListController<Data, Context> {
       // Not mounted yet; the next render flushes again.
       return;
     }
+    // A requested scroll wins over keeping the previous view in place.
     const target = this.store.takePendingScroll();
     if (target) {
+      this.changeAnchor = null;
       this.performScroll(target);
-    }
-    if (this.prependAnchor) {
-      this.restorePrependAnchor(PREPEND_ANCHOR_FRAMES, 0);
+    } else if (this.changeAnchor) {
+      this.restoreChangeAnchor(ANCHOR_RESTORE_FRAMES, 0);
     }
     this.refreshRendered();
     this.publishLocation(false);
@@ -765,28 +771,30 @@ class ListController<Data, Context> {
       : null;
   }
 
-  // react-virtuoso compensates a prepend with estimated item sizes; this keeps
-  // the first visible item exactly where it was. The bottom stays pinned instead.
-  private capturePrependAnchor(): void {
+  // Rows added or removed above the viewport would move it: react-virtuoso
+  // compensates a prepend only with estimated sizes, and an insert or delete
+  // not at all. This keeps the first visible item exactly where it was. The
+  // bottom stays pinned instead.
+  private captureChangeAnchor(): void {
     if (this.pinnedToBottom) {
-      this.prependAnchor = null;
+      this.changeAnchor = null;
       return;
     }
     const anchor = this.firstVisibleItem();
-    this.prependAnchor = anchor
-      ? { ...anchor, capturedAt: performance.now() }
+    this.changeAnchor = anchor
+      ? { ...anchor, capturedAtMs: performance.now() }
       : null;
   }
 
-  private restorePrependAnchor(framesLeft: number, stableFrames: number): void {
-    const anchor = this.prependAnchor;
+  private restoreChangeAnchor(framesLeft: number, stableFrames: number): void {
+    const anchor = this.changeAnchor;
     if (
       !anchor ||
       framesLeft === 0 ||
       stableFrames >= 3 ||
-      this.lastUserScrollAt > anchor.capturedAt
+      this.lastUserScrollAtMs > anchor.capturedAtMs
     ) {
-      this.prependAnchor = null;
+      this.changeAnchor = null;
       return;
     }
     const metrics = this.metrics();
@@ -803,7 +811,7 @@ class ListController<Data, Context> {
       }
     }
     requestAnimationFrame(() =>
-      this.restorePrependAnchor(framesLeft - 1, stable)
+      this.restoreChangeAnchor(framesLeft - 1, stable)
     );
   }
 
@@ -888,7 +896,7 @@ class ListController<Data, Context> {
     this.rendered = [];
     this.initialized = false;
     this.pinnedToBottom = false;
-    this.prependAnchor = null;
+    this.changeAnchor = null;
     this.viewAnchor = null;
   }
 
@@ -1144,7 +1152,7 @@ function MessageListComponent<Data, Context>({
     };
   }, [controller, scroller, useWindowScroll]);
 
-  // Content resizes move the location without a scroll event.
+  // Content and viewport resizes move the location without a scroll event.
   useEffect(() => {
     const list = listRef.current;
     if (!list || typeof ResizeObserver === "undefined") {
@@ -1154,6 +1162,19 @@ function MessageListComponent<Data, Context>({
     observer.observe(list);
     return () => observer.disconnect();
   }, [controller]);
+  useEffect(() => {
+    if (useWindowScroll) {
+      window.addEventListener("resize", controller.handleResize);
+      return () =>
+        window.removeEventListener("resize", controller.handleResize);
+    }
+    if (!scroller || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(controller.handleResize);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [controller, scroller, useWindowScroll]);
 
   const mountKey =
     items.length > 0 &&

@@ -112,8 +112,8 @@ export interface MessageListDataMethods<Data, Context> {
 
 // What the store needs from the rendered list to evaluate scroll policies.
 export interface MessageListView<Context> {
-  // Called before items are added above the current ones.
-  beforePrepend(): void;
+  // Called before rows are added or removed, while the DOM shows the old rows.
+  beforeStructuralChange(): void;
   getContext(): Context;
   getScrollLocation(): ListScrollLocation;
   isScrollInProgress(): boolean;
@@ -220,6 +220,7 @@ export class MessageListStore<Data, Context> {
     findAndDelete: (predicate) => {
       const next = this.items.filter((item, index) => !predicate(item, index));
       if (next.length !== this.items.length) {
+        this.view?.beforeStructuralChange();
         this.commit(next);
       }
     },
@@ -227,6 +228,7 @@ export class MessageListStore<Data, Context> {
     get: () => this.items.slice(),
     insert: (items, offset, scrollToBottom) => {
       const at = Math.max(0, Math.min(offset, this.items.length));
+      this.view?.beforeStructuralChange();
       this.commit([
         ...this.items.slice(0, at),
         ...items,
@@ -245,7 +247,7 @@ export class MessageListStore<Data, Context> {
       if (items.length === 0) {
         return;
       }
-      this.view?.beforePrepend();
+      this.view?.beforeStructuralChange();
       this.firstItemIndex -= items.length;
       this.commit([...items, ...this.items]);
     },

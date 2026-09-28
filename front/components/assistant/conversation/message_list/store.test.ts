@@ -31,7 +31,7 @@ function makeStore(
   const store = new MessageListStore<Item, string>();
   store.reset(items);
   store.view = {
-    beforePrepend: () => {},
+    beforeStructuralChange: () => {},
     getContext: () => "context",
     getScrollLocation: () => location(),
     isScrollInProgress: () => false,
