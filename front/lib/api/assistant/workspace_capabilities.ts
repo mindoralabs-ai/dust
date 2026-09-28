@@ -5,6 +5,10 @@ import {
   isToolWithKnowledge,
 } from "@app/lib/actions/mcp_helper";
 import { getWhitelistedProviders } from "@app/lib/api/assistant/models";
+import {
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import type { MCPServerType, MCPServerViewType } from "@app/lib/api/mcp";
 import { config as regionConfig } from "@app/lib/api/regions/config";
 import { filterEnabledModels } from "@app/lib/assistant";
@@ -49,7 +53,10 @@ export async function getAvailableModelsForWorkspace(
   const region = regionConfig.getCurrentRegion();
   const whitelistedProviders = getWhitelistedProviders(auth);
 
-  const allUsedModels = [...USED_MODEL_CONFIGS, ...CUSTOM_MODEL_CONFIGS];
+  // The isolated POC offers its locked model alone, without stream meta-models.
+  const allUsedModels = isPocModelLockEnabled()
+    ? [POC_LOCKED_MODEL_CONFIG]
+    : [...USED_MODEL_CONFIGS, ...CUSTOM_MODEL_CONFIGS];
   return filterEnabledModels(allUsedModels, {
     featureFlags,
     plan,

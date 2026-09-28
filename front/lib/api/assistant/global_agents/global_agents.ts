@@ -114,6 +114,10 @@ import {
   getMCPServerViewsForGlobalAgents,
 } from "@app/lib/api/assistant/global_agents/tools";
 import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
+import {
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
 import { getDefaultStreamConfigForAuth } from "@app/lib/model_tiers/enabled_models";
@@ -129,6 +133,7 @@ import {
   isGlobalAgentId,
 } from "@app/types/assistant/assistant";
 import { CUSTOM_MODEL_CONFIGS } from "@app/types/assistant/models/custom_models.generated";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import type { ModelConfigurationType } from "@app/types/assistant/models/types";
 import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 import { isComputerFeatureEnabled } from "@app/types/shared/feature_flags";
@@ -1002,6 +1007,32 @@ const MODEL_ONLY_GLOBAL_AGENTS_SID: readonly GLOBAL_AGENTS_SID[] = [
   GLOBAL_AGENTS_SID.GEMINI_PRO,
 ];
 
+// In the isolated POC, a global agent that passed the provider filter runs the
+// locked model (see resolveModel), so it shows that model rather than the one,
+// or the stream, it was built with. Noop agents keep their static replies.
+function withPocLockedModel(
+  agent: AgentConfigurationType
+): AgentConfigurationType {
+  if (agent.model.modelId === NOOP_MODEL_ID) {
+    return agent;
+  }
+
+  const { reasoningEffort } = agent.model;
+  return {
+    ...agent,
+    model: {
+      ...agent.model,
+      providerId: POC_LOCKED_MODEL_CONFIG.providerId,
+      modelId: POC_LOCKED_MODEL_CONFIG.modelId,
+      reasoningEffort:
+        reasoningEffort &&
+        POC_LOCKED_MODEL_CONFIG.supportedReasoningEfforts[reasoningEffort]
+          ? reasoningEffort
+          : POC_LOCKED_MODEL_CONFIG.defaultReasoningEffort,
+    },
+  };
+}
+
 function getCustomModelIndexForGlobalAgent(sId: string): number | null {
   if (!isGlobalAgentId(sId)) {
     return null;
@@ -1177,7 +1208,13 @@ export async function getGlobalAgents(
       ? await buildSidekickContext(auth, agentsIdsToFetch)
       : null;
 
-  const autoDefaultModelConfig = await getDefaultStreamConfigForAuth(auth);
+  const isModelLocked = isPocModelLockEnabled();
+
+  // The isolated POC offers no stream, so @dust falls back to the whitelisted
+  // large model, which is the locked model.
+  const autoDefaultModelConfig = isModelLocked
+    ? null
+    : await getDefaultStreamConfigForAuth(auth);
 
   // For now we retrieve them all
   // We will store them in the database later to allow admin enable them or not
@@ -1206,7 +1243,11 @@ export async function getGlobalAgents(
       agentFetcherResult.scope === "global" &&
       isProviderWhitelistedForAuth(auth, agentFetcherResult.model.providerId)
     ) {
-      globalAgents.push(agentFetcherResult);
+      globalAgents.push(
+        isModelLocked
+          ? withPocLockedModel(agentFetcherResult)
+          : agentFetcherResult
+      );
     }
   }
 

@@ -11,6 +11,11 @@ import {
   unsafeHardDeleteAgentConfiguration,
 } from "@app/lib/api/assistant/configuration/agent";
 import { getAgentConfigurationRequirementsFromCapabilities } from "@app/lib/api/assistant/permissions";
+import {
+  isPocLockedModelId,
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getSupportedModelConfig } from "@app/lib/llms/model_configurations";
 import { getModelTierAccessErrorForAgentConfiguration } from "@app/lib/model_tiers/access";
@@ -176,6 +181,16 @@ export async function createOrUpgradeAgentConfiguration({
       new Error(
         `Unsupported model "${assistant.model.modelId}" for provider ` +
           `"${assistant.model.providerId}".`
+      )
+    );
+  }
+
+  // The isolated POC runs a single model, so an agent must be saved on it.
+  if (isPocModelLockEnabled() && !isPocLockedModelId(modelConfig.modelId)) {
+    return new Err(
+      new Error(
+        `Model "${modelConfig.displayName}" is not available in this ` +
+          `deployment. Use ${POC_LOCKED_MODEL_CONFIG.displayName}.`
       )
     );
   }

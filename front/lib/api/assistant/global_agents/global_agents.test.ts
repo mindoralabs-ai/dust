@@ -15,14 +15,19 @@ import {
   AUTO_FAST_MODEL_ID,
   AUTO_MODEL_ID,
 } from "@app/types/assistant/models/auto";
-import { GEMINI_3_1_PRO_MODEL_ID } from "@app/types/assistant/models/google_ai_studio";
+import {
+  GEMINI_3_1_PRO_MODEL_ID,
+  GEMINI_3_7_FLASH_MODEL_CONFIG,
+  GEMINI_3_7_FLASH_MODEL_ID,
+} from "@app/types/assistant/models/google_ai_studio";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import {
   GPT_5_5_MODEL_ID,
   GPT_5_6_LUNA_MODEL_ID,
   GPT_5_6_SOL_MODEL_ID,
 } from "@app/types/assistant/models/openai";
 import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const CUSTOM_MODEL_ID = vi.hoisted(() => "custom-model-for-global-agent-test");
 const UNBOUND_CUSTOM_MODEL_ID = vi.hoisted(
@@ -586,5 +591,96 @@ describe("getGlobalAgents Dust Auto default", () => {
 
     expect(agents).toHaveLength(1);
     expect(agents[0].model).toMatchObject({ modelId: expectedModelId });
+  });
+});
+
+const MODEL_GLOBAL_AGENT_IDS = [
+  GLOBAL_AGENTS_SID.DUST,
+  GLOBAL_AGENTS_SID.GPT5,
+  GLOBAL_AGENTS_SID.CLAUDE_5_SONNET,
+  GLOBAL_AGENTS_SID.MISTRAL_LARGE,
+  GLOBAL_AGENTS_SID.GEMINI_PRO,
+];
+
+// The POC mode is cached once read as "1": every lock-off case in this file
+// must run before the "POC model lock" cases below.
+describe("getGlobalAgents providers outside the isolated POC", () => {
+  it("keeps the GPT, Claude and Mistral agents", async () => {
+    const auth = await createAuthenticatorWithFlags([]);
+
+    const agents = await getGlobalAgents(auth, MODEL_GLOBAL_AGENT_IDS, "light");
+
+    expect(agents.map((agent) => agent.sId)).toEqual(MODEL_GLOBAL_AGENT_IDS);
+    expect(agents.map((agent) => agent.model.providerId)).toEqual([
+      AUTO_MODEL_ID,
+      "openai",
+      "anthropic",
+      "mistral",
+      "google_ai_studio",
+    ]);
+  });
+});
+
+describe("getGlobalAgents POC model lock", () => {
+  beforeEach(() => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("hides other providers' agents and shows Gemini 3.7 Flash on the rest", async () => {
+    const auth = await createAuthenticatorWithFlags([]);
+
+    const agents = await getGlobalAgents(auth, MODEL_GLOBAL_AGENT_IDS, "light");
+
+    expect(
+      agents.map((agent) => ({ sId: agent.sId, model: agent.model }))
+    ).toEqual([
+      {
+        sId: GLOBAL_AGENTS_SID.DUST,
+        model: expect.objectContaining({
+          providerId: "google_ai_studio",
+          modelId: GEMINI_3_7_FLASH_MODEL_ID,
+          reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+        }),
+      },
+      {
+        sId: GLOBAL_AGENTS_SID.GEMINI_PRO,
+        model: expect.objectContaining({
+          providerId: "google_ai_studio",
+          modelId: GEMINI_3_7_FLASH_MODEL_ID,
+        }),
+      },
+    ]);
+  });
+
+  it("shows Gemini 3.7 Flash on a stream agent but keeps a noop static reply", async () => {
+    const auth = await createAuthenticatorWithFlags([]);
+
+    const [followUp] = await getGlobalAgents(
+      auth,
+      [GLOBAL_AGENTS_SID.SIDEKICK],
+      "light",
+      { globalAgentContext: { userMessageRank: 2 } }
+    );
+    expect(followUp.model).toMatchObject({
+      providerId: "google_ai_studio",
+      modelId: GEMINI_3_7_FLASH_MODEL_ID,
+    });
+
+    const [staticReply] = await getGlobalAgents(
+      auth,
+      [GLOBAL_AGENTS_SID.SIDEKICK],
+      "light",
+      {
+        globalAgentContext: {
+          userMessageRank: 0,
+          sidekickIsNewAgentFromScratch: true,
+        },
+      }
+    );
+    expect(staticReply.model.modelId).toBe(NOOP_MODEL_ID);
   });
 });

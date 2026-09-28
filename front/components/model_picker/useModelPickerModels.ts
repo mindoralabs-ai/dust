@@ -21,6 +21,8 @@ type ModelPickerMenuMode = "select" | "filter";
 
 const EMPTY_DEGRADED_MODEL_IDS: ReadonlySet<string> = new Set();
 
+const IS_ISOLATED_POC = import.meta.env?.VITE_DUST_POC_MODE === "1";
+
 /**
  * @cc [owner:Nils-Fedrigo,label:product] hosting-region-only-when-guaranteed
  * `modelProps.hostingRegion` is the current cell's region when the workspace
@@ -107,6 +109,10 @@ export function useModelPickerModels({
   }, [models, isFilterMode, modelIds]);
 
   const tiers = useMemo(() => {
+    // The isolated POC runs a single model, so there is no stream to offer.
+    if (IS_ISOLATED_POC) {
+      return [];
+    }
     if (!modelIds) {
       return MODEL_TIERS;
     }

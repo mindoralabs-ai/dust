@@ -1,6 +1,10 @@
 import { getDegradedModelIds } from "@app/lib/api/assistant/degraded_models";
 import { PREFERRED_LARGE_MODEL_CONFIGS } from "@app/lib/api/assistant/model_preferences";
 import { selectEnabledModel } from "@app/lib/api/assistant/models";
+import {
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getAgentAllowedTierNamesOverride } from "@app/lib/model_tiers/agent_tier_overrides";
 import {
@@ -71,20 +75,24 @@ export async function resolveModel(
 
   const requestedConfig = userConfig ?? agentConfig;
 
-  let enabled =
-    requestedConfig && isModelStreamId(requestedConfig.modelId)
-      ? requestedConfig
-      : selectEnabledModel(
-          auth,
-          removeNulls([
-            userConfig,
-            agentConfig,
-            ...PREFERRED_LARGE_MODEL_CONFIGS,
-          ]),
-          {
-            featureFlags,
-          }
-        );
+  let enabled: ModelConfigurationType | null;
+  if (isPocModelLockEnabled()) {
+    // The isolated POC runs its locked model whatever the selection, the agent
+    // model or the stream asked for; the requested effort still applies below.
+    enabled = selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
+      featureFlags,
+    });
+  } else if (requestedConfig && isModelStreamId(requestedConfig.modelId)) {
+    enabled = requestedConfig;
+  } else {
+    enabled = selectEnabledModel(
+      auth,
+      removeNulls([userConfig, agentConfig, ...PREFERRED_LARGE_MODEL_CONFIGS]),
+      {
+        featureFlags,
+      }
+    );
+  }
 
   // Effort chosen by a stream tier (Basic/Standard/Premium) for its resolved
   // model. When set, it takes precedence over any effort carried by the
