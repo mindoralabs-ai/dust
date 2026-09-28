@@ -1023,6 +1023,12 @@ interface ListItemWrapperProps<Data, Context>
   extends ItemProps<Data>,
     ContextProp<Context> {}
 
+/**
+ * @cc [owner:jchen0824,label:react] empty-items-stay-measurable
+ * An item whose content renders nothing (hidden onboarding, handover and system messages) MUST
+ * still measure at least 1px. react-virtuoso never records a 0px size, and an unmeasured item
+ * stops it from rendering the items after it.
+ */
 function ListItemWrapper<Data, Context>({
   item,
   context: _context,
@@ -1039,7 +1045,11 @@ function ListItemWrapper<Data, Context>({
     [runtime, item]
   );
   return (
-    <div {...props} ref={register} style={{ ...style, display: "flow-root" }} />
+    <div
+      {...props}
+      ref={register}
+      style={{ ...style, display: "flow-root", minHeight: 1 }}
+    />
   );
 }
 
