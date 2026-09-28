@@ -50,6 +50,41 @@ export function transformAgentConfigurationToFormData(
   };
 }
 
+/**
+ * The isolated POC runs a single model, so a form seeded from an agent or a
+ * template saved on another model starts on the advertised default model
+ * instead. The seeded effort is kept where that model supports it.
+ */
+export function withPocDefaultModel(
+  formData: AgentBuilderFormData,
+  defaultModel: EnabledModelConfigurationType
+): AgentBuilderFormData {
+  const { generationSettings } = formData;
+  const { modelSettings, reasoningEffort } = generationSettings;
+  if (
+    modelSettings?.providerId === defaultModel.providerId &&
+    modelSettings.modelId === defaultModel.modelId
+  ) {
+    return formData;
+  }
+
+  return {
+    ...formData,
+    generationSettings: {
+      ...generationSettings,
+      modelSettings: {
+        providerId: defaultModel.providerId,
+        modelId: defaultModel.modelId,
+      },
+      reasoningEffort:
+        reasoningEffort &&
+        defaultModel.supportedReasoningEfforts[reasoningEffort]
+          ? reasoningEffort
+          : defaultModel.defaultReasoningEffort,
+    },
+  };
+}
+
 export function getDefaultAgentFormData({
   user,
   defaultModel,

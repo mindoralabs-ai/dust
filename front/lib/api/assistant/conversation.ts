@@ -1881,15 +1881,40 @@ export async function retryAgentMessage(
 
   // A reply resolved on another model before the POC lock is resolved again,
   // onto the model the lock runs.
-  let retryModelResolution: AgentMessageModelResolution =
+  const reusableResolvedModel =
     message.resolvedModel && isPocRuntimeModel(message.resolvedModel)
-      ? {
-          resolvedModel: message.resolvedModel,
-          modelResolutionMethod: message.modelResolutionMethod ?? "agent",
-        }
-      : await resolveModelForMentionedAgent(auth, {
-          configuration: message.configuration,
-        });
+      ? message.resolvedModel
+      : null;
+
+  // The isolated POC has no model to fall back to, so a retry that resolves its
+  // model again is checked as a post is.
+  if (
+    !reusableResolvedModel &&
+    isPocModelLockEnabled() &&
+    !isRuntimeModelAvailable(getPocRuntimeModel(message.configuration.model), {
+      featureFlags: await getFeatureFlags(auth),
+      plan: auth.plan(),
+      regionalModelsOnly: auth.getNonNullableWorkspace().regionalModelsOnly,
+    })
+  ) {
+    return new Err({
+      status_code: 400,
+      api_error: {
+        type: "invalid_request_error",
+        message: "The model is not supported.",
+        model: message.configuration.model,
+      },
+    });
+  }
+
+  let retryModelResolution: AgentMessageModelResolution = reusableResolvedModel
+    ? {
+        resolvedModel: reusableResolvedModel,
+        modelResolutionMethod: message.modelResolutionMethod ?? "agent",
+      }
+    : await resolveModelForMentionedAgent(auth, {
+        configuration: message.configuration,
+      });
 
   const user = auth.user();
   if (user) {

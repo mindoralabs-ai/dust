@@ -28,6 +28,7 @@ import {
   transformAgentConfigurationToFormData,
   transformDuplicateAgentToFormData,
   transformTemplateToFormData,
+  withPocDefaultModel,
 } from "@app/components/agent_builder/transformAgentConfiguration";
 import type { AgentBuilderMCPConfigurationWithId } from "@app/components/agent_builder/types";
 import { ConversationSidePanelProvider } from "@app/components/assistant/conversation/ConversationSidePanelContext";
@@ -117,11 +118,14 @@ interface AgentBuilderProps {
   onSaved?: () => void;
 }
 
+// The isolated POC runs a single model: every form starts on its default.
+const IS_ISOLATED_POC = import.meta.env?.VITE_DUST_POC_MODE === "1";
+
 export default function AgentBuilder(props: AgentBuilderProps) {
   const { owner } = useAgentBuilderContext();
   const { defaultModel, isModelsError } = useModels({ owner });
 
-  if (!props.agentConfiguration && !defaultModel) {
+  if ((!props.agentConfiguration || IS_ISOLATED_POC) && !defaultModel) {
     if (isModelsError) {
       return (
         <div className="flex h-full w-full items-center justify-center p-4">
@@ -159,12 +163,17 @@ export default function AgentBuilder(props: AgentBuilderProps) {
       newAgentDefaultModel={
         props.agentConfiguration ? undefined : defaultModel!
       }
+      pocDefaultModel={
+        IS_ISOLATED_POC && defaultModel ? defaultModel : undefined
+      }
     />
   );
 }
 
 interface AgentBuilderFormProps extends AgentBuilderProps {
   newAgentDefaultModel?: EnabledModelConfigurationType;
+  // Set in the isolated POC, whose single model every form must start on.
+  pocDefaultModel?: EnabledModelConfigurationType;
 }
 
 function AgentBuilderForm({
@@ -173,6 +182,7 @@ function AgentBuilderForm({
   conversationId,
   onSaved,
   newAgentDefaultModel,
+  pocDefaultModel,
 }: AgentBuilderFormProps) {
   const { owner, user, isAdmin, assistantTemplate } = useAgentBuilderContext();
   const { supportedDataSourceViews } = useDataSourceViewsContext();
@@ -329,33 +339,40 @@ function AgentBuilderForm({
   // Any other values we are fetching on client side should be updated inside
   // the useEffect below.
   const defaultValues = useMemo(() => {
-    if (duplicateAgentId && agentConfiguration) {
-      // Handle agent duplication case
-      return transformDuplicateAgentToFormData(agentConfiguration, user);
-    }
+    const formData = (() => {
+      if (duplicateAgentId && agentConfiguration) {
+        // Handle agent duplication case
+        return transformDuplicateAgentToFormData(agentConfiguration, user);
+      }
 
-    if (agentConfiguration) {
-      return transformAgentConfigurationToFormData(agentConfiguration);
-    }
+      if (agentConfiguration) {
+        return transformAgentConfigurationToFormData(agentConfiguration);
+      }
 
-    if (assistantTemplate && newAgentDefaultModel) {
-      return transformTemplateToFormData(
-        assistantTemplate,
+      if (assistantTemplate && newAgentDefaultModel) {
+        return transformTemplateToFormData(
+          assistantTemplate,
+          user,
+          newAgentDefaultModel
+        );
+      }
+
+      return getDefaultAgentFormData({
         user,
-        newAgentDefaultModel
-      );
-    }
+        defaultModel: newAgentDefaultModel!,
+      });
+    })();
 
-    return getDefaultAgentFormData({
-      user,
-      defaultModel: newAgentDefaultModel!,
-    });
+    return pocDefaultModel
+      ? withPocDefaultModel(formData, pocDefaultModel)
+      : formData;
   }, [
     agentConfiguration,
     duplicateAgentId,
     assistantTemplate,
     user,
     newAgentDefaultModel,
+    pocDefaultModel,
   ]);
 
   const form = useForm<AgentBuilderFormData>({

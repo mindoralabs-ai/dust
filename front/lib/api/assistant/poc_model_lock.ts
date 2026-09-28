@@ -19,12 +19,12 @@ export const POC_LOCKED_MODEL_CONFIG: ModelConfigurationType =
  * `POC_LOCKED_MODEL_CONFIG` (the provider-less `noop` model excepted: where noop is enabled,
  * `resolveModel` MUST keep a noop request on it). The message preflights of `conversation.ts`
  * MUST check the model an agent runs, `getPocRuntimeModel`, not the one it was saved on, and
- * refuse it where the workspace cannot run it; a retry MUST NOT reuse a resolution that
- * `isPocRuntimeModel` rejects. The lock MUST NOT make that model available where the
- * workspace's own provider whitelist, plan, region or flags exclude it: lookups then find no
- * model, and a default or stream fallback that must name one marks it unselectable.
- * `getGlobalAgents` MUST also leave out a model agent that the member's tier cap would refuse
- * to run. While it is false, their behaviour MUST be unchanged by this lock.
+ * refuse it where the workspace cannot run it. A retry MUST NOT reuse a resolution that
+ * `isPocRuntimeModel` rejects, and is then checked as a post is. The lock MUST NOT make that
+ * model available where the workspace's own provider whitelist, plan, region or flags exclude
+ * it: lookups then find no model, and a default or stream fallback that must name one marks it
+ * unselectable. `getGlobalAgents` MUST also leave out a model agent that the member's tier cap
+ * would refuse to run. While it is false, their behaviour MUST be unchanged by this lock.
  */
 export function isPocModelLockEnabled(): boolean {
   return dustPocMode();

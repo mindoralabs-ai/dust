@@ -10,9 +10,16 @@ import { AgentConfigurationFactory } from "@app/tests/utils/AgentConfigurationFa
 import { ConversationFactory } from "@app/tests/utils/ConversationFactory";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import type { LightAgentConfigurationType } from "@app/types/assistant/agent";
-import type { UserMessageContext } from "@app/types/assistant/conversation";
+import type {
+  AgentMessageType,
+  UserMessageContext,
+} from "@app/types/assistant/conversation";
 import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
-import { GPT_5_5_MODEL_CONFIG } from "@app/types/assistant/models/openai";
+import {
+  GPT_5_5_MODEL_CONFIG,
+  GPT_5_MINI_MODEL_CONFIG,
+} from "@app/types/assistant/models/openai";
+import type { ModelConfigurationType } from "@app/types/assistant/models/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@app/temporal/agent_loop/client", () => ({
@@ -47,61 +54,87 @@ function webContext(auth: Authenticator): UserMessageContext {
   };
 }
 
-// The POC mode is cached once read as "1", so this case, which starts with the
-// lock off, runs first.
+async function postPreLockReply(
+  auth: Authenticator,
+  model: ModelConfigurationType
+): Promise<{
+  conversationResource: ConversationResource;
+  reply: AgentMessageType;
+}> {
+  const agent = await AgentConfigurationFactory.createTestAgent(auth, {
+    name: `Agent answered on ${model.displayName}`,
+    description: "Agent whose reply predates the POC model lock",
+    model: { providerId: model.providerId, modelId: model.modelId },
+  });
+  const conversation = await ConversationFactory.create(auth, {
+    agentConfigurationId: agent.sId,
+    messagesCreatedAt: [],
+    visibility: "unlisted",
+  });
+  const conversationResource = await ConversationResource.fetchById(
+    auth,
+    conversation.sId
+  );
+  if (!conversationResource) {
+    throw new Error("Failed to fetch the conversation");
+  }
+  const posted = await postUserMessage(auth, {
+    conversationResource,
+    content: `Hello @${agent.name}`,
+    mentions: [{ configurationId: agent.sId }],
+    context: webContext(auth),
+    skipToolsValidation: false,
+    skipDustAutoMention: true,
+  });
+  if (posted.isErr()) {
+    throw new Error(posted.error.api_error.message);
+  }
+  const [reply] = posted.value.agentMessages;
+  expect(reply.resolvedModel).toMatchObject({ modelId: model.modelId });
+  return { conversationResource, reply };
+}
+
+// The POC mode is cached once read as "1", so this case, whose replies are
+// posted with the lock off, runs first.
 describe("retrying a reply resolved before the POC model lock", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it("retries it on Gemini 3.7 Flash instead of its stored model", async () => {
+  it("retries it on Gemini 3.7 Flash, or refuses where the workspace cannot run that", async () => {
     const { authenticator: auth } = await createResourceTest({ role: "admin" });
-    const agent = await AgentConfigurationFactory.createTestAgent(auth, {
-      name: "Agent answered on GPT",
-      description: "Agent whose reply predates the POC model lock",
-      model: {
-        providerId: GPT_5_5_MODEL_CONFIG.providerId,
-        modelId: GPT_5_5_MODEL_CONFIG.modelId,
-      },
+    const runnable = await postPreLockReply(auth, GPT_5_5_MODEL_CONFIG);
+    // A free plan runs small models such as GPT-5 mini, not Gemini 3.7 Flash.
+    const { authenticator: freeAuth } = await createResourceTest({
+      role: "admin",
+      plan: "freeNoProductAccess",
     });
-    const conversation = await ConversationFactory.create(auth, {
-      agentConfigurationId: agent.sId,
-      messagesCreatedAt: [],
-      visibility: "unlisted",
-    });
-    const conversationResource = await ConversationResource.fetchById(
-      auth,
-      conversation.sId
+    const unrunnable = await postPreLockReply(
+      freeAuth,
+      GPT_5_MINI_MODEL_CONFIG
     );
-    if (!conversationResource) {
-      throw new Error("Failed to fetch the conversation");
-    }
-    const posted = await postUserMessage(auth, {
-      conversationResource,
-      content: `Hello @${agent.name}`,
-      mentions: [{ configurationId: agent.sId }],
-      context: webContext(auth),
-      skipToolsValidation: false,
-      skipDustAutoMention: true,
-    });
-    if (posted.isErr()) {
-      throw new Error(posted.error.api_error.message);
-    }
-    const [reply] = posted.value.agentMessages;
-    expect(reply.resolvedModel).toMatchObject({
-      modelId: GPT_5_5_MODEL_CONFIG.modelId,
-    });
 
     vi.stubEnv("DUST_POC_MODE", "1");
-    const result = await retryAgentMessage(auth, {
-      conversationResource,
-      message: reply,
+    const retried = await retryAgentMessage(auth, {
+      conversationResource: runnable.conversationResource,
+      message: runnable.reply,
+    });
+    const refused = await retryAgentMessage(freeAuth, {
+      conversationResource: unrunnable.conversationResource,
+      message: unrunnable.reply,
     });
 
-    if (result.isErr()) {
-      throw new Error(result.error.api_error.message);
+    if (retried.isErr()) {
+      throw new Error(retried.error.api_error.message);
     }
-    expect(result.value.resolvedModel).toMatchObject(LOCKED_MODEL);
+    expect(retried.value.resolvedModel).toMatchObject(LOCKED_MODEL);
+    if (refused.isOk()) {
+      throw new Error("Retried a reply the workspace cannot run");
+    }
+    expect(refused.error.api_error).toMatchObject({
+      type: "invalid_request_error",
+      message: "The model is not supported.",
+    });
   });
 });
 
