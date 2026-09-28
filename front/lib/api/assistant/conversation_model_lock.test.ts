@@ -1,6 +1,5 @@
 import {
   editUserMessage,
-  getPocUnrunnableModelError,
   postUserMessage,
   retryAgentMessage,
 } from "@app/lib/api/assistant/conversation";
@@ -16,12 +15,14 @@ import type {
   UserMessageContext,
 } from "@app/types/assistant/conversation";
 import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
-import { NOOP_MODEL_CONFIG } from "@app/types/assistant/models/noop";
 import {
   GPT_5_5_MODEL_CONFIG,
   GPT_5_MINI_MODEL_CONFIG,
 } from "@app/types/assistant/models/openai";
-import type { ModelConfigurationType } from "@app/types/assistant/models/types";
+import type {
+  ModelConfigurationType,
+  ModelSelectionType,
+} from "@app/types/assistant/models/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@app/temporal/agent_loop/client", () => ({
@@ -58,7 +59,8 @@ function webContext(auth: Authenticator): UserMessageContext {
 
 async function postPreLockReply(
   auth: Authenticator,
-  model: ModelConfigurationType
+  model: ModelConfigurationType,
+  modelSelection?: ModelSelectionType
 ): Promise<{
   conversationResource: ConversationResource;
   reply: AgentMessageType;
@@ -87,6 +89,7 @@ async function postPreLockReply(
     context: webContext(auth),
     skipToolsValidation: false,
     skipDustAutoMention: true,
+    modelSelection,
   });
   if (posted.isErr()) {
     throw new Error(posted.error.api_error.message);
@@ -105,7 +108,12 @@ describe("retrying a reply resolved before the POC model lock", () => {
 
   it("retries it on Gemini 3.7 Flash, or refuses where the workspace cannot run that", async () => {
     const { authenticator: auth } = await createResourceTest({ role: "admin" });
-    const runnable = await postPreLockReply(auth, GPT_5_5_MODEL_CONFIG);
+    // The user picked an effort, which the retry keeps on the locked model.
+    const runnable = await postPreLockReply(auth, GPT_5_5_MODEL_CONFIG, {
+      providerId: GPT_5_5_MODEL_CONFIG.providerId,
+      modelId: GPT_5_5_MODEL_CONFIG.modelId,
+      reasoningEffort: "medium",
+    });
     // A free plan runs small models such as GPT-5 mini, not Gemini 3.7 Flash.
     const { authenticator: freeAuth } = await createResourceTest({
       role: "admin",
@@ -129,7 +137,11 @@ describe("retrying a reply resolved before the POC model lock", () => {
     if (retried.isErr()) {
       throw new Error(retried.error.api_error.message);
     }
-    expect(retried.value.resolvedModel).toMatchObject(LOCKED_MODEL);
+    expect(retried.value.resolvedModel).toEqual({
+      ...LOCKED_MODEL,
+      reasoningEffort: "medium",
+    });
+    expect(retried.value.modelResolutionMethod).toBe("user");
     if (refused.isOk()) {
       throw new Error("Retried a reply the workspace cannot run");
     }
@@ -332,39 +344,5 @@ describe("message preflights where the workspace cannot run the POC model", () =
       message: "The model is not supported.",
     });
     expect(launchAgentLoopWorkflow).not.toHaveBeenCalled();
-  });
-});
-
-describe("getPocUnrunnableModelError", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  it("refuses only where resolveModel would find no model to run", async () => {
-    vi.stubEnv("DUST_POC_MODE", "1");
-    const { authenticator: auth } = await createResourceTest({ role: "admin" });
-    // A free plan excludes large models such as Gemini 3.7 Flash.
-    const { authenticator: freeAuth } = await createResourceTest({
-      role: "admin",
-      plan: "freeNoProductAccess",
-    });
-    const gpt = {
-      providerId: GPT_5_5_MODEL_CONFIG.providerId,
-      modelId: GPT_5_5_MODEL_CONFIG.modelId,
-    };
-    const noop = {
-      providerId: NOOP_MODEL_CONFIG.providerId,
-      modelId: NOOP_MODEL_CONFIG.modelId,
-    };
-
-    expect(await getPocUnrunnableModelError(auth, gpt)).toBeNull();
-    // Noop is off in this workspace, so a noop agent falls back to Gemini.
-    expect(await getPocUnrunnableModelError(auth, noop)).toBeNull();
-    expect(await getPocUnrunnableModelError(freeAuth, gpt)).toMatchObject({
-      status_code: 400,
-    });
-    expect(await getPocUnrunnableModelError(freeAuth, noop)).toMatchObject({
-      status_code: 400,
-    });
   });
 });

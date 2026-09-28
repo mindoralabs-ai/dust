@@ -20,15 +20,16 @@ export const POC_LOCKED_MODEL_CONFIG: ModelConfigurationType =
  * `enabled_models.ts`, `getGlobalAgents`, conversation titles and
  * `createOrUpgradeAgentConfiguration` MUST NOT offer, pick or accept a model other than
  * `POC_LOCKED_MODEL_CONFIG` (the provider-less `noop` model excepted: where noop is enabled,
- * `resolveModel` MUST keep a noop request on it). The post preflight of `conversation.ts` MUST
- * check the model an agent runs, `getPocRuntimeModel`, not the one it was saved on. Every other
- * path that resolves an agent's model (edit, retry, mention approval) MUST refuse where
- * `resolveModel` would find no model, and a retry MUST reuse a stored resolution only while the
- * lock and the workspace still run it as is. The lock MUST NOT make that model available where
- * the workspace's own provider whitelist, plan, region or flags exclude it: lookups then find
- * no model, and a default or stream fallback that must name one marks it unselectable.
- * `getGlobalAgents` MUST also leave out a model agent that the member's tier cap would refuse
- * to run. While it is false, their behaviour MUST be unchanged by this lock.
+ * `resolveModel` MUST keep a noop request on it). Where no such model is enabled,
+ * `resolveModel` MUST return null rather than fall back or throw, and every message path MUST
+ * then refuse the message. The post preflight of `conversation.ts` MUST check the model an
+ * agent runs, `getPocRuntimeModel`, not the one it was saved on, and a retry MUST reuse a
+ * stored resolution only while the lock and the workspace still run it as is. The lock MUST NOT
+ * make that model available where the workspace's own provider whitelist, plan, region or flags
+ * exclude it: lookups then find no model, and a default or stream fallback that must name one
+ * marks it unselectable. `getGlobalAgents` MUST also leave out a model agent that the member's
+ * tier cap would refuse to run. While it is false, their behaviour MUST be unchanged by this
+ * lock.
  */
 export function isPocModelLockEnabled(): boolean {
   return dustPocMode();

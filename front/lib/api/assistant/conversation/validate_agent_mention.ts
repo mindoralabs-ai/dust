@@ -1,9 +1,6 @@
 import { getAgentConfiguration } from "@app/lib/api/assistant/configuration/agent";
 import { getRelatedContentFragments } from "@app/lib/api/assistant/content_fragments";
-import {
-  checkMessagesLimit,
-  getPocUnrunnableModelError,
-} from "@app/lib/api/assistant/conversation";
+import { checkMessagesLimit } from "@app/lib/api/assistant/conversation";
 import { runAgentLoopWorkflow } from "@app/lib/api/assistant/conversation/agent_loop";
 import { canCurrentUserRespondToParentUserMessage } from "@app/lib/api/assistant/conversation/can_current_user_respond";
 import { getConversation } from "@app/lib/api/assistant/conversation/fetch";
@@ -13,6 +10,7 @@ import {
 } from "@app/lib/api/assistant/conversation/lock";
 import {
   createAgentMessages,
+  getNoRunnableModelError,
   resolveModelForMentionedAgent,
 } from "@app/lib/api/assistant/conversation/messages";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
@@ -231,18 +229,13 @@ export async function validateAgentMention(
     "User approved a restricted agent mention"
   );
 
-  const unrunnableModelError = await getPocUnrunnableModelError(
-    auth,
-    configuration.model
-  );
-  if (unrunnableModelError) {
-    return new Err(unrunnableModelError);
-  }
-
   const resolution = await resolveModelForMentionedAgent(auth, {
     configuration,
     selection: message.requestedModel ?? undefined,
   });
+  if (!resolution) {
+    return new Err(getNoRunnableModelError());
+  }
 
   const premiumLimitResult = await enforcePremiumModelLimit(auth, {
     user: auth.getNonNullableUser(),

@@ -41,6 +41,8 @@ function toResolvedModel(
 // 2. If the user did not select a model, pick the agent's configured model.
 // 3. If the agent is set on auto mode, pick the auto model.
 // 4. Finally fallback to a supported model by the workspace.
+// Returns null only in the isolated POC, where the lock leaves no model the
+// workspace can run: it has no fallback beyond its locked model.
 export async function resolveModel(
   auth: Authenticator,
   {
@@ -55,7 +57,7 @@ export async function resolveModel(
 ): Promise<{
   resolvedModel: ResolvedRequestedModel;
   modelResolutionMethod: ModelResolutionMethodType;
-}> {
+} | null> {
   let modelResolutionMethod: ModelResolutionMethodType = selection
     ? "user"
     : "agent";
@@ -128,8 +130,12 @@ export async function resolveModel(
     // credit the pick to e.g. "auto_complex", and honor the requested effort.
   }
 
-  // Should never happen as we should at least fallback to our selection of PREFERRED_LARGE_MODEL_CONFIGS.
-  assert(enabled, "No enabled model found");
+  if (!enabled) {
+    // Should never happen outside the isolated POC, as we should at least
+    // fallback to our selection of PREFERRED_LARGE_MODEL_CONFIGS.
+    assert(isPocModelLockEnabled(), "No enabled model found");
+    return null;
+  }
 
   // A stream tier dictates the effort of its resolved model. Otherwise honor the
   // selected or agent-configured effort only if the resolved model supports it

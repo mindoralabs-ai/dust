@@ -34,24 +34,24 @@ describe("resolveModel model lock", () => {
   it("keeps a noop agent on noop outside the isolated POC", async () => {
     const { auth, agent } = await agentOn(NOOP_MODEL_CONFIG);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const resolution = await resolveModel(auth, {
       configuration: agent,
       featureFlags: NOOP_FEATURE_FLAGS,
     });
 
-    expect(resolvedModel.modelId).toBe(NOOP_MODEL_CONFIG.modelId);
+    expect(resolution?.resolvedModel.modelId).toBe(NOOP_MODEL_CONFIG.modelId);
   });
 
   it("runs an agent saved on another model on Gemini 3.7 Flash in the isolated POC", async () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     const { auth, agent } = await agentOn(GPT_5_5_MODEL_CONFIG);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const resolution = await resolveModel(auth, {
       configuration: agent,
       featureFlags: NOOP_FEATURE_FLAGS,
     });
 
-    expect(resolvedModel).toEqual({
+    expect(resolution?.resolvedModel).toEqual({
       providerId: GEMINI_3_7_FLASH_MODEL_CONFIG.providerId,
       modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
       reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
@@ -62,12 +62,12 @@ describe("resolveModel model lock", () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     const { auth, agent } = await agentOn(NOOP_MODEL_CONFIG);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const resolution = await resolveModel(auth, {
       configuration: agent,
       featureFlags: NOOP_FEATURE_FLAGS,
     });
 
-    expect(resolvedModel).toEqual({
+    expect(resolution?.resolvedModel).toEqual({
       providerId: NOOP_MODEL_CONFIG.providerId,
       modelId: NOOP_MODEL_CONFIG.modelId,
       reasoningEffort: NOOP_MODEL_CONFIG.defaultReasoningEffort,
@@ -78,14 +78,38 @@ describe("resolveModel model lock", () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     const { auth, agent } = await agentOn(NOOP_MODEL_CONFIG);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const resolution = await resolveModel(auth, {
       configuration: agent,
       featureFlags: [],
     });
 
-    expect(resolvedModel).toMatchObject({
+    expect(resolution?.resolvedModel).toMatchObject({
       providerId: GEMINI_3_7_FLASH_MODEL_CONFIG.providerId,
       modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
     });
+  });
+
+  it("resolves no model where the workspace cannot run Gemini 3.7 Flash in the isolated POC", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    const { authenticator: auth } = await createResourceTest({
+      role: "admin",
+      plan: "freeNoProductAccess",
+    });
+    const agent = await AgentConfigurationFactory.createTestAgent(auth, {
+      name: "Agent on a free plan",
+      description: "Agent resolved by the model lock tests",
+      model: {
+        providerId: GPT_5_5_MODEL_CONFIG.providerId,
+        modelId: GPT_5_5_MODEL_CONFIG.modelId,
+      },
+    });
+
+    const resolution = await resolveModel(auth, {
+      configuration: agent,
+      featureFlags: NOOP_FEATURE_FLAGS,
+    });
+
+    expect(resolution).toBeNull();
   });
 });

@@ -492,10 +492,17 @@ async function buildAgentLoopRuntimeData(
     // Legacy messages have no stored model resolution. Global agent configurations ignore the
     // message's configuration version and may now use a stream, so resolve the stream before
     // selecting its endpoint.
-    ({ resolvedModel } = await resolveModel(auth, {
+    const resolution = await resolveModel(auth, {
       configuration: agentConfiguration,
       featureFlags: await getFeatureFlags(auth),
-    }));
+    });
+    if (!resolution) {
+      // The isolated POC's lock left no model this workspace can run.
+      return new Err(
+        new AgentLoopDataModelNotFoundError(agentModelConfig.modelId)
+      );
+    }
+    ({ resolvedModel } = resolution);
   }
   // Global agents may pin the noop model at run time (static replies from the dust and
   // sidekick agents, see `getStaticReplyForUserMessage`). The model stored on the agent
