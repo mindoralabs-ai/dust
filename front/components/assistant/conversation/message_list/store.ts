@@ -156,6 +156,9 @@ export class MessageListStore<Data, Context> {
   private pendingScroll: ItemLocationWithAlign | null = null;
 
   firstItemIndex = INITIAL_FIRST_ITEM_INDEX;
+  // Incremented by every reset, with the location the new dataset asked for.
+  generation = 0;
+  initialLocation: ItemLocationWithAlign | null = null;
   view: MessageListView<Context> | null = null;
   // Called whenever a scroll is requested, so the list can perform it once
   // the data it targets is rendered.
@@ -177,10 +180,12 @@ export class MessageListStore<Data, Context> {
   }
 
   // Replaces the whole dataset, e.g. when the list is given new data.
-  reset(items: Data[]): void {
+  reset(items: Data[], initialLocation: ItemLocationWithAlign | null): void {
     this.items = items.slice();
     this.firstItemIndex = INITIAL_FIRST_ITEM_INDEX;
     this.pendingScroll = null;
+    this.generation += 1;
+    this.initialLocation = initialLocation;
     this.changed();
   }
 
