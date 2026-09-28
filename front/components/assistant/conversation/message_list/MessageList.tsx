@@ -732,7 +732,12 @@ class ListController<Data, Context> {
       this.changeAnchor = null;
       this.performScroll(target);
     } else if (this.changeAnchor) {
-      this.restoreChangeAnchor(ANCHOR_RESTORE_FRAMES, 0);
+      if (this.pinnedToBottom) {
+        // Resizes keep a pinned view at the bottom.
+        this.changeAnchor = null;
+      } else {
+        this.restoreChangeAnchor(ANCHOR_RESTORE_FRAMES, 0);
+      }
     }
     this.refreshRendered();
     this.publishLocation(false);
@@ -800,11 +805,11 @@ class ListController<Data, Context> {
 
   // Rows added or removed above the viewport would move it: react-virtuoso
   // compensates a prepend only with estimated sizes, and an insert or delete
-  // not at all. This keeps the first visible item exactly where it was. The
-  // bottom stays pinned instead.
+  // not at all. This records the first visible item so the change can keep it
+  // in place; a view still pinned to the bottom follows the bottom instead.
+  // A pending anchor already describes the view before the earlier change.
   private captureChangeAnchor(): void {
-    if (this.pinnedToBottom) {
-      this.changeAnchor = null;
+    if (this.changeAnchor) {
       return;
     }
     const anchor = this.firstVisibleItem();
