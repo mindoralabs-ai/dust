@@ -733,6 +733,33 @@ export async function deferFrontUsageClaim(input: {
 }
 
 /** Durable PostgreSQL boundary for Dust generation accounting. */
+/**
+ * Exact input and output tokens a tenant's settled attempts used since `since`,
+ * read from their frozen usage envelopes.
+ */
+export async function sumFrontUsageExactTokensSince(
+  tenantId: string,
+  since: Date
+): Promise<number> {
+  requireIdentity(tenantId);
+  if (Number.isNaN(since.getTime())) {
+    throw new Error("Invalid usage window start");
+  }
+  const [row] = await frontSequelize.query<{ totalTokens: string | null }>(
+    `SELECT COALESCE(SUM(
+         ("eventEnvelope"::jsonb->>'input_tokens')::bigint +
+         ("eventEnvelope"::jsonb->>'output_tokens')::bigint), 0) AS "totalTokens"
+       FROM "dust_usage_attempts"
+      WHERE "tenantId" = :tenantId AND "state" = 'exact' AND "createdAt" >= :since`,
+    { replacements: { tenantId, since }, type: QueryTypes.SELECT }
+  );
+  const totalTokens = Number(row?.totalTokens ?? 0);
+  if (!Number.isSafeInteger(totalTokens) || totalTokens < 0) {
+    throw new Error("Dust Front usage journal total unavailable");
+  }
+  return totalTokens;
+}
+
 export class DustUsageAttemptResource {
   static readHealth = readFrontUsageHealth;
   static start = startFrontUsageAttempt;
@@ -746,4 +773,5 @@ export class DustUsageAttemptResource {
   static validateClaim = validateFrontUsageClaim;
   static completeClaim = completeFrontUsageClaim;
   static deferClaim = deferFrontUsageClaim;
+  static sumExactTokensSince = sumFrontUsageExactTokensSince;
 }

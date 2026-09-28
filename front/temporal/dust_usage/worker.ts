@@ -1,5 +1,8 @@
 import { setTimeout } from "node:timers/promises";
-import { dustPocMode } from "@app/lib/api/dust_poc_mode";
+import {
+  dustPocDirectProviderMode,
+  dustPocMode,
+} from "@app/lib/api/dust_poc_mode";
 import {
   pocRouteResolverForMaintenance,
   pocRoutesForMaintenance,
@@ -17,7 +20,8 @@ import logger from "@app/logger/logger";
 export async function runDustPocUsageReconciler(
   signal?: AbortSignal
 ): Promise<void> {
-  if (!dustPocMode()) {
+  // Direct provider mode has no tenant route: its journal rows stay local.
+  if (!dustPocMode() || dustPocDirectProviderMode()) {
     return;
   }
   async function runLoop(task: () => Promise<void>, intervalMs: number) {

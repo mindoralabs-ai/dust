@@ -40,6 +40,18 @@ describe("Dust POC accounting worker", () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
+  it("does not start in direct provider mode", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    vi.stubEnv("DUST_POC_DIRECT_PROVIDER_MODE", "1");
+    const { runDustPocUsageReconciler } = await import(
+      "@app/temporal/dust_usage/worker"
+    );
+    await runDustPocUsageReconciler();
+    expect(resolveRoute).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
+    expect(heartbeat).not.toHaveBeenCalled();
+  });
+
   it("runs one bounded accounting batch without a provider switch", async () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     const { runDustPocUsageReconciler } = await import(

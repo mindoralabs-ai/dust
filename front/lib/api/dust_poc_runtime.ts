@@ -1,7 +1,13 @@
 import config from "@app/lib/api/config";
 import type { AuthorizedDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
-import { authorizeDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
-import { dustPocMode } from "@app/lib/api/dust_poc_mode";
+import {
+  authorizeDirectDustGenerationAttempt,
+  authorizeDustGenerationAttempt,
+} from "@app/lib/api/dust_generation_gate";
+import {
+  dustPocDirectProviderMode,
+  dustPocMode,
+} from "@app/lib/api/dust_poc_mode";
 import type {
   ActiveDustIdentity,
   TenantRoute,
@@ -110,11 +116,29 @@ async function initializeRuntime(): Promise<PocRuntime> {
   return { resolver, workspaces };
 }
 
+function directPocWorkspaceId(): string {
+  const workspaceId = required(config.getDustPocDirectWorkspaceId());
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId)) {
+    throw new Error("Dust POC runtime configuration unavailable");
+  }
+  return workspaceId;
+}
+
+function directPocDailyTokenLimit(): number {
+  const limit = Number(required(config.getDustPocDirectDailyTokenLimit()));
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("Dust POC runtime configuration unavailable");
+  }
+  return limit;
+}
+
 /**
  * @cc [label:security;backend] dust-poc-generation-selection
  * An isolated POC instance accepts only the server-selected global Gemini
- * model and two configured workspaces; signed membership supplies the tenant.
- * The default-off provider switch must be armed before any model request.
+ * model. With the signed registry, two configured workspaces and signed
+ * membership supply the tenant; in direct provider mode only the one configured
+ * workspace may generate, within its daily token limit. The default-off
+ * provider switch must be armed before any model request.
  */
 export async function authorizePocGeneration(input: {
   identity: ActiveDustIdentity;
@@ -134,6 +158,15 @@ export async function authorizePocGeneration(input: {
     !/^[A-Za-z0-9_.:/-]{1,256}$/.test(input.conversationId)
   ) {
     throw new Error("Dust POC generation unavailable");
+  }
+  if (dustPocDirectProviderMode()) {
+    return authorizeDirectDustGenerationAttempt({
+      identity: input.identity,
+      conversationId: input.conversationId,
+      model: input.modelId,
+      directWorkspaceId: directPocWorkspaceId(),
+      dailyTokenLimit: directPocDailyTokenLimit(),
+    });
   }
   const runtime = await getRuntime();
   if (!runtime.workspaces.has(input.identity.workspaceId)) {

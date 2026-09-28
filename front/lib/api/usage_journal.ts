@@ -26,3 +26,5 @@ export const claimFrontUsageWork = DustUsageAttemptResource.claimWork;
 export const validateFrontUsageClaim = DustUsageAttemptResource.validateClaim;
 export const completeFrontUsageClaim = DustUsageAttemptResource.completeClaim;
 export const deferFrontUsageClaim = DustUsageAttemptResource.deferClaim;
+export const sumFrontUsageExactTokensSince =
+  DustUsageAttemptResource.sumExactTokensSince;

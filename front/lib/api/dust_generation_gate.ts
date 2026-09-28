@@ -1,6 +1,7 @@
 import type {
   ActiveDustIdentity,
   DustTenantRouteResolver,
+  TenantRoute,
 } from "@app/lib/api/tenant_route";
 import {
   DustAdmissionDeniedError,
@@ -13,7 +14,9 @@ import type {
 import {
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
+  startFrontUsageAttempt,
   startFrontUsageAttemptForAdmission,
+  sumFrontUsageExactTokensSince,
 } from "@app/lib/api/usage_journal";
 
 /** This module is for authenticated server-side generation paths only. */
@@ -137,6 +140,99 @@ export async function authorizeDustGenerationAttempt({
     if (error instanceof DustAdmissionDeniedError) {
       throw error;
     }
+    throw new DustGenerationGateUnavailable();
+  }
+
+  const providerPermit = Object.freeze({});
+  providerPermits.set(providerPermit, attempt.attemptId);
+  return Object.freeze({ attempt, providerPermit });
+}
+
+/** Journal tenant of the one POC workspace served in direct provider mode. */
+export const DIRECT_POC_TENANT_ID = "poc-direct";
+
+// Direct mode never admits or delivers remotely, so the route has no network
+// destination. Fixed fields keep the journal's route binding stable.
+function directPocRoute(workspaceId: string): TenantRoute {
+  return Object.freeze({
+    tenantId: DIRECT_POC_TENANT_ID,
+    workspaceId,
+    revision: 0,
+    keyId: "direct",
+    privateRoute: "direct:none",
+    admissionUrl: "direct:none",
+    usageIngestUrl: "direct:none",
+    journalTarget: `tenant:${DIRECT_POC_TENANT_ID}:dust-usage`,
+    frontCredentialRef: "direct:none",
+    coreCredentialRef: "direct:none",
+  });
+}
+
+export type DirectDustGenerationGateInput = {
+  /** Obtained from the authenticated Dust server session, never request JSON. */
+  identity: ActiveDustIdentity;
+  conversationId: string;
+  model: string;
+  /** The one server-configured workspace direct mode serves. */
+  directWorkspaceId: string;
+  /** Exact input and output tokens the workspace may use per UTC day. */
+  dailyTokenLimit: number;
+};
+
+/**
+ * @cc [owner:jchen0824,label:security;backend] dust-poc-direct-generation
+ * Direct provider mode serves exactly one configured POC workspace without the
+ * signed registry or CRM admission. Each provider request still needs a newly
+ * committed journal row and a single-use permit, and is refused once the
+ * workspace's exact tokens for the current UTC day reach the configured limit.
+ */
+export async function authorizeDirectDustGenerationAttempt({
+  identity,
+  conversationId,
+  model,
+  directWorkspaceId,
+  dailyTokenLimit,
+}: DirectDustGenerationGateInput): Promise<AuthorizedDustGenerationAttempt> {
+  if (
+    identity.workspaceId !== directWorkspaceId ||
+    !Number.isSafeInteger(dailyTokenLimit) ||
+    dailyTokenLimit < 1
+  ) {
+    throw new DustGenerationGateUnavailable();
+  }
+
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+  let usedTokens: number;
+  try {
+    usedTokens = await sumFrontUsageExactTokensSince(
+      DIRECT_POC_TENANT_ID,
+      dayStart
+    );
+  } catch {
+    throw new DustGenerationGateUnavailable();
+  }
+  if (usedTokens >= dailyTokenLimit) {
+    throw new DustAdmissionDeniedError();
+  }
+
+  const route = directPocRoute(directWorkspaceId);
+  const attempt: FrontUsageAttempt = Object.freeze({
+    attemptId: newFrontUsageAttemptId(),
+    tenantId: route.tenantId,
+    workspaceId: route.workspaceId,
+    conversationId,
+    model,
+    routeId: `${route.tenantId}:${route.revision}`,
+  });
+  let started: Awaited<ReturnType<typeof startFrontUsageAttempt>>;
+  try {
+    started = await startFrontUsageAttempt(attempt, route);
+  } catch {
+    throw new DustGenerationGateUnavailable();
+  }
+  // A duplicate is never another allowance.
+  if (started !== "created") {
     throw new DustGenerationGateUnavailable();
   }
 

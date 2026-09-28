@@ -14,6 +14,7 @@ import {
   settleFrontUsageNoCharge,
   startFrontUsageAttemptForAdmission,
   startFrontUsageAttempt as startJournalAttempt,
+  sumFrontUsageExactTokensSince,
   validateFrontUsageClaim,
 } from "@app/lib/api/usage_journal";
 import { Client } from "pg";
@@ -512,5 +513,47 @@ describe("Front Dust usage journal PostgreSQL durability", () => {
       [attempt.attemptId]
     );
     expect(row.rows[0].manualReviewRequired).toBe(false);
+  });
+  it("sums one tenant's exact tokens since a point in time", async () => {
+    const tenantId = `tenant-sum-${randomUUID().slice(0, 8)}`;
+    const since = new Date(Date.now() - 60_000);
+    const attempt = (suffix: string, tenant = tenantId) => ({
+      attemptId: newFrontUsageAttemptId(),
+      tenantId: tenant,
+      workspaceId: "workspace-test-sum",
+      conversationId: `conversation-test-sum-${suffix}`,
+      model: "gemini-3.7-flash",
+      routeId: `${tenant}:0`,
+    });
+    const first = attempt("first");
+    const second = attempt("second");
+    const unknown = attempt("unknown");
+    const otherTenant = attempt("other", `${tenantId}-other`);
+    for (const started of [first, second, unknown, otherTenant]) {
+      expect(await startFrontUsageAttempt(started)).toBe("created");
+    }
+    const settle = (settled: typeof first, input: number, output: number) =>
+      settleFrontUsageExact({
+        attempt: settled,
+        providerOperationId: `vertex:${settled.attemptId}`,
+        counts: {
+          inputTokens: input,
+          outputTokens: output,
+          cacheReadTokens: 50,
+          cacheWriteTokens: 0,
+        },
+      });
+    await settle(first, 100, 20);
+    await settle(second, 7, 3);
+    await settle(otherTenant, 1000, 1000);
+    await markFrontUsageUnknown(unknown.attemptId);
+
+    expect(await sumFrontUsageExactTokensSince(tenantId, since)).toBe(130);
+    expect(
+      await sumFrontUsageExactTokensSince(
+        tenantId,
+        new Date(Date.now() + 60_000)
+      )
+    ).toBe(0);
   });
 });

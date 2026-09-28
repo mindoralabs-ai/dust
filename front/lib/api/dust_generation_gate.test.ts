@@ -1,6 +1,8 @@
 import {
+  authorizeDirectDustGenerationAttempt,
   authorizeDustGenerationAttempt,
   consumeDustProviderPermit,
+  DIRECT_POC_TENANT_ID,
   DustGenerationGateUnavailable,
 } from "@app/lib/api/dust_generation_gate";
 import type {
@@ -15,7 +17,9 @@ import {
 import {
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
+  startFrontUsageAttempt,
   startFrontUsageAttemptForAdmission,
+  sumFrontUsageExactTokensSince,
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,14 +29,18 @@ vi.mock("@app/lib/api/usage_admission", async (importOriginal) => ({
 }));
 vi.mock("@app/lib/api/usage_journal", () => ({
   newFrontUsageAttemptId: vi.fn(),
+  startFrontUsageAttempt: vi.fn(),
   startFrontUsageAttemptForAdmission: vi.fn(),
   settleFrontUsageNoCharge: vi.fn(),
+  sumFrontUsageExactTokensSince: vi.fn(),
 }));
 
 const admit = vi.mocked(requireDustAdmission);
 const newId = vi.mocked(newFrontUsageAttemptId);
 const start = vi.mocked(startFrontUsageAttemptForAdmission);
 const noCharge = vi.mocked(settleFrontUsageNoCharge);
+const startDirect = vi.mocked(startFrontUsageAttempt);
+const usedTokens = vi.mocked(sumFrontUsageExactTokensSince);
 
 function identity(tenant: "a" | "b"): ActiveDustIdentity {
   return {
@@ -273,5 +281,116 @@ describe("Dust Front generation gate", () => {
       authorizeDustGenerationAttempt(input("a"))
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
     expect(noCharge).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Dust Front direct POC generation gate", () => {
+  function directInput(
+    overrides: Partial<
+      Parameters<typeof authorizeDirectDustGenerationAttempt>[0]
+    > = {}
+  ) {
+    return {
+      identity: identity("a"),
+      conversationId: "conversation-a",
+      model: "gemini-3.7-flash",
+      directWorkspaceId: "workspace-a",
+      dailyTokenLimit: 1000,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    let next = 0;
+    newId.mockImplementation(() => `direct-${++next}`);
+    startDirect.mockResolvedValue("created");
+    usedTokens.mockResolvedValue(0);
+  });
+
+  it("journals one local attempt and issues a single-use permit", async () => {
+    const authorized = await authorizeDirectDustGenerationAttempt(
+      directInput()
+    );
+
+    expect(authorized.attempt).toEqual({
+      attemptId: "direct-1",
+      tenantId: DIRECT_POC_TENANT_ID,
+      workspaceId: "workspace-a",
+      conversationId: "conversation-a",
+      model: "gemini-3.7-flash",
+      routeId: `${DIRECT_POC_TENANT_ID}:0`,
+    });
+    const [journaled, route] = startDirect.mock.calls[0];
+    expect(journaled).toBe(authorized.attempt);
+    expect(route).toMatchObject({
+      tenantId: DIRECT_POC_TENANT_ID,
+      workspaceId: "workspace-a",
+      revision: 0,
+    });
+    // Direct mode has no admission or delivery destination.
+    expect(JSON.stringify(route)).not.toContain("http");
+    const [tenantId, since] = usedTokens.mock.calls[0];
+    expect(tenantId).toBe(DIRECT_POC_TENANT_ID);
+    expect(since.toISOString()).toMatch(/T00:00:00\.000Z$/);
+    expect(admit).not.toHaveBeenCalled();
+    expect(
+      consumeDustProviderPermit(authorized.providerPermit, "direct-1")
+    ).toBe(true);
+    expect(
+      consumeDustProviderPermit(authorized.providerPermit, "direct-1")
+    ).toBe(false);
+  });
+
+  it("serves only the configured workspace", async () => {
+    await expect(
+      authorizeDirectDustGenerationAttempt(
+        directInput({ identity: identity("b") })
+      )
+    ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
+    expect(usedTokens).not.toHaveBeenCalled();
+    expect(startDirect).not.toHaveBeenCalled();
+  });
+
+  it("refuses once the daily token limit is reached", async () => {
+    usedTokens.mockResolvedValueOnce(1000);
+    await expect(
+      authorizeDirectDustGenerationAttempt(directInput())
+    ).rejects.toBeInstanceOf(DustAdmissionDeniedError);
+    // A refused request never mints an attempt or journal row.
+    expect(newId).not.toHaveBeenCalled();
+    expect(startDirect).not.toHaveBeenCalled();
+
+    usedTokens.mockResolvedValueOnce(999);
+    await expect(
+      authorizeDirectDustGenerationAttempt(directInput())
+    ).resolves.toMatchObject({ attempt: { attemptId: "direct-1" } });
+    expect(startDirect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an unreadable journal", () => usedTokens.mockRejectedValue(new Error())],
+    [
+      "a failed journal start",
+      () => startDirect.mockRejectedValue(new Error()),
+    ],
+    ["a duplicate attempt", () => startDirect.mockResolvedValue("duplicate")],
+  ])("fails closed on %s", async (_label, arrange) => {
+    arrange();
+    await expect(
+      authorizeDirectDustGenerationAttempt(directInput())
+    ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+  ])("rejects a daily token limit of %s", async (dailyTokenLimit) => {
+    await expect(
+      authorizeDirectDustGenerationAttempt(directInput({ dailyTokenLimit }))
+    ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
+    expect(usedTokens).not.toHaveBeenCalled();
   });
 });
