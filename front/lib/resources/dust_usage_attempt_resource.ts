@@ -1,6 +1,7 @@
 // biome-ignore-all lint/plugin/noRawSql: PostgreSQL atomic insert, row locks, and SKIP LOCKED leases have no Sequelize model equivalent here.
 import { createHash, randomUUID } from "node:crypto";
 import type { TenantRoute } from "@app/lib/api/tenant_route";
+import { DIRECT_POC_TENANT_ID } from "@app/lib/api/tenant_route";
 import { frontSequelize } from "@app/lib/resources/storage";
 import type { Transaction } from "sequelize";
 import { QueryTypes } from "sequelize";
@@ -237,9 +238,6 @@ async function insertFrontUsageAttempt(
   return "duplicate";
 }
 
-/** Journal tenant of the one POC workspace served in direct provider mode. */
-export const DIRECT_POC_TENANT_ID = "poc-direct";
-
 /** Each unsettled direct attempt holds this many tokens of the daily limit. */
 export const DIRECT_POC_ATTEMPT_RESERVATION_TOKENS = 64_000;
 
@@ -247,7 +245,8 @@ export const DIRECT_POC_ATTEMPT_RESERVATION_TOKENS = 64_000;
  * Start a direct-mode attempt only while its workspace stays within the daily
  * limit. The check and the insertion share a per-workspace transaction lock,
  * so concurrent callers count each other's reservations. Direct rows are never
- * delivered, which lets the exact total use the undelivered-usage index.
+ * delivered, which lets the exact total use the undelivered-usage index; the
+ * unsettled count uses the direct tenant/workspace/date index.
  */
 export async function startDirectFrontUsageAttemptWithinLimit(
   attempt: FrontUsageAttempt,

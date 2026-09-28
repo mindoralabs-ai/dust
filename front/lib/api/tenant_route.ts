@@ -98,11 +98,21 @@ function privateOrigin(value: unknown): value is string {
   }
 }
 
+/**
+ * Reserved for direct provider mode's local journal rows, so no signed tenant
+ * can share them or their exclusion from reconciliation.
+ */
+export const DIRECT_POC_TENANT_ID = "poc-direct";
+const signedTenantId = z
+  .string()
+  .regex(TENANT_ID)
+  .refine((tenantId) => tenantId !== DIRECT_POC_TENANT_ID);
+
 const boundedString = z.string().min(1).max(256);
 const revisionSchema = z.number().int().nonnegative().safe();
 const tenantSchema = z
   .object({
-    tenant_id: z.string().regex(TENANT_ID),
+    tenant_id: signedTenantId,
     workspace_id: boundedString,
     workos_organization_id: boundedString,
     private_route: z.string().refine(privateOrigin),
@@ -117,7 +127,7 @@ const tenantSchema = z
   .strict();
 const membershipSchema = z
   .object({
-    tenant_id: z.string().regex(TENANT_ID),
+    tenant_id: signedTenantId,
     employee_id: boundedString,
     authority_namespace: z.literal("control-ui"),
     dust_user_id: boundedString,
@@ -569,7 +579,8 @@ export class DustTenantRouteResolver {
       !this.refreshHealthy ||
       this.nowSeconds() >= current.payload.expires_at ||
       current.payload.revision < this.minimumRevision ||
-      !TENANT_ID.test(tenantId)
+      !TENANT_ID.test(tenantId) ||
+      tenantId === DIRECT_POC_TENANT_ID
     ) {
       throw new TenantRouteUnavailable();
     }

@@ -1,5 +1,6 @@
 import { DustUsageAttemptResource } from "@app/lib/resources/dust_usage_attempt_resource";
 
+export { DIRECT_POC_TENANT_ID } from "@app/lib/api/tenant_route";
 export type {
   FrontUsageAttempt,
   FrontUsageClaim,
@@ -9,7 +10,6 @@ export type {
 export {
   buildFrontUsageEnvelope,
   DIRECT_POC_ATTEMPT_RESERVATION_TOKENS,
-  DIRECT_POC_TENANT_ID,
   frontUsageRouteBindingHash,
   newFrontUsageAttemptId,
 } from "@app/lib/resources/dust_usage_attempt_resource";
