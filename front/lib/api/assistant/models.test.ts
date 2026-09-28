@@ -1,5 +1,11 @@
 import { pickPreferredLargeModel } from "@app/lib/api/assistant/model_preferences";
-import { getWhitelistedProviders } from "@app/lib/api/assistant/models";
+import {
+  getFastestWhitelistedModel,
+  getLargeWhitelistedModel,
+  getSmallWhitelistedModel,
+  getWhitelistedProviders,
+  selectEnabledModel,
+} from "@app/lib/api/assistant/models";
 import { resolveModel } from "@app/lib/api/assistant/resolve_model";
 import { Authenticator } from "@app/lib/auth";
 import { setWorkspaceMaxAllowedTierName } from "@app/lib/model_tiers/allowed_tiers";
@@ -11,11 +17,18 @@ import type { LightAgentConfigurationType } from "@app/types/assistant/agent";
 import { GLOBAL_AGENTS_SID } from "@app/types/assistant/assistant";
 import { CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG } from "@app/types/assistant/models/anthropic";
 import { AUTO_MODEL_ID, MODEL_STREAMS } from "@app/types/assistant/models/auto";
+import {
+  GEMINI_3_7_FLASH_MODEL_CONFIG,
+  GEMINI_3_7_FLASH_MODEL_ID,
+  GEMINI_3_8_FLASH_MODEL_CONFIG,
+} from "@app/types/assistant/models/google_ai_studio";
+import { MISTRAL_SMALL_MODEL_CONFIG } from "@app/types/assistant/models/mistral";
 import { getTierForModel } from "@app/types/assistant/models/model_tiers";
 import {
   GPT_5_4_MINI_MODEL_CONFIG,
   GPT_5_5_MODEL_CONFIG,
   GPT_5_6_LUNA_MODEL_CONFIG,
+  GPT_5_MINI_MODEL_CONFIG,
 } from "@app/types/assistant/models/openai";
 import { MODEL_PROVIDER_IDS } from "@app/types/assistant/models/providers";
 import type {
@@ -29,7 +42,18 @@ import {
   GROK_4_6_MODEL_CONFIG,
   GROK_4_MODEL_CONFIG,
 } from "@app/types/assistant/models/xai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// resolveModel returns null only under the isolated POC's model lock.
+async function resolveModelOrThrow(
+  ...args: Parameters<typeof resolveModel>
+): Promise<NonNullable<Awaited<ReturnType<typeof resolveModel>>>> {
+  const resolution = await resolveModel(...args);
+  if (!resolution) {
+    throw new Error("No model resolved");
+  }
+  return resolution;
+}
 
 vi.mock("@app/lib/resources/provider_credential_resource");
 
@@ -152,17 +176,20 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel, modelResolutionMethod } = await resolveModel(auth, {
-      selection: {
-        providerId: GPT_5_5_MODEL_CONFIG.providerId,
-        modelId: GPT_5_5_MODEL_CONFIG.modelId,
-      },
-      configuration: makeAgentConfiguration({
-        providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
-        modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
-      }),
-      featureFlags: [],
-    });
+    const { resolvedModel, modelResolutionMethod } = await resolveModelOrThrow(
+      auth,
+      {
+        selection: {
+          providerId: GPT_5_5_MODEL_CONFIG.providerId,
+          modelId: GPT_5_5_MODEL_CONFIG.modelId,
+        },
+        configuration: makeAgentConfiguration({
+          providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
+          modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
+        }),
+        featureFlags: [],
+      }
+    );
 
     expect(modelResolutionMethod).toBe("user");
     expect(resolvedModel).toEqual({
@@ -176,13 +203,16 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel, modelResolutionMethod } = await resolveModel(auth, {
-      configuration: makeAgentConfiguration({
-        providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
-        modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
-      }),
-      featureFlags: [],
-    });
+    const { resolvedModel, modelResolutionMethod } = await resolveModelOrThrow(
+      auth,
+      {
+        configuration: makeAgentConfiguration({
+          providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
+          modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
+        }),
+        featureFlags: [],
+      }
+    );
 
     expect(modelResolutionMethod).toBe("agent");
     expect(resolvedModel).toEqual({
@@ -197,14 +227,17 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel, modelResolutionMethod } = await resolveModel(auth, {
-      configuration: makeAgentConfiguration({
-        providerId: GPT_5_6_LUNA_MODEL_CONFIG.providerId,
-        modelId: GPT_5_6_LUNA_MODEL_CONFIG.modelId,
-        reasoningEffort: "high",
-      }),
-      featureFlags: [],
-    });
+    const { resolvedModel, modelResolutionMethod } = await resolveModelOrThrow(
+      auth,
+      {
+        configuration: makeAgentConfiguration({
+          providerId: GPT_5_6_LUNA_MODEL_CONFIG.providerId,
+          modelId: GPT_5_6_LUNA_MODEL_CONFIG.modelId,
+          reasoningEffort: "high",
+        }),
+        featureFlags: [],
+      }
+    );
 
     expect(modelResolutionMethod).toBe("agent");
     expect(resolvedModel).toEqual({
@@ -218,7 +251,7 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const { resolvedModel } = await resolveModelOrThrow(auth, {
       configuration: makeAgentConfiguration({
         providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
         modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
@@ -236,7 +269,7 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const { resolvedModel } = await resolveModelOrThrow(auth, {
       selection: {
         providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
         modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
@@ -256,7 +289,7 @@ describe("resolveModel", () => {
     const workspace = await WorkspaceFactory.basic();
     const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
 
-    const { resolvedModel } = await resolveModel(auth, {
+    const { resolvedModel } = await resolveModelOrThrow(auth, {
       selection: {
         providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
         modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
@@ -280,13 +313,16 @@ describe("resolveModel", () => {
 
     const resolveStreamModelSpy = vi.spyOn(enabledModels, "resolveStreamModel");
 
-    const { resolvedModel, modelResolutionMethod } = await resolveModel(auth, {
-      configuration: makeAgentConfiguration({
-        providerId: AUTO_MODEL_ID,
-        modelId: AUTO_MODEL_ID,
-      }),
-      featureFlags: [],
-    });
+    const { resolvedModel, modelResolutionMethod } = await resolveModelOrThrow(
+      auth,
+      {
+        configuration: makeAgentConfiguration({
+          providerId: AUTO_MODEL_ID,
+          modelId: AUTO_MODEL_ID,
+        }),
+        featureFlags: [],
+      }
+    );
 
     // `auto` is a stream like `auto_fast` / `auto_complex`: it routes through
     // resolveStreamModel and resolves to its first available candidate, which
@@ -312,7 +348,7 @@ describe("resolveModel", () => {
     await setWorkspaceMaxAllowedTierName(auth, "cost_efficient");
 
     // A regular agent on `auto` stays within the workspace's Basic cap.
-    const regular = await resolveModel(auth, {
+    const regular = await resolveModelOrThrow(auth, {
       configuration: makeAgentConfiguration({
         providerId: AUTO_MODEL_ID,
         modelId: AUTO_MODEL_ID,
@@ -327,7 +363,7 @@ describe("resolveModel", () => {
     ).toBe("cost_efficient");
 
     // The sidekick ignores the cap and resolves to the stream's first candidate.
-    const sidekick = await resolveModel(auth, {
+    const sidekick = await resolveModelOrThrow(auth, {
       configuration: makeAgentConfiguration({
         providerId: AUTO_MODEL_ID,
         modelId: AUTO_MODEL_ID,
@@ -345,17 +381,20 @@ describe("resolveModel", () => {
 
     const resolveStreamModelSpy = vi.spyOn(enabledModels, "resolveStreamModel");
 
-    const { resolvedModel, modelResolutionMethod } = await resolveModel(auth, {
-      selection: {
-        providerId: AUTO_MODEL_ID,
-        modelId: AUTO_MODEL_ID,
-      },
-      configuration: makeAgentConfiguration({
-        providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
-        modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
-      }),
-      featureFlags: [],
-    });
+    const { resolvedModel, modelResolutionMethod } = await resolveModelOrThrow(
+      auth,
+      {
+        selection: {
+          providerId: AUTO_MODEL_ID,
+          modelId: AUTO_MODEL_ID,
+        },
+        configuration: makeAgentConfiguration({
+          providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
+          modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
+        }),
+        featureFlags: [],
+      }
+    );
 
     expect(resolveStreamModelSpy).toHaveBeenCalledWith(
       expect.any(Array),
@@ -420,5 +459,183 @@ describe("pickPreferredLargeModel", () => {
     expect(selected.modelId).toBe(
       CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId
     );
+  });
+});
+
+// The POC mode is cached once read as "1": every lock-off case in this file
+// must run before the "POC model lock" cases below.
+describe("whitelisted model lookups outside the isolated POC", () => {
+  it("keeps each lookup's own candidates", async () => {
+    const workspace = await WorkspaceFactory.basic();
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+
+    expect(
+      selectEnabledModel(auth, [GPT_5_5_MODEL_CONFIG], { featureFlags: [] })
+        ?.modelId
+    ).toBe(GPT_5_5_MODEL_CONFIG.modelId);
+    expect(getFastestWhitelistedModel(auth)?.modelId).toBe(
+      MISTRAL_SMALL_MODEL_CONFIG.modelId
+    );
+    expect(getSmallWhitelistedModel(auth)?.modelId).toBe(
+      GPT_5_MINI_MODEL_CONFIG.modelId
+    );
+    expect(getLargeWhitelistedModel(auth)?.modelId).toBe(
+      CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId
+    );
+  });
+});
+
+describe("POC model lock", () => {
+  const LOCKED_MODEL = {
+    providerId: GEMINI_3_7_FLASH_MODEL_CONFIG.providerId,
+    modelId: GEMINI_3_7_FLASH_MODEL_ID,
+  };
+
+  beforeEach(() => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("whitelists only Google and noop, within the workspace's own whitelist", async () => {
+    const workspace = await WorkspaceFactory.basic();
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+    expect(getWhitelistedProviders(auth)).toEqual(
+      new Set(["google_ai_studio", "noop"])
+    );
+
+    const anthropicOnly = await WorkspaceFactory.basic({
+      whiteListedProviders: ["anthropic"],
+    });
+    const anthropicOnlyAuth = await Authenticator.internalAdminForWorkspace(
+      anthropicOnly.sId
+    );
+    expect(getWhitelistedProviders(anthropicOnlyAuth)).toEqual(
+      new Set(["noop"])
+    );
+  });
+
+  it("selects the locked model only when it is a candidate", async () => {
+    const workspace = await WorkspaceFactory.basic();
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+
+    // Another Google model shares the locked model's whitelisted provider.
+    expect(
+      selectEnabledModel(
+        auth,
+        [GPT_5_5_MODEL_CONFIG, GEMINI_3_8_FLASH_MODEL_CONFIG],
+        { featureFlags: [] }
+      )
+    ).toBeNull();
+    expect(
+      selectEnabledModel(
+        auth,
+        [GEMINI_3_8_FLASH_MODEL_CONFIG, GEMINI_3_7_FLASH_MODEL_CONFIG],
+        { featureFlags: [] }
+      )?.modelId
+    ).toBe(GEMINI_3_7_FLASH_MODEL_ID);
+  });
+
+  it("resolves every whitelisted-model lookup to the locked model", async () => {
+    const workspace = await WorkspaceFactory.basic();
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+
+    expect(
+      [
+        getFastestWhitelistedModel(auth),
+        getSmallWhitelistedModel(auth),
+        getLargeWhitelistedModel(auth),
+        getLargeWhitelistedModel(auth, new Set(), { forBatch: true }),
+      ].map((model) => model?.modelId)
+    ).toEqual(Array(4).fill(GEMINI_3_7_FLASH_MODEL_ID));
+    expect(
+      getLargeWhitelistedModel(
+        auth,
+        new Set<ModelProviderIdType>(["google_ai_studio"])
+      )
+    ).toBeNull();
+  });
+
+  it("runs the locked model for streams, picker overrides and agent models", async () => {
+    const workspace = await WorkspaceFactory.basic();
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+
+    const dustAuto = await resolveModelOrThrow(auth, {
+      configuration: makeAgentConfiguration({
+        providerId: AUTO_MODEL_ID,
+        modelId: AUTO_MODEL_ID,
+      }),
+      featureFlags: [],
+    });
+    expect(dustAuto).toEqual({
+      resolvedModel: {
+        ...LOCKED_MODEL,
+        reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+      },
+      modelResolutionMethod: "agent",
+    });
+
+    const sidekickAuto = await resolveModelOrThrow(auth, {
+      configuration: makeAgentConfiguration({
+        providerId: AUTO_MODEL_ID,
+        modelId: AUTO_MODEL_ID,
+        sId: GLOBAL_AGENTS_SID.SIDEKICK,
+      }),
+      featureFlags: [],
+    });
+    expect(sidekickAuto.resolvedModel).toMatchObject(LOCKED_MODEL);
+
+    const pickerOverride = await resolveModelOrThrow(auth, {
+      selection: {
+        providerId: GPT_5_5_MODEL_CONFIG.providerId,
+        modelId: GPT_5_5_MODEL_CONFIG.modelId,
+        reasoningEffort: "high",
+      },
+      configuration: makeAgentConfiguration({
+        providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
+        modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
+      }),
+      featureFlags: [],
+    });
+    expect(pickerOverride).toEqual({
+      resolvedModel: { ...LOCKED_MODEL, reasoningEffort: "high" },
+      modelResolutionMethod: "user",
+    });
+
+    // `none` is not an effort Gemini 3.7 Flash supports.
+    const savedOnClaude = await resolveModelOrThrow(auth, {
+      configuration: makeAgentConfiguration({
+        providerId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.providerId,
+        modelId: CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG.modelId,
+        reasoningEffort: "none",
+      }),
+      featureFlags: [],
+    });
+    expect(savedOnClaude).toEqual({
+      resolvedModel: {
+        ...LOCKED_MODEL,
+        reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+      },
+      modelResolutionMethod: "agent",
+    });
+  });
+
+  it("resolves no model, rather than another one, when the workspace excludes Google", async () => {
+    const workspace = await WorkspaceFactory.basic({
+      whiteListedProviders: ["openai"],
+    });
+    const auth = await Authenticator.internalAdminForWorkspace(workspace.sId);
+
+    const resolution = await resolveModel(auth, {
+      configuration: makeAgentConfiguration({
+        providerId: GPT_5_5_MODEL_CONFIG.providerId,
+        modelId: GPT_5_5_MODEL_CONFIG.modelId,
+      }),
+      featureFlags: [],
+    });
+
+    expect(resolution).toBeNull();
   });
 });

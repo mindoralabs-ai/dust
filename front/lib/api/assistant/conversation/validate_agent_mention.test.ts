@@ -18,6 +18,7 @@ import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import { MembershipFactory } from "@app/tests/utils/MembershipFactory";
 import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
 import { UserFactory } from "@app/tests/utils/UserFactory";
+import type { TestWorkspacePlan } from "@app/tests/utils/WorkspaceFactory";
 import type { LightAgentConfigurationType } from "@app/types/assistant/agent";
 import type { ConversationType } from "@app/types/assistant/conversation";
 import type { WorkspaceType } from "@app/types/user";
@@ -68,8 +69,8 @@ describe("validateAgentMention", () => {
   let userMessageSId: string;
   let userMessageId: number;
 
-  beforeEach(async () => {
-    const setup = await createResourceTest({});
+  async function setupRestrictedMention(plan: TestWorkspacePlan = "basic") {
+    const setup = await createResourceTest({ plan });
     workspace = setup.workspace as WorkspaceType;
     auth = setup.authenticator;
 
@@ -210,6 +211,10 @@ describe("validateAgentMention", () => {
 
     vi.mocked(launchAgentLoopWorkflow).mockClear();
     vi.mocked(publishMessageEventsOnMessagePostOrEdit).mockClear();
+  }
+
+  beforeEach(async () => {
+    await setupRestrictedMention();
   });
 
   it("approves a restricted agent mention, creates an agent message, and launches the agent loop", async () => {
@@ -405,5 +410,36 @@ describe("validateAgentMention", () => {
     expect(approvedForAgent).toHaveLength(1);
 
     rateLimiterSpy.mockRestore();
+  });
+
+  // The POC mode is cached once read as "1", so this case runs last.
+  it("refuses an approval in the isolated POC where the workspace cannot run its model", async () => {
+    // A free plan runs the agent's small model, not Gemini 3.7 Flash.
+    await setupRestrictedMention("freeNoProductAccess");
+    const rateLimiterSpy = vi
+      .spyOn(rateLimiterModule, "rateLimiter")
+      .mockResolvedValue(100);
+    vi.stubEnv("DUST_POC_MODE", "1");
+
+    try {
+      const result = await validateAgentMention(auth, {
+        conversationId: projectConversation.sId,
+        agentConfigurationId: agentWithDifferentSpace.sId,
+        messageId: userMessageSId,
+        approvalState: "approved",
+      });
+
+      if (result.isOk()) {
+        throw new Error("Approved a mention the workspace cannot run");
+      }
+      expect(result.error.api_error).toMatchObject({
+        type: "invalid_request_error",
+        message: "The model is not supported.",
+      });
+      expect(launchAgentLoopWorkflow).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      rateLimiterSpy.mockRestore();
+    }
   });
 });

@@ -1,5 +1,10 @@
 import { getDegradedModelIds } from "@app/lib/api/assistant/degraded_models";
 import { pickPreferredLargeModel } from "@app/lib/api/assistant/model_preferences";
+import {
+  isPocLockedModelId,
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import { getAvailableModelsForWorkspace } from "@app/lib/api/assistant/workspace_capabilities";
 import type { Authenticator } from "@app/lib/auth";
 import { resolveAllowedTierNames } from "@app/lib/model_tiers/allowed_tiers";
@@ -187,6 +192,19 @@ export function resolveStreamModel(
     }
   }
 
+  // The isolated POC has no other model to fall back to than its locked one,
+  // unselectable when it is not a candidate, as in getModelsForAuth.
+  if (isPocModelLockEnabled()) {
+    const lockedModel = candidateModels.find((m) =>
+      isPocLockedModelId(m.modelId)
+    ) ?? { ...POC_LOCKED_MODEL_CONFIG, isSelectable: false };
+    return {
+      model: lockedModel,
+      reasoningEffort: lockedModel.defaultReasoningEffort,
+      fromPool: false,
+    };
+  }
+
   // Still off the degraded ones: the last-resort fallback is as automatic a pick
   // as the pool walk itself.
   const fallback = pickPreferredLargeModel(candidateModels);
@@ -243,13 +261,43 @@ export async function getModelsForAuth(
 ): Promise<GetEnabledModelsResponseType> {
   const models = await getEnabledModelsForAuth(auth);
   const degradedModelIds = getDegradedModelIds();
+  const degradedEnabledModelIds = models
+    .filter((m) => degradedModelIds.has(m.modelId))
+    .map((m) => m.modelId);
+
+  if (isPocModelLockEnabled()) {
+    // The isolated POC never falls back to another model: its locked model is
+    // the default and every stream resolves to it, as resolveModel does. Where
+    // the workspace cannot run it or the member cannot select it, that is the
+    // unselectable model with its own efforts, which a save still tier-checks.
+    const lockedModel = models.find(
+      (m) => isPocLockedModelId(m.modelId) && m.isSelectable
+    ) ?? {
+      ...POC_LOCKED_MODEL_CONFIG,
+      isSelectable: false,
+    };
+    const lockedResolution: ModelStreamResolutionType = {
+      providerId: lockedModel.providerId,
+      modelId: lockedModel.modelId,
+      displayName: lockedModel.displayName,
+      reasoningEffort: lockedModel.defaultReasoningEffort,
+    };
+    return {
+      models,
+      defaultModel: lockedModel,
+      streams: {
+        [AUTO_MODEL_ID]: lockedResolution,
+        [AUTO_FAST_MODEL_ID]: lockedResolution,
+        [AUTO_COMPLEX_MODEL_ID]: lockedResolution,
+      },
+      degradedModelIds: degradedEnabledModelIds,
+    };
+  }
 
   return {
     models,
     defaultModel: getDefaultModelFromEnabledModels(models),
     streams: getStreamResolutions(models, degradedModelIds),
-    degradedModelIds: models
-      .filter((m) => degradedModelIds.has(m.modelId))
-      .map((m) => m.modelId),
+    degradedModelIds: degradedEnabledModelIds,
   };
 }

@@ -184,7 +184,10 @@ export class WorkspaceFactory {
   }
 }
 
-export type TestWorkspacePlan = "basic" | "creditPriced";
+export type TestWorkspacePlan =
+  | "basic"
+  | "creditPriced"
+  | "freeNoProductAccess";
 
 export async function workspaceForPlan(
   plan: TestWorkspacePlan
@@ -194,6 +197,8 @@ export async function workspaceForPlan(
       return WorkspaceFactory.basic();
     case "creditPriced":
       return WorkspaceFactory.creditPriced();
+    case "freeNoProductAccess":
+      return WorkspaceFactory.freeNoProductAccess();
     default:
       assertNever(plan);
   }

@@ -57,6 +57,8 @@ function matchesQuery(item: SlashCommand, normalizedQuery: string): boolean {
     .some((value) => value.toLowerCase().includes(normalizedQuery));
 }
 
+const IS_ISOLATED_POC = import.meta.env?.VITE_DUST_POC_MODE === "1";
+
 function buildTierSlashCommandItems({
   lockPremiumEfforts,
   streamModels,
@@ -66,6 +68,11 @@ function buildTierSlashCommandItems({
   streamModels: EnabledModelConfigurationType[];
   streams: ModelStreamResolutionsType | null;
 }): SelectModelSlashCommand[] {
+  // The isolated POC runs a single model, so there is no stream to offer.
+  if (IS_ISOLATED_POC) {
+    return [];
+  }
+
   const items: SelectModelSlashCommand[] = [];
 
   for (const tier of MODEL_TIERS) {

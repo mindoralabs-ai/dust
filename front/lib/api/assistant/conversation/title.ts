@@ -5,6 +5,7 @@ import {
   getSmallWhitelistedModel,
   getWhitelistedProviders,
 } from "@app/lib/api/assistant/models";
+import { isPocModelLockEnabled } from "@app/lib/api/assistant/poc_model_lock";
 import { publishConversationEvent } from "@app/lib/api/assistant/streaming/events";
 import type { Authenticator, AuthenticatorType } from "@app/lib/auth";
 import { ConversationResource } from "@app/lib/resources/conversation_resource";
@@ -259,6 +260,12 @@ async function generateConversationTitle(
 function getFastModelConfig(
   auth: Authenticator
 ): ModelConfigurationType | null {
+  // The isolated POC titles with its locked model, which the whitelisted-model
+  // lookup resolves to, instead of the provider chain below.
+  if (isPocModelLockEnabled()) {
+    return getSmallWhitelistedModel(auth);
+  }
+
   const providers = getWhitelistedProviders(auth);
 
   if (providers.has("openai")) {

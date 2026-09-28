@@ -113,9 +113,18 @@ import {
   getDataSourcesAndWorkspaceIdForGlobalAgents,
   getMCPServerViewsForGlobalAgents,
 } from "@app/lib/api/assistant/global_agents/tools";
-import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
+import {
+  isProviderWhitelistedForAuth,
+  selectEnabledModel,
+} from "@app/lib/api/assistant/models";
+import {
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
+import { getModelTierAccessErrorForAgentConfiguration } from "@app/lib/model_tiers/access";
+import { resolveAllowedTierNames } from "@app/lib/model_tiers/allowed_tiers";
 import { getDefaultStreamConfigForAuth } from "@app/lib/model_tiers/enabled_models";
 import { GlobalAgentSettingsModel } from "@app/lib/models/agent/agent";
 import type {
@@ -129,6 +138,7 @@ import {
   isGlobalAgentId,
 } from "@app/types/assistant/assistant";
 import { CUSTOM_MODEL_CONFIGS } from "@app/types/assistant/models/custom_models.generated";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import type { ModelConfigurationType } from "@app/types/assistant/models/types";
 import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 import { isComputerFeatureEnabled } from "@app/types/shared/feature_flags";
@@ -1002,6 +1012,32 @@ const MODEL_ONLY_GLOBAL_AGENTS_SID: readonly GLOBAL_AGENTS_SID[] = [
   GLOBAL_AGENTS_SID.GEMINI_PRO,
 ];
 
+// In the isolated POC, a global agent that passed the provider filter runs the
+// locked model (see resolveModel), so it shows that model rather than the one,
+// or the stream, it was built with. Noop agents keep their static replies.
+function withPocLockedModel(
+  agent: AgentConfigurationType
+): AgentConfigurationType {
+  if (agent.model.modelId === NOOP_MODEL_ID) {
+    return agent;
+  }
+
+  const { reasoningEffort } = agent.model;
+  return {
+    ...agent,
+    model: {
+      ...agent.model,
+      providerId: POC_LOCKED_MODEL_CONFIG.providerId,
+      modelId: POC_LOCKED_MODEL_CONFIG.modelId,
+      reasoningEffort:
+        reasoningEffort &&
+        POC_LOCKED_MODEL_CONFIG.supportedReasoningEfforts[reasoningEffort]
+          ? reasoningEffort
+          : POC_LOCKED_MODEL_CONFIG.defaultReasoningEffort,
+    },
+  };
+}
+
 function getCustomModelIndexForGlobalAgent(sId: string): number | null {
   if (!isGlobalAgentId(sId)) {
     return null;
@@ -1177,7 +1213,13 @@ export async function getGlobalAgents(
       ? await buildSidekickContext(auth, agentsIdsToFetch)
       : null;
 
-  const autoDefaultModelConfig = await getDefaultStreamConfigForAuth(auth);
+  const isModelLocked = isPocModelLockEnabled();
+
+  // The isolated POC offers no stream, so @dust falls back to the whitelisted
+  // large model, which is the locked model.
+  const autoDefaultModelConfig = isModelLocked
+    ? null
+    : await getDefaultStreamConfigForAuth(auth);
 
   // For now we retrieve them all
   // We will store them in the database later to allow admin enable them or not
@@ -1200,13 +1242,43 @@ export async function getGlobalAgents(
 
   const globalAgents: AgentConfigurationType[] = [];
 
+  // In the isolated POC a model agent runs the locked model, so it is offered
+  // only where the workspace's plan, region and flags allow that model, and
+  // where the member's tier cap lets it run: the agent loop checks that first.
+  const canRunLockedModel =
+    isModelLocked &&
+    selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
+      featureFlags: flags,
+    }) !== null;
+  // Every locked model agent is checked against the same member's tier grants.
+  const memberTierNames = canRunLockedModel
+    ? (await resolveAllowedTierNames(auth)).tiers
+    : undefined;
+
   for (const agentFetcherResult of agentCandidates) {
     if (
-      agentFetcherResult &&
-      agentFetcherResult.scope === "global" &&
-      isProviderWhitelistedForAuth(auth, agentFetcherResult.model.providerId)
+      !agentFetcherResult ||
+      agentFetcherResult.scope !== "global" ||
+      !isProviderWhitelistedForAuth(auth, agentFetcherResult.model.providerId)
     ) {
+      continue;
+    }
+    if (!isModelLocked || agentFetcherResult.model.modelId === NOOP_MODEL_ID) {
       globalAgents.push(agentFetcherResult);
+    } else if (canRunLockedModel) {
+      const lockedAgent = withPocLockedModel(agentFetcherResult);
+      const tierAccessError =
+        await getModelTierAccessErrorForAgentConfiguration(auth, {
+          agentSId: lockedAgent.sId,
+          agentName: lockedAgent.name,
+          model: POC_LOCKED_MODEL_CONFIG,
+          reasoningEffort: lockedAgent.model.reasoningEffort,
+          agentScope: lockedAgent.scope,
+          memberTierNames,
+        });
+      if (!tierAccessError) {
+        globalAgents.push(lockedAgent);
+      }
     }
   }
 

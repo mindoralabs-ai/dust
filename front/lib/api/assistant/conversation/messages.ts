@@ -36,6 +36,7 @@ import type {
   ModelSelectionType,
   ResolvedRequestedModel,
 } from "@app/types/assistant/models/types";
+import type { APIErrorWithContentfulStatusCode } from "@app/types/error";
 import type { ModelId } from "@app/types/shared/model_id";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import { normalizeError } from "@app/types/shared/utils/error_utils";
@@ -294,6 +295,18 @@ export interface AgentMessageModelResolution {
   modelResolutionMethod: ModelResolutionMethodType;
 }
 
+// The error a message path returns where resolveModelForMentionedAgent finds no
+// model: only the isolated POC's lock, which has no fallback model, leaves none.
+export function getNoRunnableModelError(): APIErrorWithContentfulStatusCode {
+  return {
+    status_code: 400,
+    api_error: {
+      type: "invalid_request_error",
+      message: "The model is not supported.",
+    },
+  };
+}
+
 export async function resolveModelForMentionedAgent(
   auth: Authenticator,
   {
@@ -303,7 +316,7 @@ export async function resolveModelForMentionedAgent(
     configuration: LightAgentConfigurationType;
     selection?: ModelSelectionType;
   }
-): Promise<AgentMessageModelResolution> {
+): Promise<AgentMessageModelResolution | null> {
   const featureFlags = await getFeatureFlags(auth);
 
   // Sidekick picks its own model server-side. Never honor a user-supplied

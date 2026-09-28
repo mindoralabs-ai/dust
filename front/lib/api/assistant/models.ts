@@ -1,4 +1,9 @@
 import { PREFERRED_LARGE_MODEL_CONFIGS } from "@app/lib/api/assistant/model_preferences";
+import {
+  isPocLockedModelId,
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import { isProviderWhitelisted } from "@app/lib/api/assistant/provider_whitelist";
 import { config as regionConfig } from "@app/lib/api/regions/config";
 import { isModelEnabled } from "@app/lib/assistant";
@@ -8,6 +13,7 @@ import { CLAUDE_4_5_HAIKU_DEFAULT_MODEL_CONFIG } from "@app/types/assistant/mode
 import { GEMINI_3_5_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
 import { MISTRAL_SMALL_MODEL_CONFIG } from "@app/types/assistant/models/mistral";
 import { isModelId } from "@app/types/assistant/models/models";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import { GPT_5_MINI_MODEL_CONFIG } from "@app/types/assistant/models/openai";
 import {
   BYOK_MODEL_PROVIDER_IDS,
@@ -27,7 +33,23 @@ import {
 } from "@app/types/assistant/models/xai";
 import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 
+// The isolated POC wires the locked model's provider alone; noop needs none.
+const POC_WHITELISTABLE_PROVIDERS: ReadonlySet<ModelProviderIdType> = new Set([
+  POC_LOCKED_MODEL_CONFIG.providerId,
+  "noop",
+]);
+
 export function getWhitelistedProviders(
+  auth: Authenticator
+): Set<ModelProviderIdType> {
+  const whitelistedProviders = getWorkspaceWhitelistedProviders(auth);
+
+  return isPocModelLockEnabled()
+    ? whitelistedProviders.intersection(POC_WHITELISTABLE_PROVIDERS)
+    : whitelistedProviders;
+}
+
+function getWorkspaceWhitelistedProviders(
   auth: Authenticator
 ): Set<ModelProviderIdType> {
   const owner = auth.getNonNullableWorkspace();
@@ -123,7 +145,24 @@ export function selectEnabledModel(
     featureFlags
   );
 
-  return candidates.find((m) => isModelEnabled(m, context)) ?? null;
+  // The isolated POC can only select its locked model or the provider-less noop
+  // model: any other candidate is unavailable, so the caller gets null and
+  // applies its own fallback.
+  const selectableCandidates = isPocModelLockEnabled()
+    ? candidates.filter(
+        (m) => isPocLockedModelId(m.modelId) || m.modelId === NOOP_MODEL_ID
+      )
+    : candidates;
+
+  return selectableCandidates.find((m) => isModelEnabled(m, context)) ?? null;
+}
+
+// The isolated POC runs a single model: a lookup for "some whitelisted model"
+// resolves to it, or to null when the workspace cannot run it.
+function withPocModelLock(
+  orderedModels: ModelConfigurationType[]
+): ModelConfigurationType[] {
+  return isPocModelLockEnabled() ? [POC_LOCKED_MODEL_CONFIG] : orderedModels;
 }
 
 const ORDERED_FAST_MODEL_CONFIGS: ModelConfigurationType[] = [
@@ -137,8 +176,9 @@ export function getFastestWhitelistedModel(
   const context = getModelEnablementContext(auth);
 
   return (
-    ORDERED_FAST_MODEL_CONFIGS.find((m) => isModelEnabled(m, context)) ??
-    _getSmallWhitelistedModel(context)
+    withPocModelLock(ORDERED_FAST_MODEL_CONFIGS).find((m) =>
+      isModelEnabled(m, context)
+    ) ?? _getSmallWhitelistedModel(context)
   );
 }
 
@@ -179,7 +219,9 @@ function _getSmallWhitelistedModel(
   context: ModelEnablementContext
 ): ModelConfigurationType | null {
   return (
-    ORDERED_SMALL_MODEL_CONFIGS.find((m) => isModelEnabled(m, context)) ?? null
+    withPocModelLock(ORDERED_SMALL_MODEL_CONFIGS).find((m) =>
+      isModelEnabled(m, context)
+    ) ?? null
   );
 }
 
@@ -188,7 +230,7 @@ function _getLargeWhitelistedModel(
   { forBatch: hasBatch }: { forBatch?: boolean } = {}
 ): ModelConfigurationType | null {
   return (
-    PREFERRED_LARGE_MODEL_CONFIGS.find(
+    withPocModelLock(PREFERRED_LARGE_MODEL_CONFIGS).find(
       (m) =>
         isModelEnabled(m, context) && (!hasBatch || m.supportsBatchProcessing)
     ) ?? null

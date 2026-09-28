@@ -10,6 +10,7 @@ import {
 } from "@app/lib/api/assistant/conversation/lock";
 import {
   createAgentMessages,
+  getNoRunnableModelError,
   resolveModelForMentionedAgent,
 } from "@app/lib/api/assistant/conversation/messages";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
@@ -232,6 +233,9 @@ export async function validateAgentMention(
     configuration,
     selection: message.requestedModel ?? undefined,
   });
+  if (!resolution) {
+    return new Err(getNoRunnableModelError());
+  }
 
   const premiumLimitResult = await enforcePremiumModelLimit(auth, {
     user: auth.getNonNullableUser(),

@@ -21,6 +21,7 @@ import {
   attributeUserFromWorkspaceAndEmail,
   createAgentMessages,
   createUserMessage,
+  getNoRunnableModelError,
   resolveModelForMentionedAgent,
 } from "@app/lib/api/assistant/conversation/messages";
 import {
@@ -34,7 +35,15 @@ import {
   batchRenderMessages,
   batchRenderUserMessagesWithoutMentions,
 } from "@app/lib/api/assistant/messages";
-import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
+import {
+  isProviderWhitelistedForAuth,
+  selectEnabledModel,
+} from "@app/lib/api/assistant/models";
+import {
+  getPocRuntimeModel,
+  isPocModelLockEnabled,
+  isPocRuntimeModel,
+} from "@app/lib/api/assistant/poc_model_lock";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
 import { gracefullyStopAgentLoop } from "@app/lib/api/assistant/pubsub";
 import {
@@ -172,13 +181,17 @@ import {
   toMentionType,
 } from "@app/types/assistant/mentions";
 import { isModelStreamId } from "@app/types/assistant/models/auto";
-import type { ModelSelectionType } from "@app/types/assistant/models/types";
+import type {
+  ModelSelectionType,
+  SupportedModel,
+} from "@app/types/assistant/models/types";
 import type {
   ContentFragmentContextType,
   ContentFragmentType,
 } from "@app/types/content_fragment";
 import type { APIErrorWithContentfulStatusCode } from "@app/types/error";
 import { isCreditPricedPlan } from "@app/types/plan";
+import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 import type { ModelId } from "@app/types/shared/model_id";
 import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
@@ -765,9 +778,11 @@ export async function postUserMessage(
       });
     }
 
+    // In the isolated POC, an agent runs the locked model, whatever it was saved on.
+    const runtimeModel = getPocRuntimeModel(agentConfig.model);
     const isProviderEnabled = isProviderWhitelistedForAuth(
       auth,
-      agentConfig.model.providerId
+      runtimeModel.providerId
     );
     if (!isProviderEnabled) {
       // Stop processing if any agent uses a disabled provider.
@@ -783,7 +798,7 @@ export async function postUserMessage(
       });
     }
 
-    const supportedModelConfig = getSupportedModelConfig(agentConfig.model);
+    const supportedModelConfig = getSupportedModelConfig(runtimeModel);
     if (
       !supportedModelConfig ||
       !(
@@ -831,6 +846,9 @@ export async function postUserMessage(
         selection: modelSelection,
       })
     : null;
+  if (mentionedAgentConfiguration && !modelResolution) {
+    return new Err(getNoRunnableModelError());
+  }
 
   if (user && modelResolution) {
     const premiumLimitResult = await enforcePremiumModelLimit(auth, {
@@ -1105,6 +1123,21 @@ class UserMessageError extends Error {}
 // A message with no concrete user has no author to be, so nobody passes this.
 // Testing that first also stops an API key, which has no `auth.user()` either,
 // from matching null against null.
+// Whether the isolated POC runs a model resolved earlier as is: the lock runs
+// it and the workspace still can.
+function isPocRunnableAsIs(
+  auth: Authenticator,
+  model: SupportedModel,
+  featureFlags: WhitelistableFeature[]
+): boolean {
+  const modelConfig = getSupportedModelConfig(model);
+  return (
+    isPocRuntimeModel(model) &&
+    modelConfig !== null &&
+    selectEnabledModel(auth, [modelConfig], { featureFlags }) !== null
+  );
+}
+
 function isUserMessageAuthor(
   auth: Authenticator,
   message: UserMessageType
@@ -1214,9 +1247,11 @@ export async function editUserMessage(
       });
     }
 
+    // In the isolated POC, an agent runs the locked model, whatever it was saved on.
+    const runtimeModel = getPocRuntimeModel(agentConfig.model);
     const isProviderEnabled = isProviderWhitelistedForAuth(
       auth,
-      agentConfig.model.providerId
+      runtimeModel.providerId
     );
     if (!isProviderEnabled) {
       // Stop processing if any agent uses a disabled provider.
@@ -1252,6 +1287,9 @@ export async function editUserMessage(
         selection: message.requestedModel ?? undefined,
       })
     : null;
+  if (mentionedAgentConfiguration && !modelResolution) {
+    return new Err(getNoRunnableModelError());
+  }
 
   if (user && modelResolution) {
     const premiumLimitResult = await enforcePremiumModelLimit(auth, {
@@ -1820,14 +1858,36 @@ export async function retryAgentMessage(
     return limitResult;
   }
 
-  let retryModelResolution: AgentMessageModelResolution = message.resolvedModel
-    ? {
-        resolvedModel: message.resolvedModel,
-        modelResolutionMethod: message.modelResolutionMethod ?? "agent",
-      }
-    : await resolveModelForMentionedAgent(auth, {
-        configuration: message.configuration,
-      });
+  // In the isolated POC, a stored resolution is reused only while the lock and
+  // the workspace still run it as is. Otherwise the reply is resolved again,
+  // with the parent message's own model selection.
+  const isModelLocked = isPocModelLockEnabled();
+  const reusableResolvedModel =
+    message.resolvedModel &&
+    (!isModelLocked ||
+      isPocRunnableAsIs(
+        auth,
+        message.resolvedModel,
+        await getFeatureFlags(auth)
+      ))
+      ? message.resolvedModel
+      : null;
+
+  let retryModelResolution: AgentMessageModelResolution | null =
+    reusableResolvedModel
+      ? {
+          resolvedModel: reusableResolvedModel,
+          modelResolutionMethod: message.modelResolutionMethod ?? "agent",
+        }
+      : await resolveModelForMentionedAgent(auth, {
+          configuration: message.configuration,
+          selection: isModelLocked
+            ? (parentUserMessage.requestedModel ?? undefined)
+            : undefined,
+        });
+  if (!retryModelResolution) {
+    return new Err(getNoRunnableModelError());
+  }
 
   const user = auth.user();
   if (user) {
@@ -3419,6 +3479,17 @@ export async function updateAgentMessageWithFinalStatus(
             configuration: agentMessage.configuration,
             selection: promotedUserMessage.requestedModel ?? undefined,
           });
+    if (!modelResolution) {
+      // The isolated POC's lock left no model this workspace can run: promote
+      // the pending user messages without a new agent message.
+      return {
+        promotedUserMessages,
+        promotedAuth,
+        agentMessage: null,
+        deniedActions,
+        skippedTransition: null,
+      };
+    }
 
     const user = promotedAuth.user();
     if (user) {
