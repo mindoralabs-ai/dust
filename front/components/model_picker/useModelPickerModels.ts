@@ -110,7 +110,8 @@ export function useModelPickerModels({
 
   const tiers = useMemo(() => {
     // The isolated POC runs a single model, so there is no stream to offer.
-    if (IS_ISOLATED_POC) {
+    // Filter mode still names the tiers that existing agents are saved on.
+    if (IS_ISOLATED_POC && !isFilterMode) {
       return [];
     }
     if (!modelIds) {
@@ -118,7 +119,7 @@ export function useModelPickerModels({
     }
     const wanted = new Set(modelIds);
     return MODEL_TIERS.filter((tier) => wanted.has(tier.metaModelId));
-  }, [modelIds]);
+  }, [isFilterMode, modelIds]);
 
   // Meta-models backing the tier rows: their `isSelectable` tells whether the
   // member's model-tier cap allows the stream at all.

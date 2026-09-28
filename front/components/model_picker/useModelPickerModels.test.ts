@@ -25,12 +25,16 @@ vi.mock("@app/lib/swr/models", () => ({
 }));
 
 // The POC flag is read when the module loads, so each case imports it afresh.
-async function renderTierNames(): Promise<string[]> {
+async function renderTierNames(
+  options: { mode?: "select" | "filter"; modelIds?: string[] } = {}
+): Promise<string[]> {
   const { useModelPickerModels } = await import(
     "@app/components/model_picker/useModelPickerModels"
   );
   const owner = LightWorkspaceFactory.build();
-  const { result } = renderHook(() => useModelPickerModels({ owner }));
+  const { result } = renderHook(() =>
+    useModelPickerModels({ owner, ...options })
+  );
 
   return result.current.modelProps.tiers.map((tier) => tier.name);
 }
@@ -49,5 +53,13 @@ describe("useModelPickerModels tiers", () => {
     vi.stubEnv("VITE_DUST_POC_MODE", "1");
 
     expect(await renderTierNames()).toEqual([]);
+  });
+
+  it("still names the tiers existing agents use when filtering in the POC", async () => {
+    vi.stubEnv("VITE_DUST_POC_MODE", "1");
+
+    expect(
+      await renderTierNames({ mode: "filter", modelIds: ["auto"] })
+    ).toEqual(["Standard"]);
   });
 });

@@ -1,5 +1,10 @@
 import { getDegradedModelIds } from "@app/lib/api/assistant/degraded_models";
 import { pickPreferredLargeModel } from "@app/lib/api/assistant/model_preferences";
+import {
+  isPocLockedModelId,
+  isPocModelLockEnabled,
+  POC_LOCKED_MODEL_CONFIG,
+} from "@app/lib/api/assistant/poc_model_lock";
 import { getAvailableModelsForWorkspace } from "@app/lib/api/assistant/workspace_capabilities";
 import type { Authenticator } from "@app/lib/auth";
 import { resolveAllowedTierNames } from "@app/lib/model_tiers/allowed_tiers";
@@ -243,13 +248,40 @@ export async function getModelsForAuth(
 ): Promise<GetEnabledModelsResponseType> {
   const models = await getEnabledModelsForAuth(auth);
   const degradedModelIds = getDegradedModelIds();
+  const degradedEnabledModelIds = models
+    .filter((m) => degradedModelIds.has(m.modelId))
+    .map((m) => m.modelId);
+
+  if (isPocModelLockEnabled()) {
+    // The isolated POC never falls back to another model: its locked model is
+    // the default, unselectable when the workspace cannot run it, and every
+    // stream resolves to it, as resolveModel does.
+    const lockedModel = models.find((m) => isPocLockedModelId(m.modelId)) ?? {
+      ...POC_LOCKED_MODEL_CONFIG,
+      isSelectable: false,
+    };
+    const lockedResolution: ModelStreamResolutionType = {
+      providerId: lockedModel.providerId,
+      modelId: lockedModel.modelId,
+      displayName: lockedModel.displayName,
+      reasoningEffort: lockedModel.defaultReasoningEffort,
+    };
+    return {
+      models,
+      defaultModel: lockedModel,
+      streams: {
+        [AUTO_MODEL_ID]: lockedResolution,
+        [AUTO_FAST_MODEL_ID]: lockedResolution,
+        [AUTO_COMPLEX_MODEL_ID]: lockedResolution,
+      },
+      degradedModelIds: degradedEnabledModelIds,
+    };
+  }
 
   return {
     models,
     defaultModel: getDefaultModelFromEnabledModels(models),
     streams: getStreamResolutions(models, degradedModelIds),
-    degradedModelIds: models
-      .filter((m) => degradedModelIds.has(m.modelId))
-      .map((m) => m.modelId),
+    degradedModelIds: degradedEnabledModelIds,
   };
 }

@@ -10,6 +10,7 @@ import {
   restoreAgentConfiguration,
   unsafeHardDeleteAgentConfiguration,
 } from "@app/lib/api/assistant/configuration/agent";
+import { selectEnabledModel } from "@app/lib/api/assistant/models";
 import { getAgentConfigurationRequirementsFromCapabilities } from "@app/lib/api/assistant/permissions";
 import {
   isPocLockedModelId,
@@ -17,6 +18,7 @@ import {
   POC_LOCKED_MODEL_CONFIG,
 } from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
+import { getFeatureFlags } from "@app/lib/auth";
 import { getSupportedModelConfig } from "@app/lib/llms/model_configurations";
 import { getModelTierAccessErrorForAgentConfiguration } from "@app/lib/model_tiers/access";
 import { MCPServerViewResource } from "@app/lib/resources/mcp_server_view_resource";
@@ -185,14 +187,28 @@ export async function createOrUpgradeAgentConfiguration({
     );
   }
 
-  // The isolated POC runs a single model, so an agent must be saved on it.
-  if (isPocModelLockEnabled() && !isPocLockedModelId(modelConfig.modelId)) {
-    return new Err(
-      new Error(
-        `Model "${modelConfig.displayName}" is not available in this ` +
-          `deployment. Use ${POC_LOCKED_MODEL_CONFIG.displayName}.`
-      )
-    );
+  // The isolated POC runs a single model, so an agent must be saved on it, and
+  // only where the workspace's plan, region, providers and flags allow it.
+  if (isPocModelLockEnabled()) {
+    if (!isPocLockedModelId(modelConfig.modelId)) {
+      return new Err(
+        new Error(
+          `Model "${modelConfig.displayName}" is not available in this ` +
+            `deployment. Use ${POC_LOCKED_MODEL_CONFIG.displayName}.`
+        )
+      );
+    }
+    const runnable = selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
+      featureFlags: await getFeatureFlags(auth),
+    });
+    if (!runnable) {
+      return new Err(
+        new Error(
+          `${POC_LOCKED_MODEL_CONFIG.displayName} is not available in this ` +
+            `workspace.`
+        )
+      );
+    }
   }
 
   const accessError = await getModelTierAccessErrorForAgentConfiguration(auth, {

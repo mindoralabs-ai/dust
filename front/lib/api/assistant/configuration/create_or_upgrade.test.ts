@@ -1,5 +1,10 @@
 import { createOrUpgradeAgentConfiguration } from "@app/lib/api/assistant/configuration/create_or_upgrade";
+import { Authenticator } from "@app/lib/auth";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
+import { MembershipFactory } from "@app/tests/utils/MembershipFactory";
+import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
+import { UserFactory } from "@app/tests/utils/UserFactory";
+import { WorkspaceFactory } from "@app/tests/utils/WorkspaceFactory";
 import type { PostOrPatchAgentConfigurationRequestBody } from "@app/types/api/agent_configuration";
 import { AUTO_MODEL_CONFIG } from "@app/types/assistant/models/auto";
 import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
@@ -93,5 +98,32 @@ describe("createOrUpgradeAgentConfiguration model lock", () => {
       providerId: GEMINI_3_7_FLASH_MODEL_CONFIG.providerId,
       modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
     });
+  });
+
+  it("rejects Gemini 3.7 Flash where the workspace cannot run it", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    const workspace = await WorkspaceFactory.freeNoProductAccess();
+    const user = await UserFactory.basic();
+    await SpaceFactory.defaults(
+      await Authenticator.internalAdminForWorkspace(workspace.sId)
+    );
+    await MembershipFactory.associate(workspace, user, { role: "admin" });
+    const authenticator = await Authenticator.fromUserIdAndWorkspaceId(
+      user.sId,
+      workspace.sId
+    );
+
+    const result = await createOrUpgradeAgentConfiguration({
+      auth: authenticator,
+      assistant: makeAssistant(GEMINI_3_7_FLASH_MODEL_CONFIG, user.sId),
+    });
+
+    if (result.isOk()) {
+      throw new Error("Saved an agent the workspace cannot run");
+    }
+    expect(result.error.message).toBe(
+      `${GEMINI_3_7_FLASH_MODEL_CONFIG.displayName} is not available in this workspace.`
+    );
   });
 });

@@ -23,9 +23,10 @@ import {
   AUTO_MODEL_CONFIG,
   MODEL_STREAMS,
 } from "@app/types/assistant/models/auto";
+import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
 import { GPT_5_6_LUNA_MODEL_ID } from "@app/types/assistant/models/openai";
 import type { ModelIdType } from "@app/types/assistant/models/types";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const CUSTOM_MODEL_CONFIG = {
   ...CLAUDE_SONNET_4_6_DEFAULT_MODEL_CONFIG,
@@ -304,5 +305,65 @@ describe("resolveStreamModel", () => {
 
     expect(resolved.fromPool).toBe(false);
     expect(resolved.model.modelId).not.toBe(GPT_5_6_LUNA_MODEL_ID);
+  });
+});
+
+// The POC mode is cached once read as "1", so these cases run last.
+describe("getModelsForAuth in the isolated POC", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function freePlanAuth(): Promise<Authenticator> {
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    const workspace = await WorkspaceFactory.freeNoProductAccess();
+    const user = await UserFactory.basic();
+    await MembershipFactory.associate(workspace, user, { role: "admin" });
+    return Authenticator.fromUserIdAndWorkspaceId(user.sId, workspace.sId);
+  }
+
+  it("defaults to Gemini 3.7 Flash and resolves every stream to it", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const workspace = await WorkspaceFactory.basic();
+    const { getModelsForAuth } = await import(
+      "@app/lib/model_tiers/enabled_models"
+    );
+
+    const response = await getModelsForAuth(
+      await Authenticator.internalAdminForWorkspace(workspace.sId)
+    );
+
+    expect(response.models.map((m) => m.modelId)).toEqual([
+      GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+    ]);
+    expect(response.defaultModel).toMatchObject({
+      modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+      isSelectable: true,
+    });
+    expect(
+      Object.values(response.streams).map((stream) => stream.modelId)
+    ).toEqual(Array(3).fill(GEMINI_3_7_FLASH_MODEL_CONFIG.modelId));
+  });
+
+  it("falls back to no other model where the workspace cannot run it", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { getModelsForAuth } = await import(
+      "@app/lib/model_tiers/enabled_models"
+    );
+
+    const response = await getModelsForAuth(await freePlanAuth());
+
+    expect(response.models).toEqual([]);
+    expect(response.defaultModel).toMatchObject({
+      modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+      isSelectable: false,
+    });
+    const advertisedModelIds = new Set([
+      response.defaultModel.modelId,
+      ...Object.values(response.streams).map((stream) => stream.modelId),
+    ]);
+    expect([...advertisedModelIds]).toEqual([
+      GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+    ]);
   });
 });
