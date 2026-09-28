@@ -33,6 +33,7 @@ import type {
   ReactElement,
   ReactNode,
   Ref,
+  RefObject,
 } from "react";
 import {
   createContext,
@@ -1049,6 +1050,249 @@ interface MessageListComponentProps<Data, Context>
   methodsRef: ForwardedRef<VirtuosoMessageListMethods<Data, Context>>;
 }
 
+interface ControllerInputs<Data, Context> {
+  context: Context;
+  footer: HTMLElement | null;
+  itemIdentity: ((item: Data) => unknown) | undefined;
+  listRef: RefObject<HTMLDivElement | null>;
+  onRenderedDataChange: ((data: Data[]) => void) | undefined;
+  onScroll: ((location: ListScrollLocation) => void) | undefined;
+  scroller: HTMLElement | null;
+  useWindowScroll: boolean;
+}
+
+// Keeps the controller in step with the latest props and elements.
+function useControllerInputs<Data, Context>(
+  controller: ListController<Data, Context>,
+  inputs: ControllerInputs<Data, Context>
+) {
+  useLayoutEffect(() => {
+    controller.context = inputs.context;
+    controller.identity = inputs.itemIdentity ?? ((item: Data) => item);
+    controller.onScroll = inputs.onScroll;
+    controller.onRenderedDataChange = inputs.onRenderedDataChange;
+    controller.windowMode = inputs.useWindowScroll;
+    controller.scroller = inputs.scroller;
+    controller.list = inputs.listRef.current;
+    controller.footer = inputs.footer;
+  });
+}
+
+// A new `data.data` array replaces the dataset and applies its scroll modifier.
+function useDatasetReset<Data, Context>(
+  controller: ListController<Data, Context>,
+  store: MessageListStore<Data, Context>,
+  data: DataWithScrollModifier<Data> | null | undefined
+) {
+  const lastSourceRef = useRef<Data[] | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    const source = data?.data;
+    if (source === lastSourceRef.current) {
+      return;
+    }
+    lastSourceRef.current = source;
+    const modifier = data?.scrollModifier;
+    controller.resetMeasurements();
+    store.reset(
+      source ?? [],
+      modifier?.type === "item-location"
+        ? normalizeLocation(modifier.location)
+        : null
+    );
+  }, [controller, data?.data, data?.scrollModifier, store]);
+}
+
+// A footer that grows while pinned to the bottom must not cover the last item.
+function useFooterResize<Data, Context>(
+  controller: ListController<Data, Context>,
+  footer: HTMLElement | null
+) {
+  useLayoutEffect(() => {
+    if (!footer || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    let previousHeight = footer.offsetHeight;
+    const observer = new ResizeObserver(() => {
+      const height = footer.offsetHeight;
+      if (height !== previousHeight) {
+        previousHeight = height;
+        controller.handleResize();
+      }
+    });
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, [controller, footer]);
+}
+
+// Tracks scrolls, and user intents to scroll, on the scroller or the window.
+function useScrollTracking<Data, Context>(
+  controller: ListController<Data, Context>,
+  scroller: HTMLElement | null,
+  useWindowScroll: boolean
+) {
+  useEffect(() => {
+    const target: HTMLElement | Window | null = useWindowScroll
+      ? window
+      : scroller;
+    if (!target) {
+      return;
+    }
+    const { handleScroll, handleUserScrollIntent } = controller;
+    const options = { passive: true };
+    target.addEventListener("scroll", handleScroll, options);
+    target.addEventListener("wheel", handleUserScrollIntent, options);
+    target.addEventListener("touchmove", handleUserScrollIntent, options);
+    target.addEventListener("keydown", handleUserScrollIntent, options);
+    target.addEventListener("pointerdown", handleUserScrollIntent, options);
+    return () => {
+      target.removeEventListener("scroll", handleScroll);
+      target.removeEventListener("wheel", handleUserScrollIntent);
+      target.removeEventListener("touchmove", handleUserScrollIntent);
+      target.removeEventListener("keydown", handleUserScrollIntent);
+      target.removeEventListener("pointerdown", handleUserScrollIntent);
+    };
+  }, [controller, scroller, useWindowScroll]);
+}
+
+// Content and viewport resizes move the location without a scroll event.
+function useResizeTracking<Data, Context>(
+  controller: ListController<Data, Context>,
+  listRef: RefObject<HTMLDivElement | null>,
+  scroller: HTMLElement | null,
+  useWindowScroll: boolean
+) {
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(controller.handleResize);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [controller, listRef]);
+  useEffect(() => {
+    if (useWindowScroll) {
+      window.addEventListener("resize", controller.handleResize);
+      return () =>
+        window.removeEventListener("resize", controller.handleResize);
+    }
+    if (!scroller || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(controller.handleResize);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [controller, scroller, useWindowScroll]);
+}
+
+// A newly mounted list starts at the top; hide it until it reaches the
+// location its data asked for, then start reporting scrolls. Remounting only
+// because the scroll mode changed keeps the current view instead.
+function useInitialPlacement<Data, Context>(
+  controller: ListController<Data, Context>,
+  store: MessageListStore<Data, Context>,
+  listRef: RefObject<HTMLDivElement | null>,
+  mountKey: string | null
+) {
+  const lastMountRef = useRef<{ generation: number; key: string } | null>(null);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (mountKey === null || !list) {
+      return;
+    }
+    const previous = lastMountRef.current;
+    const generation = store.generation;
+    lastMountRef.current = { generation, key: mountKey };
+    const target =
+      previous?.generation === generation
+        ? controller.currentViewLocation()
+        : store.initialLocation;
+    controller.initialized = false;
+    list.style.visibility = "hidden";
+    let active = true;
+    const reveal = () => {
+      list.style.visibility = "";
+    };
+    const frame = requestAnimationFrame(() => {
+      controller.positionInitially(target, () => {
+        if (!active) {
+          return;
+        }
+        reveal();
+        controller.markInitialized();
+      });
+    });
+    return () => {
+      active = false;
+      cancelAnimationFrame(frame);
+      reveal();
+    };
+  }, [controller, listRef, mountKey, store]);
+}
+
+// Renders items and computes their keys in the list's own index space.
+function useItemRenderers<Data, Context>(
+  store: MessageListStore<Data, Context>,
+  ItemContent: ComponentType<ItemContentProps<Data, Context>> | undefined,
+  computeItemKey: VirtuosoMessageListProps<Data, Context>["computeItemKey"]
+) {
+  const renderItem = useCallback(
+    (absoluteIndex: number, item: Data, itemContext: Context) => {
+      if (!ItemContent) {
+        return null;
+      }
+      const all = store.current();
+      const index = absoluteIndex - store.firstItemIndex;
+      return (
+        <ItemContent
+          context={itemContext}
+          data={item}
+          index={index}
+          nextData={all[index + 1] ?? null}
+          prevData={all[index - 1] ?? null}
+        />
+      );
+    },
+    [ItemContent, store]
+  );
+  const itemKey = useCallback(
+    (absoluteIndex: number, item: Data, itemContext: Context): Key =>
+      computeItemKey
+        ? computeItemKey({
+            context: itemContext,
+            data: item,
+            index: absoluteIndex - store.firstItemIndex,
+          })
+        : absoluteIndex,
+    [computeItemKey, store]
+  );
+  return { itemKey, renderItem };
+}
+
+// With window scrolling, filling the rest of the viewport keeps the footer at
+// the bottom of a short list.
+function useWindowMinHeight(
+  scroller: HTMLElement | null,
+  useWindowScroll: boolean,
+  enforceStickyFooterAtBottom: boolean
+): string | undefined {
+  const [minHeight, setMinHeight] = useState<string | undefined>();
+  useLayoutEffect(() => {
+    if (!useWindowScroll || !enforceStickyFooterAtBottom || !scroller) {
+      setMinHeight(undefined);
+      return;
+    }
+    const measure = () => {
+      const offset = scroller.getBoundingClientRect().top + window.scrollY;
+      setMinHeight(`calc(100dvh - ${Math.max(0, Math.round(offset))}px)`);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [enforceStickyFooterAtBottom, scroller, useWindowScroll]);
+  return minHeight;
+}
+
 function MessageListComponent<Data, Context>({
   computeItemKey,
   context,
@@ -1093,171 +1337,30 @@ function MessageListComponent<Data, Context>({
     store.getVersion
   );
   const items = store.current();
-
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [footerHeight, setFooterHeight] = useState<number | null>(null);
-  const [generation, setGeneration] = useState(0);
-  const [initialLocation, setInitialLocation] =
-    useState<ItemLocationWithAlign | null>(null);
-  const scrollModifierRef = useRef(data?.scrollModifier);
-  scrollModifierRef.current = data?.scrollModifier;
 
-  useLayoutEffect(() => {
-    controller.context = context;
-    controller.identity = itemIdentity ?? ((item: Data) => item);
-    controller.onScroll = onScroll;
-    controller.onRenderedDataChange = onRenderedDataChange;
-    controller.windowMode = useWindowScroll;
-    controller.scroller = scroller;
-    controller.list = listRef.current;
-    controller.footer = footer;
+  useControllerInputs(controller, {
+    context,
+    footer,
+    itemIdentity,
+    listRef,
+    onRenderedDataChange,
+    onScroll,
+    scroller,
+    useWindowScroll,
   });
-
-  // A new `data.data` array replaces the dataset and applies its scroll modifier.
-  const sourceData = data?.data;
-  const lastSourceRef = useRef<Data[] | null | undefined>(undefined);
-  useLayoutEffect(() => {
-    if (sourceData === lastSourceRef.current) {
-      return;
-    }
-    lastSourceRef.current = sourceData;
-    const modifier = scrollModifierRef.current;
-    controller.resetMeasurements();
-    store.reset(sourceData ?? []);
-    setInitialLocation(
-      modifier?.type === "item-location"
-        ? normalizeLocation(modifier.location)
-        : null
-    );
-    setGeneration((current) => current + 1);
-  }, [controller, sourceData, store]);
-
-  // Measure the footer before mounting the list, so an initial "bottom"
-  // location can include it.
-  const hasFooter = StickyFooter !== undefined;
-  useLayoutEffect(() => {
-    if (!footer) {
-      if (!hasFooter) {
-        setFooterHeight(0);
-      }
-      return;
-    }
-    let previousHeight = footer.offsetHeight;
-    setFooterHeight(previousHeight);
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(() => {
-      const height = footer.offsetHeight;
-      if (height === previousHeight) {
-        return;
-      }
-      previousHeight = height;
-      setFooterHeight(height);
-      // A taller footer must not cover the last item.
-      controller.handleResize();
-    });
-    observer.observe(footer);
-    return () => observer.disconnect();
-  }, [controller, footer, hasFooter]);
-
-  // Track scrolling on the scroller, or on the window.
-  useEffect(() => {
-    const target: HTMLElement | Window | null = useWindowScroll
-      ? window
-      : scroller;
-    if (!target) {
-      return;
-    }
-    const intentEvents = ["wheel", "touchmove", "keydown", "pointerdown"];
-    target.addEventListener("scroll", controller.handleScroll, {
-      passive: true,
-    });
-    for (const event of intentEvents) {
-      target.addEventListener(event, controller.handleUserScrollIntent, {
-        passive: true,
-      });
-    }
-    return () => {
-      target.removeEventListener("scroll", controller.handleScroll);
-      for (const event of intentEvents) {
-        target.removeEventListener(event, controller.handleUserScrollIntent);
-      }
-    };
-  }, [controller, scroller, useWindowScroll]);
-
-  // Content and viewport resizes move the location without a scroll event.
-  useEffect(() => {
-    const list = listRef.current;
-    if (!list || typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(controller.handleResize);
-    observer.observe(list);
-    return () => observer.disconnect();
-  }, [controller]);
-  useEffect(() => {
-    if (useWindowScroll) {
-      window.addEventListener("resize", controller.handleResize);
-      return () =>
-        window.removeEventListener("resize", controller.handleResize);
-    }
-    if (!scroller || typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(controller.handleResize);
-    observer.observe(scroller);
-    return () => observer.disconnect();
-  }, [controller, scroller, useWindowScroll]);
+  useDatasetReset(controller, store, data);
+  useFooterResize(controller, footer);
+  useScrollTracking(controller, scroller, useWindowScroll);
+  useResizeTracking(controller, listRef, scroller, useWindowScroll);
 
   const mountKey =
-    items.length > 0 &&
-    footerHeight !== null &&
-    (useWindowScroll || scroller !== null)
-      ? `${generation}-${useWindowScroll ? "window" : "element"}`
+    items.length > 0 && (useWindowScroll || scroller !== null)
+      ? `${store.generation}-${useWindowScroll ? "window" : "element"}`
       : null;
-
-  const initialLocationRef = useRef(initialLocation);
-  initialLocationRef.current = initialLocation;
-
-  // A newly mounted list starts at the top; hide it until it reaches the
-  // location its data asked for, then start reporting scrolls. Remounting only
-  // because the scroll mode changed keeps the current view instead.
-  const lastMountRef = useRef<{ generation: number; key: string } | null>(null);
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (mountKey === null || !list) {
-      return;
-    }
-    const previous = lastMountRef.current;
-    lastMountRef.current = { generation, key: mountKey };
-    const target =
-      previous?.generation === generation
-        ? controller.currentViewLocation()
-        : initialLocationRef.current;
-    controller.initialized = false;
-    list.style.visibility = "hidden";
-    let active = true;
-    const reveal = () => {
-      list.style.visibility = "";
-    };
-    const frame = requestAnimationFrame(() => {
-      controller.positionInitially(target, () => {
-        if (!active) {
-          return;
-        }
-        reveal();
-        controller.markInitialized();
-      });
-    });
-    return () => {
-      active = false;
-      cancelAnimationFrame(frame);
-      reveal();
-    };
-  }, [controller, generation, mountKey]);
+  useInitialPlacement(controller, store, listRef, mountKey);
 
   // Perform requested scrolls once react-virtuoso has rendered this version.
   useLayoutEffect(() => {
@@ -1265,62 +1368,22 @@ function MessageListComponent<Data, Context>({
     controller.scheduleFlush();
   }, [controller, version]);
 
-  const renderItem = useCallback(
-    (absoluteIndex: number, item: Data, itemContext: Context) => {
-      if (!ItemContent) {
-        return null;
-      }
-      const all = store.current();
-      const index = absoluteIndex - store.firstItemIndex;
-      return (
-        <ItemContent
-          context={itemContext}
-          data={item}
-          index={index}
-          nextData={all[index + 1] ?? null}
-          prevData={all[index - 1] ?? null}
-        />
-      );
-    },
-    [ItemContent, store]
+  const { itemKey, renderItem } = useItemRenderers(
+    store,
+    ItemContent,
+    computeItemKey
   );
-
-  const virtuosoComputeItemKey = useCallback(
-    (absoluteIndex: number, item: Data, itemContext: Context): Key =>
-      computeItemKey
-        ? computeItemKey({
-            context: itemContext,
-            data: item,
-            index: absoluteIndex - store.firstItemIndex,
-          })
-        : absoluteIndex,
-    [computeItemKey, store]
-  );
-
   const setVirtuoso = useCallback(
     (handle: VirtuosoHandle | null) => {
       controller.virtuoso = handle;
     },
     [controller]
   );
-
-  // With window scrolling, filling the rest of the viewport keeps the footer
-  // at the bottom of a short list.
-  const [windowMinHeight, setWindowMinHeight] = useState<string | undefined>();
-  const fillViewport = useWindowScroll && enforceStickyFooterAtBottom;
-  useLayoutEffect(() => {
-    if (!fillViewport || !scroller) {
-      setWindowMinHeight(undefined);
-      return;
-    }
-    const measure = () => {
-      const offset = scroller.getBoundingClientRect().top + window.scrollY;
-      setWindowMinHeight(`calc(100dvh - ${Math.max(0, Math.round(offset))}px)`);
-    };
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [fillViewport, scroller]);
+  const windowMinHeight = useWindowMinHeight(
+    scroller,
+    useWindowScroll,
+    enforceStickyFooterAtBottom
+  );
 
   const rootStyle: CSSProperties = {
     display: "flex",
@@ -1350,7 +1413,7 @@ function MessageListComponent<Data, Context>({
               key={mountKey}
               ref={setVirtuoso}
               components={VIRTUOSO_COMPONENTS}
-              computeItemKey={virtuosoComputeItemKey}
+              computeItemKey={itemKey}
               context={context}
               customScrollParent={
                 useWindowScroll ? undefined : (scroller ?? undefined)

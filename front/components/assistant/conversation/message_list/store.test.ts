@@ -29,7 +29,7 @@ function makeStore(
   view: Partial<MessageListView<string>> = {}
 ) {
   const store = new MessageListStore<Item, string>();
-  store.reset(items);
+  store.reset(items, null);
   store.view = {
     beforeStructuralChange: () => {},
     keepViewport: () => {},
@@ -113,7 +113,7 @@ describe("MessageListStore data methods", () => {
     expect(ids(store.data.get())).toEqual(["a", "b", "c"]);
     expect(store.firstItemIndex).toBe(INITIAL_FIRST_ITEM_INDEX - 2);
 
-    store.reset([{ id: "z" }]);
+    store.reset([{ id: "z" }], null);
     expect(store.firstItemIndex).toBe(INITIAL_FIRST_ITEM_INDEX);
   });
 });
