@@ -110,11 +110,14 @@ vi.mock("@app/lib/platform", () => ({
   LinkWrapper: ({ children }: { children: ReactNode }) => children,
 }));
 
-vi.mock("@virtuoso.dev/message-list", () => ({
-  useVirtuosoMethods: () => ({
-    data: { map: vi.fn(), batch: vi.fn(), get: () => [] },
-  }),
-}));
+vi.mock(
+  "@app/components/assistant/conversation/message_list/MessageList",
+  () => ({
+    useVirtuosoMethods: () => ({
+      data: { map: vi.fn(), batch: vi.fn(), get: () => [] },
+    }),
+  })
+);
 
 vi.mock(
   "@app/components/assistant/conversation/attachment/AttachmentCitation",

@@ -14,6 +14,7 @@ import { ErrorMessage } from "@app/components/assistant/conversation/ErrorMessag
 import type { FeedbackSelectorBaseProps } from "@app/components/assistant/conversation/FeedbackSelector";
 import { FeedbackSelector } from "@app/components/assistant/conversation/FeedbackSelector";
 import { useGenerationContext } from "@app/components/assistant/conversation/GenerationContextProvider";
+import { useVirtuosoMethods } from "@app/components/assistant/conversation/message_list/MessageList";
 import type {
   AgentMessageStateWithControlEvent,
   AgentMessageWithStreaming,
@@ -131,7 +132,6 @@ import {
   TruncatedContent,
   useCopyToClipboard,
 } from "@dust-tt/sparkle";
-import { useVirtuosoMethods } from "@virtuoso.dev/message-list";
 import { marked } from "marked";
 import type { MutableRefObject, ReactElement, ReactNode } from "react";
 import { useCallback, useContext, useEffect, useMemo, useState } from "react";

@@ -3,6 +3,7 @@ import { DeletedMessage } from "@app/components/assistant/conversation/DeletedMe
 import { ToolBarContent } from "@app/components/assistant/conversation/input_bar/toolbar/ToolbarContent";
 import { MessageEmojiPicker } from "@app/components/assistant/conversation/MessageEmojiPicker";
 import { MessageReactions } from "@app/components/assistant/conversation/MessageReactions";
+import { useVirtuosoMethods } from "@app/components/assistant/conversation/message_list/MessageList";
 import type { VirtuosoMessage } from "@app/components/assistant/conversation/types";
 import {
   isTriggeredOrigin,
@@ -56,7 +57,6 @@ import {
 } from "@dust-tt/sparkle";
 import type { Editor } from "@tiptap/react";
 import { EditorContent } from "@tiptap/react";
-import { useVirtuosoMethods } from "@virtuoso.dev/message-list";
 import { cva } from "class-variance-authority";
 import type React from "react";
 import { useCallback, useContext, useMemo, useState } from "react";

@@ -41,9 +41,12 @@ vi.mock("@app/hooks/conversations", () => ({
   }),
 }));
 
-vi.mock("@virtuoso.dev/message-list", () => ({
-  useVirtuosoMethods: () => mockUseVirtuosoMethods(),
-}));
+vi.mock(
+  "@app/components/assistant/conversation/message_list/MessageList",
+  () => ({
+    useVirtuosoMethods: () => mockUseVirtuosoMethods(),
+  })
+);
 
 function makeAction(
   overrides: Partial<

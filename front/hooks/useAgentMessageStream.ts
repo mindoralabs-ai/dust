@@ -1,3 +1,5 @@
+import type { VirtuosoMessageListMethods } from "@app/components/assistant/conversation/message_list/MessageList";
+import { useVirtuosoMethods } from "@app/components/assistant/conversation/message_list/MessageList";
 import type {
   AgentMessageStateWithControlEvent,
   AgentMessageWithStreaming,
@@ -18,8 +20,6 @@ import type {
 } from "@app/types/assistant/conversation";
 import { assertNeverAndIgnore } from "@app/types/shared/utils/assert_never";
 import type { LightWorkspaceType } from "@app/types/user";
-import type { VirtuosoMessageListMethods } from "@virtuoso.dev/message-list";
-import { useVirtuosoMethods } from "@virtuoso.dev/message-list";
 import throttle from "lodash/throttle";
 import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef } from "react";

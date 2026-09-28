@@ -5,6 +5,10 @@ import { InputBar } from "@app/components/assistant/conversation/input_bar/Input
 import { InputBarMessageNavigation } from "@app/components/assistant/conversation/input_bar/InputBarMessageNavigation";
 import { INPUT_BAR_COMPACT_NAV_ENTER_ANIMATION_CLASSES } from "@app/components/assistant/conversation/input_bar/inputBarCompactStyles";
 import { useInputBarCompactMode } from "@app/components/assistant/conversation/input_bar/useInputBarCompactMode";
+import {
+  useVirtuosoLocation,
+  useVirtuosoMethods,
+} from "@app/components/assistant/conversation/message_list/MessageList";
 import type {
   VirtuosoMessage,
   VirtuosoMessageListContext,
@@ -44,10 +48,6 @@ import {
   MOTION_DURATIONS,
   MOTION_EASINGS,
 } from "@dust-tt/sparkle";
-import {
-  useVirtuosoLocation,
-  useVirtuosoMethods,
-} from "@virtuoso.dev/message-list";
 import type { MotionProps, Transition } from "framer-motion";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState } from "react";
