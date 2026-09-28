@@ -53,7 +53,8 @@ export function transformAgentConfigurationToFormData(
 /**
  * The isolated POC runs a single model, so a form seeded from an agent or a
  * template saved on another model starts on the advertised default model
- * instead. The seeded effort is kept where that model supports it.
+ * instead. The seeded effort is kept where that model, as the member may use
+ * it, supports it.
  */
 export function withPocDefaultModel(
   formData: AgentBuilderFormData,
@@ -61,10 +62,13 @@ export function withPocDefaultModel(
 ): AgentBuilderFormData {
   const { generationSettings } = formData;
   const { modelSettings, reasoningEffort } = generationSettings;
-  if (
+  const isOnDefaultModel =
     modelSettings?.providerId === defaultModel.providerId &&
-    modelSettings.modelId === defaultModel.modelId
-  ) {
+    modelSettings.modelId === defaultModel.modelId;
+  const isEffortSupported =
+    reasoningEffort !== null &&
+    defaultModel.supportedReasoningEfforts[reasoningEffort];
+  if (isOnDefaultModel && isEffortSupported) {
     return formData;
   }
 
@@ -76,11 +80,9 @@ export function withPocDefaultModel(
         providerId: defaultModel.providerId,
         modelId: defaultModel.modelId,
       },
-      reasoningEffort:
-        reasoningEffort &&
-        defaultModel.supportedReasoningEfforts[reasoningEffort]
-          ? reasoningEffort
-          : defaultModel.defaultReasoningEffort,
+      reasoningEffort: isEffortSupported
+        ? reasoningEffort
+        : defaultModel.defaultReasoningEffort,
     },
   };
 }

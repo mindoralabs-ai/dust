@@ -1,6 +1,9 @@
 import { dustPocMode } from "@app/lib/api/dust_poc_mode";
 import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
-import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
+import {
+  NOOP_MODEL_CONFIG,
+  NOOP_MODEL_ID,
+} from "@app/types/assistant/models/noop";
 import type {
   ModelConfigurationType,
   SupportedModel,
@@ -17,14 +20,15 @@ export const POC_LOCKED_MODEL_CONFIG: ModelConfigurationType =
  * `enabled_models.ts`, `getGlobalAgents`, conversation titles and
  * `createOrUpgradeAgentConfiguration` MUST NOT offer, pick or accept a model other than
  * `POC_LOCKED_MODEL_CONFIG` (the provider-less `noop` model excepted: where noop is enabled,
- * `resolveModel` MUST keep a noop request on it). The message preflights of `conversation.ts`
- * MUST check the model an agent runs, `getPocRuntimeModel`, not the one it was saved on, and
- * refuse it where the workspace cannot run it. A retry MUST NOT reuse a resolution that
- * `isPocRuntimeModel` rejects, and is then checked as a post is. The lock MUST NOT make that
- * model available where the workspace's own provider whitelist, plan, region or flags exclude
- * it: lookups then find no model, and a default or stream fallback that must name one marks it
- * unselectable. `getGlobalAgents` MUST also leave out a model agent that the member's tier cap
- * would refuse to run. While it is false, their behaviour MUST be unchanged by this lock.
+ * `resolveModel` MUST keep a noop request on it). The post preflight of `conversation.ts` MUST
+ * check the model an agent runs, `getPocRuntimeModel`, not the one it was saved on. Every other
+ * path that resolves an agent's model (edit, retry, mention approval) MUST refuse where
+ * `resolveModel` would find no model, and a retry MUST reuse a stored resolution only while the
+ * lock and the workspace still run it as is. The lock MUST NOT make that model available where
+ * the workspace's own provider whitelist, plan, region or flags exclude it: lookups then find
+ * no model, and a default or stream fallback that must name one marks it unselectable.
+ * `getGlobalAgents` MUST also leave out a model agent that the member's tier cap would refuse
+ * to run. While it is false, their behaviour MUST be unchanged by this lock.
  */
 export function isPocModelLockEnabled(): boolean {
   return dustPocMode();
@@ -45,6 +49,17 @@ export function getPocRuntimeModel(model: SupportedModel): SupportedModel {
     providerId: POC_LOCKED_MODEL_CONFIG.providerId,
     modelId: POC_LOCKED_MODEL_CONFIG.modelId,
   };
+}
+
+// The models resolveModel tries, in order, for a request on `model` while the
+// lock is enabled: noop keeps its static reply where it is enabled, and every
+// request falls back to the locked model.
+export function getPocRuntimeCandidates(
+  model: SupportedModel | undefined
+): ModelConfigurationType[] {
+  return model?.modelId === NOOP_MODEL_ID
+    ? [NOOP_MODEL_CONFIG, POC_LOCKED_MODEL_CONFIG]
+    : [POC_LOCKED_MODEL_CONFIG];
 }
 
 // Whether a model, possibly resolved before the lock was enabled, runs as is.

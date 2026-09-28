@@ -34,8 +34,12 @@ import {
   batchRenderMessages,
   batchRenderUserMessagesWithoutMentions,
 } from "@app/lib/api/assistant/messages";
-import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
 import {
+  isProviderWhitelistedForAuth,
+  selectEnabledModel,
+} from "@app/lib/api/assistant/models";
+import {
+  getPocRuntimeCandidates,
   getPocRuntimeModel,
   isPocModelLockEnabled,
   isPocRuntimeModel,
@@ -186,7 +190,6 @@ import type {
   ContentFragmentType,
 } from "@app/types/content_fragment";
 import type { APIErrorWithContentfulStatusCode } from "@app/types/error";
-import type { PlanType } from "@app/types/plan";
 import { isCreditPricedPlan } from "@app/types/plan";
 import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 import type { ModelId } from "@app/types/shared/model_id";
@@ -795,12 +798,18 @@ export async function postUserMessage(
       });
     }
 
+    const supportedModelConfig = getSupportedModelConfig(runtimeModel);
     if (
-      !isRuntimeModelAvailable(runtimeModel, {
-        featureFlags,
-        plan,
-        regionalModelsOnly: owner.regionalModelsOnly,
-      })
+      !supportedModelConfig ||
+      !(
+        isModelStreamId(supportedModelConfig.modelId) ||
+        isModelAvailable(supportedModelConfig, {
+          featureFlags,
+          plan,
+          regionalModelsOnly: owner.regionalModelsOnly,
+          region: regionConfig.getCurrentRegion(),
+        })
+      )
     ) {
       return new Err({
         status_code: 400,
@@ -1111,29 +1120,48 @@ class UserMessageError extends Error {}
 // A message with no concrete user has no author to be, so nobody passes this.
 // Testing that first also stops an API key, which has no `auth.user()` either,
 // from matching null against null.
-// Whether the workspace can run the model a saved agent runs on.
-function isRuntimeModelAvailable(
-  runtimeModel: SupportedModel,
-  {
-    featureFlags,
-    plan,
-    regionalModelsOnly,
-  }: {
-    featureFlags: WhitelistableFeature[];
-    plan: PlanType | null;
-    regionalModelsOnly: boolean;
+/**
+ * The isolated POC has no model to fall back to: a path that resolves an agent's
+ * model again must refuse it, as a post does, where resolveModel would find no
+ * model the workspace can run. Outside the lock it refuses nothing.
+ */
+export async function getPocUnrunnableModelError(
+  auth: Authenticator,
+  model: SupportedModel,
+  { featureFlags }: { featureFlags?: WhitelistableFeature[] } = {}
+): Promise<APIErrorWithContentfulStatusCode | null> {
+  if (!isPocModelLockEnabled()) {
+    return null;
   }
+
+  const runnableModel = selectEnabledModel(
+    auth,
+    getPocRuntimeCandidates(model),
+    { featureFlags: featureFlags ?? (await getFeatureFlags(auth)) }
+  );
+  return runnableModel
+    ? null
+    : {
+        status_code: 400,
+        api_error: {
+          type: "invalid_request_error",
+          message: "The model is not supported.",
+        },
+      };
+}
+
+// Whether the isolated POC runs a model resolved earlier as is: the lock runs
+// it and the workspace still can.
+function isPocRunnableAsIs(
+  auth: Authenticator,
+  model: SupportedModel,
+  featureFlags: WhitelistableFeature[]
 ): boolean {
-  const supportedModelConfig = getSupportedModelConfig(runtimeModel);
+  const modelConfig = getSupportedModelConfig(model);
   return (
-    supportedModelConfig !== null &&
-    (isModelStreamId(supportedModelConfig.modelId) ||
-      isModelAvailable(supportedModelConfig, {
-        featureFlags,
-        plan,
-        regionalModelsOnly,
-        region: regionConfig.getCurrentRegion(),
-      }))
+    isPocRuntimeModel(model) &&
+    modelConfig !== null &&
+    selectEnabledModel(auth, [modelConfig], { featureFlags }) !== null
   );
 }
 
@@ -1234,7 +1262,7 @@ export async function editUserMessage(
 
   const agentConfigurations = results[0];
 
-  // Loaded once for the POC lock's availability check below.
+  // Loaded once for the POC lock's check below, which each mention runs.
   const lockedEditFeatureFlags = isPocModelLockEnabled()
     ? await getFeatureFlags(auth)
     : [];
@@ -1271,24 +1299,13 @@ export async function editUserMessage(
       });
     }
 
-    // The isolated POC has no model to fall back to, so an edit is checked as a
-    // post is: resolveModel would otherwise find no model to run.
-    if (
-      isPocModelLockEnabled() &&
-      !isRuntimeModelAvailable(runtimeModel, {
-        featureFlags: lockedEditFeatureFlags,
-        plan: auth.plan(),
-        regionalModelsOnly: owner.regionalModelsOnly,
-      })
-    ) {
-      return new Err({
-        status_code: 400,
-        api_error: {
-          type: "invalid_request_error",
-          message: "The model is not supported.",
-          model: agentConfig.model,
-        },
-      });
+    const unrunnableModelError = await getPocUnrunnableModelError(
+      auth,
+      agentConfig.model,
+      { featureFlags: lockedEditFeatureFlags }
+    );
+    if (unrunnableModelError) {
+      return new Err(unrunnableModelError);
     }
   }
 
@@ -1879,32 +1896,28 @@ export async function retryAgentMessage(
     return limitResult;
   }
 
-  // A reply resolved on another model before the POC lock is resolved again,
-  // onto the model the lock runs.
+  // In the isolated POC, a stored resolution is reused only while the lock and
+  // the workspace still run it as is. Otherwise the reply is resolved again, and
+  // refused where the workspace cannot run the model the lock runs either.
+  const retryFeatureFlags = isPocModelLockEnabled()
+    ? await getFeatureFlags(auth)
+    : [];
   const reusableResolvedModel =
-    message.resolvedModel && isPocRuntimeModel(message.resolvedModel)
+    message.resolvedModel &&
+    (!isPocModelLockEnabled() ||
+      isPocRunnableAsIs(auth, message.resolvedModel, retryFeatureFlags))
       ? message.resolvedModel
       : null;
 
-  // The isolated POC has no model to fall back to, so a retry that resolves its
-  // model again is checked as a post is.
-  if (
-    !reusableResolvedModel &&
-    isPocModelLockEnabled() &&
-    !isRuntimeModelAvailable(getPocRuntimeModel(message.configuration.model), {
-      featureFlags: await getFeatureFlags(auth),
-      plan: auth.plan(),
-      regionalModelsOnly: auth.getNonNullableWorkspace().regionalModelsOnly,
-    })
-  ) {
-    return new Err({
-      status_code: 400,
-      api_error: {
-        type: "invalid_request_error",
-        message: "The model is not supported.",
-        model: message.configuration.model,
-      },
-    });
+  if (!reusableResolvedModel) {
+    const unrunnableModelError = await getPocUnrunnableModelError(
+      auth,
+      message.configuration.model,
+      { featureFlags: retryFeatureFlags }
+    );
+    if (unrunnableModelError) {
+      return new Err(unrunnableModelError);
+    }
   }
 
   let retryModelResolution: AgentMessageModelResolution = reusableResolvedModel

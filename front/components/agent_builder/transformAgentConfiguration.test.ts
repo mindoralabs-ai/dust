@@ -52,6 +52,37 @@ describe("withPocDefaultModel", () => {
     );
   });
 
+  it("moves an effort the member cannot use on the default model to its default", async () => {
+    const user = await UserFactory.basic();
+    const formData = getDefaultAgentFormData({
+      user: user.toJSON(),
+      defaultModel: LOCKED_DEFAULT,
+    });
+    // As /models advertises Gemini 3.7 Flash to a member capped at balanced.
+    const cappedDefault = {
+      ...LOCKED_DEFAULT,
+      supportedReasoningEfforts: {
+        ...LOCKED_DEFAULT.supportedReasoningEfforts,
+        high: false,
+      },
+    };
+
+    const normalized = withPocDefaultModel(
+      {
+        ...formData,
+        generationSettings: {
+          ...formData.generationSettings,
+          reasoningEffort: "high",
+        },
+      },
+      cappedDefault
+    );
+
+    expect(normalized.generationSettings.reasoningEffort).toBe(
+      cappedDefault.defaultReasoningEffort
+    );
+  });
+
   it("leaves a form already on the default model unchanged", async () => {
     const user = await UserFactory.basic();
     const formData = getDefaultAgentFormData({

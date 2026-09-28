@@ -2,8 +2,8 @@ import { getDegradedModelIds } from "@app/lib/api/assistant/degraded_models";
 import { PREFERRED_LARGE_MODEL_CONFIGS } from "@app/lib/api/assistant/model_preferences";
 import { selectEnabledModel } from "@app/lib/api/assistant/models";
 import {
+  getPocRuntimeCandidates,
   isPocModelLockEnabled,
-  POC_LOCKED_MODEL_CONFIG,
 } from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getAgentAllowedTierNamesOverride } from "@app/lib/model_tiers/agent_tier_overrides";
@@ -14,7 +14,6 @@ import {
 import type { LightAgentConfigurationType } from "@app/types/assistant/agent";
 import { isModelStreamId } from "@app/types/assistant/models/auto";
 import { SUPPORTED_MODEL_CONFIGS } from "@app/types/assistant/models/models";
-import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import type {
   ModelConfigurationType,
   ModelResolutionMethodType,
@@ -83,9 +82,7 @@ export async function resolveModel(
     // A noop request keeps its static reply where noop is enabled.
     enabled = selectEnabledModel(
       auth,
-      requestedConfig?.modelId === NOOP_MODEL_ID
-        ? [requestedConfig, POC_LOCKED_MODEL_CONFIG]
-        : [POC_LOCKED_MODEL_CONFIG],
+      getPocRuntimeCandidates(requestedConfig),
       { featureFlags }
     );
   } else if (requestedConfig && isModelStreamId(requestedConfig.modelId)) {

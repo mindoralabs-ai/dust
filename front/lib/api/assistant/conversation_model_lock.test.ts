@@ -1,5 +1,6 @@
 import {
   editUserMessage,
+  getPocUnrunnableModelError,
   postUserMessage,
   retryAgentMessage,
 } from "@app/lib/api/assistant/conversation";
@@ -15,6 +16,7 @@ import type {
   UserMessageContext,
 } from "@app/types/assistant/conversation";
 import { GEMINI_3_7_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
+import { NOOP_MODEL_CONFIG } from "@app/types/assistant/models/noop";
 import {
   GPT_5_5_MODEL_CONFIG,
   GPT_5_MINI_MODEL_CONFIG,
@@ -135,6 +137,20 @@ describe("retrying a reply resolved before the POC model lock", () => {
       type: "invalid_request_error",
       message: "The model is not supported.",
     });
+
+    // A reply already on Gemini 3.7 Flash is not reused once the workspace
+    // cannot run it.
+    const refusedReuse = await retryAgentMessage(freeAuth, {
+      conversationResource: unrunnable.conversationResource,
+      message: {
+        ...unrunnable.reply,
+        resolvedModel: {
+          ...LOCKED_MODEL,
+          reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+        },
+      },
+    });
+    expect(refusedReuse.isErr()).toBe(true);
   });
 });
 
@@ -316,5 +332,39 @@ describe("message preflights where the workspace cannot run the POC model", () =
       message: "The model is not supported.",
     });
     expect(launchAgentLoopWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe("getPocUnrunnableModelError", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("refuses only where resolveModel would find no model to run", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { authenticator: auth } = await createResourceTest({ role: "admin" });
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    const { authenticator: freeAuth } = await createResourceTest({
+      role: "admin",
+      plan: "freeNoProductAccess",
+    });
+    const gpt = {
+      providerId: GPT_5_5_MODEL_CONFIG.providerId,
+      modelId: GPT_5_5_MODEL_CONFIG.modelId,
+    };
+    const noop = {
+      providerId: NOOP_MODEL_CONFIG.providerId,
+      modelId: NOOP_MODEL_CONFIG.modelId,
+    };
+
+    expect(await getPocUnrunnableModelError(auth, gpt)).toBeNull();
+    // Noop is off in this workspace, so a noop agent falls back to Gemini.
+    expect(await getPocUnrunnableModelError(auth, noop)).toBeNull();
+    expect(await getPocUnrunnableModelError(freeAuth, gpt)).toMatchObject({
+      status_code: 400,
+    });
+    expect(await getPocUnrunnableModelError(freeAuth, noop)).toMatchObject({
+      status_code: 400,
+    });
   });
 });
