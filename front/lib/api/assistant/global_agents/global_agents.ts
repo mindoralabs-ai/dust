@@ -123,6 +123,7 @@ import {
 } from "@app/lib/api/assistant/poc_model_lock";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
+import { getModelTierAccessErrorForAgentConfiguration } from "@app/lib/model_tiers/access";
 import { getDefaultStreamConfigForAuth } from "@app/lib/model_tiers/enabled_models";
 import { GlobalAgentSettingsModel } from "@app/lib/models/agent/agent";
 import type {
@@ -1241,7 +1242,8 @@ export async function getGlobalAgents(
   const globalAgents: AgentConfigurationType[] = [];
 
   // In the isolated POC a model agent runs the locked model, so it is offered
-  // only where the workspace's plan, region and flags allow that model.
+  // only where the workspace's plan, region and flags allow that model, and
+  // where the member's tier cap lets it run: the agent loop checks that first.
   const canRunLockedModel =
     isModelLocked &&
     selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
@@ -1259,7 +1261,18 @@ export async function getGlobalAgents(
     if (!isModelLocked || agentFetcherResult.model.modelId === NOOP_MODEL_ID) {
       globalAgents.push(agentFetcherResult);
     } else if (canRunLockedModel) {
-      globalAgents.push(withPocLockedModel(agentFetcherResult));
+      const lockedAgent = withPocLockedModel(agentFetcherResult);
+      const tierAccessError =
+        await getModelTierAccessErrorForAgentConfiguration(auth, {
+          agentSId: lockedAgent.sId,
+          agentName: lockedAgent.name,
+          model: POC_LOCKED_MODEL_CONFIG,
+          reasoningEffort: lockedAgent.model.reasoningEffort,
+          agentScope: lockedAgent.scope,
+        });
+      if (!tierAccessError) {
+        globalAgents.push(lockedAgent);
+      }
     }
   }
 

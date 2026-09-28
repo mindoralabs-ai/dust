@@ -672,6 +672,36 @@ describe("getGlobalAgents POC model lock", () => {
     ).toEqual([]);
   });
 
+  it("offers a member capped below Gemini 3.7 Flash only the agents their tier allows", async () => {
+    const {
+      authenticator: auth,
+      user,
+      workspace,
+    } = await createResourceTest({
+      role: "user",
+    });
+    // Gemini 3.7 Flash has no effort in the Basic (cost_efficient) tier.
+    const capped = await setUserMaxAllowedTier(
+      await Authenticator.internalAdminForWorkspace(workspace.sId),
+      { userId: user.sId, tierName: "cost_efficient" }
+    );
+    if (capped.isErr()) {
+      throw capped.error;
+    }
+
+    const agents = await getGlobalAgents(
+      auth,
+      [...MODEL_GLOBAL_AGENT_IDS, GLOBAL_AGENTS_SID.SIDEKICK],
+      "light",
+      { globalAgentContext: { userMessageRank: 2 } }
+    );
+
+    // Sidekick's own tier override lets it run Gemini 3.7 Flash anyway.
+    expect(agents.map((agent) => agent.sId)).toEqual([
+      GLOBAL_AGENTS_SID.SIDEKICK,
+    ]);
+  });
+
   it("shows Gemini 3.7 Flash on a stream agent but keeps a noop static reply", async () => {
     const auth = await createAuthenticatorWithFlags([]);
 

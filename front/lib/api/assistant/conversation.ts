@@ -35,7 +35,10 @@ import {
   batchRenderUserMessagesWithoutMentions,
 } from "@app/lib/api/assistant/messages";
 import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
-import { getPocRuntimeModel } from "@app/lib/api/assistant/poc_model_lock";
+import {
+  getPocRuntimeModel,
+  isPocModelLockEnabled,
+} from "@app/lib/api/assistant/poc_model_lock";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
 import { gracefullyStopAgentLoop } from "@app/lib/api/assistant/pubsub";
 import {
@@ -173,13 +176,18 @@ import {
   toMentionType,
 } from "@app/types/assistant/mentions";
 import { isModelStreamId } from "@app/types/assistant/models/auto";
-import type { ModelSelectionType } from "@app/types/assistant/models/types";
+import type {
+  ModelSelectionType,
+  SupportedModel,
+} from "@app/types/assistant/models/types";
 import type {
   ContentFragmentContextType,
   ContentFragmentType,
 } from "@app/types/content_fragment";
 import type { APIErrorWithContentfulStatusCode } from "@app/types/error";
+import type { PlanType } from "@app/types/plan";
 import { isCreditPricedPlan } from "@app/types/plan";
+import type { WhitelistableFeature } from "@app/types/shared/feature_flags";
 import type { ModelId } from "@app/types/shared/model_id";
 import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
@@ -786,18 +794,12 @@ export async function postUserMessage(
       });
     }
 
-    const supportedModelConfig = getSupportedModelConfig(runtimeModel);
     if (
-      !supportedModelConfig ||
-      !(
-        isModelStreamId(supportedModelConfig.modelId) ||
-        isModelAvailable(supportedModelConfig, {
-          featureFlags,
-          plan,
-          regionalModelsOnly: owner.regionalModelsOnly,
-          region: regionConfig.getCurrentRegion(),
-        })
-      )
+      !isRuntimeModelAvailable(runtimeModel, {
+        featureFlags,
+        plan,
+        regionalModelsOnly: owner.regionalModelsOnly,
+      })
     ) {
       return new Err({
         status_code: 400,
@@ -1108,6 +1110,32 @@ class UserMessageError extends Error {}
 // A message with no concrete user has no author to be, so nobody passes this.
 // Testing that first also stops an API key, which has no `auth.user()` either,
 // from matching null against null.
+// Whether the workspace can run the model a saved agent runs on.
+function isRuntimeModelAvailable(
+  runtimeModel: SupportedModel,
+  {
+    featureFlags,
+    plan,
+    regionalModelsOnly,
+  }: {
+    featureFlags: WhitelistableFeature[];
+    plan: PlanType | null;
+    regionalModelsOnly: boolean;
+  }
+): boolean {
+  const supportedModelConfig = getSupportedModelConfig(runtimeModel);
+  return (
+    supportedModelConfig !== null &&
+    (isModelStreamId(supportedModelConfig.modelId) ||
+      isModelAvailable(supportedModelConfig, {
+        featureFlags,
+        plan,
+        regionalModelsOnly,
+        region: regionConfig.getCurrentRegion(),
+      }))
+  );
+}
+
 function isUserMessageAuthor(
   auth: Authenticator,
   message: UserMessageType
@@ -1233,6 +1261,26 @@ export async function editUserMessage(
             `Assistant ${agentConfig.name} is based on a model that was disabled ` +
             `by your workspace admin. Please edit the agent to use another model ` +
             `(advanced settings in the Instructions panel).`,
+        },
+      });
+    }
+
+    // The isolated POC has no model to fall back to, so an edit is checked as a
+    // post is: resolveModel would otherwise find no model to run.
+    if (
+      isPocModelLockEnabled() &&
+      !isRuntimeModelAvailable(runtimeModel, {
+        featureFlags: await getFeatureFlags(auth),
+        plan: auth.plan(),
+        regionalModelsOnly: owner.regionalModelsOnly,
+      })
+    ) {
+      return new Err({
+        status_code: 400,
+        api_error: {
+          type: "invalid_request_error",
+          message: "The model is not supported.",
+          model: agentConfig.model,
         },
       });
     }

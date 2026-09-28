@@ -132,3 +132,97 @@ describe("message preflights under the POC model lock", () => {
     ).toMatchObject([LOCKED_MODEL]);
   });
 });
+
+// Where the workspace cannot run the locked model, both preflights refuse the
+// message rather than leaving resolveModel with no model to run.
+describe("message preflights where the workspace cannot run the POC model", () => {
+  let auth: Authenticator;
+  let agent: LightAgentConfigurationType;
+  let conversationResource: ConversationResource;
+
+  beforeEach(async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    ({ authenticator: auth } = await createResourceTest({
+      role: "admin",
+      plan: "freeNoProductAccess",
+    }));
+    agent = await AgentConfigurationFactory.createTestAgent(auth, {
+      name: "Agent on a free plan",
+      description: "Agent the workspace cannot run under the POC model lock",
+      model: {
+        providerId: GPT_5_5_MODEL_CONFIG.providerId,
+        modelId: GPT_5_5_MODEL_CONFIG.modelId,
+      },
+    });
+    const conversation = await ConversationFactory.create(auth, {
+      agentConfigurationId: agent.sId,
+      messagesCreatedAt: [],
+      visibility: "unlisted",
+    });
+    const resource = await ConversationResource.fetchById(
+      auth,
+      conversation.sId
+    );
+    if (!resource) {
+      throw new Error("Failed to fetch the conversation");
+    }
+    conversationResource = resource;
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("refuses a post mentioning the agent", async () => {
+    const result = await postUserMessage(auth, {
+      conversationResource,
+      content: `Hello @${agent.name}`,
+      mentions: [{ configurationId: agent.sId }],
+      context: webContext(auth),
+      skipToolsValidation: false,
+      skipDustAutoMention: true,
+    });
+
+    if (result.isOk()) {
+      throw new Error("Posted to an agent the workspace cannot run");
+    }
+    expect(result.error.api_error).toMatchObject({
+      type: "invalid_request_error",
+      message: "The model is not supported.",
+    });
+    expect(launchAgentLoopWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("refuses an edit mentioning the agent", async () => {
+    const posted = await postUserMessage(auth, {
+      conversationResource,
+      content: "A message without mentions",
+      mentions: [],
+      context: webContext(auth),
+      skipToolsValidation: false,
+      skipDustAutoMention: true,
+    });
+    if (posted.isErr()) {
+      throw new Error(posted.error.api_error.message);
+    }
+
+    const result = await editUserMessage(auth, {
+      conversationResource,
+      message: posted.value.userMessage,
+      content: `Hello @${agent.name}`,
+      mentions: [{ configurationId: agent.sId }],
+      skipToolsValidation: false,
+    });
+
+    if (result.isOk()) {
+      throw new Error("Edited a message to an agent the workspace cannot run");
+    }
+    expect(result.error.api_error).toMatchObject({
+      type: "invalid_request_error",
+      message: "The model is not supported.",
+    });
+    expect(launchAgentLoopWorkflow).not.toHaveBeenCalled();
+  });
+});
