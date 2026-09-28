@@ -38,6 +38,7 @@ import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
 import {
   getPocRuntimeModel,
   isPocModelLockEnabled,
+  isPocRuntimeModel,
 } from "@app/lib/api/assistant/poc_model_lock";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
 import { gracefullyStopAgentLoop } from "@app/lib/api/assistant/pubsub";
@@ -1233,6 +1234,11 @@ export async function editUserMessage(
 
   const agentConfigurations = results[0];
 
+  // Loaded once for the POC lock's availability check below.
+  const lockedEditFeatureFlags = isPocModelLockEnabled()
+    ? await getFeatureFlags(auth)
+    : [];
+
   for (const agentConfig of agentConfigurations) {
     if (!canAccessAgent(agentConfig)) {
       return new Err({
@@ -1270,7 +1276,7 @@ export async function editUserMessage(
     if (
       isPocModelLockEnabled() &&
       !isRuntimeModelAvailable(runtimeModel, {
-        featureFlags: await getFeatureFlags(auth),
+        featureFlags: lockedEditFeatureFlags,
         plan: auth.plan(),
         regionalModelsOnly: owner.regionalModelsOnly,
       })
@@ -1873,14 +1879,17 @@ export async function retryAgentMessage(
     return limitResult;
   }
 
-  let retryModelResolution: AgentMessageModelResolution = message.resolvedModel
-    ? {
-        resolvedModel: message.resolvedModel,
-        modelResolutionMethod: message.modelResolutionMethod ?? "agent",
-      }
-    : await resolveModelForMentionedAgent(auth, {
-        configuration: message.configuration,
-      });
+  // A reply resolved on another model before the POC lock is resolved again,
+  // onto the model the lock runs.
+  let retryModelResolution: AgentMessageModelResolution =
+    message.resolvedModel && isPocRuntimeModel(message.resolvedModel)
+      ? {
+          resolvedModel: message.resolvedModel,
+          modelResolutionMethod: message.modelResolutionMethod ?? "agent",
+        }
+      : await resolveModelForMentionedAgent(auth, {
+          configuration: message.configuration,
+        });
 
   const user = auth.user();
   if (user) {

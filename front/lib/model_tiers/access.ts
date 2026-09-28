@@ -6,6 +6,7 @@ import type {
   GenericErrorContent,
 } from "@app/types/assistant/agent";
 import { isModelStreamId } from "@app/types/assistant/models/auto";
+import type { ModelsTierName } from "@app/types/assistant/models/model_tiers";
 import { getTierForModel } from "@app/types/assistant/models/model_tiers";
 import type {
   ModelConfigurationType,
@@ -41,6 +42,7 @@ export async function getModelTierAccessErrorForAgentConfiguration(
     reasoningEffort,
     agentScope,
     modelResolutionMethod,
+    memberTierNames,
   }: {
     // Left out when the agent has no sId yet (creation): no agent override applies.
     agentSId?: string;
@@ -49,6 +51,9 @@ export async function getModelTierAccessErrorForAgentConfiguration(
     reasoningEffort?: ReasoningEffort;
     agentScope?: AgentConfigurationScope;
     modelResolutionMethod?: ModelResolutionMethodType | null;
+    // The member's own tier grants, when the caller checks several agents and
+    // has resolved them once already.
+    memberTierNames?: ModelsTierName[];
   }
 ): Promise<GenericErrorContent | null> {
   // Workspace admins can allow members to run published agents whose model
@@ -81,7 +86,9 @@ export async function getModelTierAccessErrorForAgentConfiguration(
     ? getAgentAllowedTierNamesOverride(agentSId)
     : null;
   const allowedTierNames =
-    allowedTierNamesOverride ?? (await resolveAllowedTierNames(auth)).tiers;
+    allowedTierNamesOverride ??
+    memberTierNames ??
+    (await resolveAllowedTierNames(auth)).tiers;
 
   if (allowedTierNames.includes(tierName)) {
     return null;

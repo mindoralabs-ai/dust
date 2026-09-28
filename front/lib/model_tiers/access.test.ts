@@ -95,6 +95,21 @@ describe("getModelTierAccessErrorForAgentConfiguration", () => {
     expect(error?.code).toBe("model_tier_not_enabled");
   });
 
+  it("checks the member tiers a caller resolved already instead of loading them", async () => {
+    const check = (memberTierNames?: ModelsTierName[]) =>
+      getModelTierAccessErrorForAgentConfiguration(adminAuth, {
+        agentName: "test-agent",
+        model: CLAUDE_OPUS_4_8_DEFAULT_MODEL_CONFIG,
+        memberTierNames,
+      });
+
+    // Uncapped as loaded, but capped by the tiers passed in.
+    expect(await check()).toBeNull();
+    expect((await check(["cost_efficient"]))?.code).toBe(
+      "model_tier_not_enabled"
+    );
+  });
+
   // A stream only ever resolves to a candidate within the member's cap, so
   // checking the resolved model alone would let a member run a stream above it.
   it.each([

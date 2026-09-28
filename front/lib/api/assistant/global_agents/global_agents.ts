@@ -124,6 +124,7 @@ import {
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
 import { getModelTierAccessErrorForAgentConfiguration } from "@app/lib/model_tiers/access";
+import { resolveAllowedTierNames } from "@app/lib/model_tiers/allowed_tiers";
 import { getDefaultStreamConfigForAuth } from "@app/lib/model_tiers/enabled_models";
 import { GlobalAgentSettingsModel } from "@app/lib/models/agent/agent";
 import type {
@@ -1249,6 +1250,10 @@ export async function getGlobalAgents(
     selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
       featureFlags: flags,
     }) !== null;
+  // Every locked model agent is checked against the same member's tier grants.
+  const memberTierNames = canRunLockedModel
+    ? (await resolveAllowedTierNames(auth)).tiers
+    : undefined;
 
   for (const agentFetcherResult of agentCandidates) {
     if (
@@ -1269,6 +1274,7 @@ export async function getGlobalAgents(
           model: POC_LOCKED_MODEL_CONFIG,
           reasoningEffort: lockedAgent.model.reasoningEffort,
           agentScope: lockedAgent.scope,
+          memberTierNames,
         });
       if (!tierAccessError) {
         globalAgents.push(lockedAgent);
