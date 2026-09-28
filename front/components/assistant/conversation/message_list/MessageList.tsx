@@ -219,7 +219,18 @@ class ListController<Data, Context> {
     identity: unknown;
     offset: number;
   } | null = null;
+  // The first visible item at the last scroll, restored when the scroll mode
+  // changes and the list remounts.
+  private viewAnchor: { identity: unknown; offset: number } | null = null;
   private sizes = new Map<unknown, number>();
+  // Heights of rendered items for the current frame: the input bar asks for
+  // every item's height on each scroll frame.
+  private heightSnapshot: {
+    average: number;
+    heights: Map<unknown, number>;
+  } | null = null;
+  // Item elements with the data they render, registered by ListItemWrapper.
+  private itemByElement = new WeakMap<Element, Data>();
   private rendered: Data[] = [];
   private flushScheduled = false;
   private locationScheduled = false;
@@ -314,12 +325,14 @@ class ListController<Data, Context> {
       if (this.smoothScroll === null && this.prependAnchor === null) {
         this.pinnedToBottom = this.readLocation().bottomOffset === 0;
       }
+      this.viewAnchor = this.firstVisibleItem();
       this.publishLocation(true);
     });
   };
 
   // Rendered items or the footer changed size.
   handleResize = (): void => {
+    this.heightSnapshot = null;
     if (
       this.pinnedToBottom &&
       this.initialized &&
@@ -492,9 +505,9 @@ class ListController<Data, Context> {
     offset: number
   ): number | null {
     const metrics = this.metrics();
-    const element = this.list?.querySelector<HTMLElement>(
-      `[data-index="${index}"]`
-    );
+    const item = this.store.current()[index];
+    const element =
+      item === undefined ? null : this.renderedElementOf(this.identity(item));
     if (!metrics || !element) {
       return null;
     }
@@ -590,18 +603,41 @@ class ListController<Data, Context> {
     this.publishLocation(false);
   }
 
+  registerItemElement = (element: Element, item: Data): void => {
+    this.itemByElement.set(element, item);
+  };
+
+  // Rendered item elements in list order, with the data they show.
+  private renderedElements(): { element: HTMLElement; item: Data }[] {
+    const rendered: { element: HTMLElement; item: Data }[] = [];
+    for (const element of this.list?.querySelectorAll<HTMLElement>(
+      "[data-index]"
+    ) ?? []) {
+      const item = this.itemByElement.get(element);
+      if (item !== undefined) {
+        rendered.push({ element, item });
+      }
+    }
+    return rendered;
+  }
+
+  private renderedElementOf(identity: unknown): HTMLElement | null {
+    for (const { element, item } of this.renderedElements()) {
+      if (this.identity(item) === identity) {
+        return element;
+      }
+    }
+    return null;
+  }
+
   private firstVisibleItem(): { identity: unknown; offset: number } | null {
     const metrics = this.metrics();
-    if (!metrics || !this.list) {
+    if (!metrics) {
       return null;
     }
-    const items = this.store.current();
-    for (const element of this.list.querySelectorAll<HTMLElement>(
-      "[data-index]"
-    )) {
+    for (const { element, item } of this.renderedElements()) {
       const rect = element.getBoundingClientRect();
-      const item = items[Number(element.dataset.index)];
-      if (item !== undefined && rect.bottom > metrics.viewportTop) {
+      if (rect.bottom > metrics.viewportTop) {
         return {
           identity: this.identity(item),
           offset: rect.top - metrics.viewportTop,
@@ -609,6 +645,22 @@ class ListController<Data, Context> {
       }
     }
     return null;
+  }
+
+  // Where the viewport is now, to restore after the list remounts.
+  currentViewLocation(): ItemLocationWithAlign | null {
+    if (this.pinnedToBottom) {
+      return { index: "LAST", align: "end" };
+    }
+    const anchor = this.viewAnchor;
+    const index = anchor
+      ? this.store
+          .current()
+          .findIndex((item) => this.identity(item) === anchor.identity)
+      : -1;
+    return anchor && index >= 0
+      ? { index, align: "start", offset: -anchor.offset }
+      : null;
   }
 
   // react-virtuoso compensates a prepend with estimated item sizes; this keeps
@@ -636,13 +688,7 @@ class ListController<Data, Context> {
       return;
     }
     const metrics = this.metrics();
-    const index = this.store
-      .current()
-      .findIndex((item) => this.identity(item) === anchor.identity);
-    const element =
-      index >= 0
-        ? this.list?.querySelector<HTMLElement>(`[data-index="${index}"]`)
-        : null;
+    const element = this.renderedElementOf(anchor.identity);
     let stable = stableFrames + 1;
     if (metrics && element) {
       const delta =
@@ -694,44 +740,61 @@ class ListController<Data, Context> {
 
   private height(item: Data): number {
     const identity = this.identity(item);
-    const index = this.store
-      .current()
-      .findIndex((candidate) => this.identity(candidate) === identity);
-    const element =
-      index >= 0
-        ? this.list?.querySelector<HTMLElement>(`[data-index="${index}"]`)
-        : null;
-    if (element) {
+    const snapshot = this.measureRendered();
+    return (
+      snapshot.heights.get(identity) ??
+      this.sizes.get(identity) ??
+      snapshot.average
+    );
+  }
+
+  // Measures every rendered item once per frame.
+  private measureRendered(): {
+    average: number;
+    heights: Map<unknown, number>;
+  } {
+    if (this.heightSnapshot) {
+      return this.heightSnapshot;
+    }
+    const heights = new Map<unknown, number>();
+    for (const { element, item } of this.renderedElements()) {
+      const identity = this.identity(item);
       const height = element.getBoundingClientRect().height;
+      heights.set(identity, height);
       this.sizes.set(identity, height);
-      return height;
-    }
-    const known = this.sizes.get(identity);
-    if (known !== undefined) {
-      return known;
-    }
-    if (this.sizes.size === 0) {
-      return 0;
     }
     let total = 0;
     for (const size of this.sizes.values()) {
       total += size;
     }
-    return total / this.sizes.size;
+    const snapshot = {
+      average: this.sizes.size === 0 ? 0 : total / this.sizes.size,
+      heights,
+    };
+    this.heightSnapshot = snapshot;
+    requestAnimationFrame(() => {
+      if (this.heightSnapshot === snapshot) {
+        this.heightSnapshot = null;
+      }
+    });
+    return snapshot;
   }
 
   resetMeasurements(): void {
     this.sizes.clear();
+    this.heightSnapshot = null;
     this.rendered = [];
     this.initialized = false;
     this.pinnedToBottom = false;
     this.prependAnchor = null;
+    this.viewAnchor = null;
   }
 
   // Called once the initial location is applied.
   markInitialized(): void {
     this.initialized = true;
     this.pinnedToBottom = this.readLocation().bottomOffset === 0;
+    this.viewAnchor = this.firstVisibleItem();
     this.publishLocation(true);
   }
 }
@@ -740,6 +803,7 @@ interface ListRuntime {
   store: MessageListStore<unknown, unknown>;
   methods: VirtuosoMessageListMethods<unknown, unknown>;
   location: LocationSource;
+  registerItemElement: (element: Element, item: unknown) => void;
 }
 
 const MessageListRuntimeContext = createContext<ListRuntime | null>(null);
@@ -778,14 +842,27 @@ export function VirtuosoMessageListLicense({
   return <>{children}</>;
 }
 
-// A formatting context keeps item margins inside the measured item.
+// A formatting context keeps item margins inside the measured item. The
+// element is registered with the item it renders, so measurements never rely
+// on indexes that may have shifted since the last render.
 function ListItemWrapper<Data, Context>({
-  item: _item,
+  item,
   context: _context,
   style,
   ...props
 }: ItemProps<Data> & ContextProp<Context>) {
-  return <div {...props} style={{ ...style, display: "flow-root" }} />;
+  const runtime = useContext(MessageListRuntimeContext);
+  const register = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (element) {
+        runtime?.registerItemElement(element, item);
+      }
+    },
+    [runtime, item]
+  );
+  return (
+    <div {...props} ref={register} style={{ ...style, display: "flow-root" }} />
+  );
 }
 
 const VIRTUOSO_COMPONENTS = { Item: ListItemWrapper };
@@ -827,6 +904,10 @@ function MessageListComponent<Data, Context>({
         unknown
       >,
       location: controller.location,
+      registerItemElement: controller.registerItemElement as (
+        element: Element,
+        item: unknown
+      ) => void,
     }),
     [store, controller]
   );
@@ -955,12 +1036,20 @@ function MessageListComponent<Data, Context>({
   initialLocationRef.current = initialLocation;
 
   // A newly mounted list starts at the top; hide it until it reaches the
-  // location its data asked for, then start reporting scrolls.
+  // location its data asked for, then start reporting scrolls. Remounting only
+  // because the scroll mode changed keeps the current view instead.
+  const lastMountRef = useRef<{ generation: number; key: string } | null>(null);
   useLayoutEffect(() => {
     const list = listRef.current;
     if (mountKey === null || !list) {
       return;
     }
+    const previous = lastMountRef.current;
+    lastMountRef.current = { generation, key: mountKey };
+    const target =
+      previous?.generation === generation
+        ? controller.currentViewLocation()
+        : initialLocationRef.current;
     controller.initialized = false;
     list.style.visibility = "hidden";
     let active = true;
@@ -968,7 +1057,7 @@ function MessageListComponent<Data, Context>({
       list.style.visibility = "";
     };
     const frame = requestAnimationFrame(() => {
-      controller.positionInitially(initialLocationRef.current, () => {
+      controller.positionInitially(target, () => {
         if (!active) {
           return;
         }
@@ -981,7 +1070,7 @@ function MessageListComponent<Data, Context>({
       cancelAnimationFrame(frame);
       reveal();
     };
-  }, [controller, mountKey]);
+  }, [controller, generation, mountKey]);
 
   // Perform requested scrolls once react-virtuoso has rendered this version.
   useLayoutEffect(() => {
