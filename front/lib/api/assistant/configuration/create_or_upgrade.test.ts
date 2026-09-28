@@ -1,4 +1,7 @@
 import { createOrUpgradeAgentConfiguration } from "@app/lib/api/assistant/configuration/create_or_upgrade";
+import { Authenticator } from "@app/lib/auth";
+import { setUserMaxAllowedTier } from "@app/lib/model_tiers/allowed_tiers";
+import { getModelsForAuth } from "@app/lib/model_tiers/enabled_models";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import type { PostOrPatchAgentConfigurationRequestBody } from "@app/types/api/agent_configuration";
 import { AUTO_MODEL_CONFIG } from "@app/types/assistant/models/auto";
@@ -113,6 +116,36 @@ describe("createOrUpgradeAgentConfiguration model lock", () => {
     }
     expect(result.error.message).toBe(
       `${GEMINI_3_7_FLASH_MODEL_CONFIG.displayName} is not available in this workspace.`
+    );
+  });
+
+  it("tier-checks the advertised default for a member capped below Gemini 3.7 Flash", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { authenticator, user, workspace } = await createResourceTest({
+      role: "user",
+    });
+    // Gemini 3.7 Flash has no effort in the Basic (cost_efficient) tier.
+    const capped = await setUserMaxAllowedTier(
+      await Authenticator.internalAdminForWorkspace(workspace.sId),
+      { userId: user.sId, tierName: "cost_efficient" }
+    );
+    if (capped.isErr()) {
+      throw capped.error;
+    }
+
+    // The agent builder starts from the model and effort /models advertises.
+    const { defaultModel } = await getModelsForAuth(authenticator);
+    const result = await createOrUpgradeAgentConfiguration({
+      auth: authenticator,
+      assistant: makeAssistant(defaultModel, user.sId),
+    });
+
+    if (result.isOk()) {
+      throw new Error("Saved an agent above the member's tier cap");
+    }
+    expect(result.error.message).toBe(
+      "Assistant ModelLockAgent uses a model tier that is not enabled for you. " +
+        "Please contact your workspace admin or use another assistant."
     );
   });
 });

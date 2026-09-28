@@ -14,6 +14,7 @@ import {
 import type { LightAgentConfigurationType } from "@app/types/assistant/agent";
 import { isModelStreamId } from "@app/types/assistant/models/auto";
 import { SUPPORTED_MODEL_CONFIGS } from "@app/types/assistant/models/models";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import type {
   ModelConfigurationType,
   ModelResolutionMethodType,
@@ -79,9 +80,14 @@ export async function resolveModel(
   if (isPocModelLockEnabled()) {
     // The isolated POC runs its locked model whatever the selection, the agent
     // model or the stream asked for; the requested effort still applies below.
-    enabled = selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
-      featureFlags,
-    });
+    // A noop request keeps its static reply where noop is enabled.
+    enabled = selectEnabledModel(
+      auth,
+      requestedConfig?.modelId === NOOP_MODEL_ID
+        ? [requestedConfig, POC_LOCKED_MODEL_CONFIG]
+        : [POC_LOCKED_MODEL_CONFIG],
+      { featureFlags }
+    );
   } else if (requestedConfig && isModelStreamId(requestedConfig.modelId)) {
     enabled = requestedConfig;
   } else {

@@ -192,6 +192,19 @@ export function resolveStreamModel(
     }
   }
 
+  // The isolated POC has no other model to fall back to than its locked one,
+  // unselectable when it is not a candidate, as in getModelsForAuth.
+  if (isPocModelLockEnabled()) {
+    const lockedModel = candidateModels.find((m) =>
+      isPocLockedModelId(m.modelId)
+    ) ?? { ...POC_LOCKED_MODEL_CONFIG, isSelectable: false };
+    return {
+      model: lockedModel,
+      reasoningEffort: lockedModel.defaultReasoningEffort,
+      fromPool: false,
+    };
+  }
+
   // Still off the degraded ones: the last-resort fallback is as automatic a pick
   // as the pool walk itself.
   const fallback = pickPreferredLargeModel(candidateModels);
@@ -254,9 +267,12 @@ export async function getModelsForAuth(
 
   if (isPocModelLockEnabled()) {
     // The isolated POC never falls back to another model: its locked model is
-    // the default, unselectable when the workspace cannot run it, and every
-    // stream resolves to it, as resolveModel does.
-    const lockedModel = models.find((m) => isPocLockedModelId(m.modelId)) ?? {
+    // the default and every stream resolves to it, as resolveModel does. Where
+    // the workspace cannot run it or the member cannot select it, that is the
+    // unselectable model with its own efforts, which a save still tier-checks.
+    const lockedModel = models.find(
+      (m) => isPocLockedModelId(m.modelId) && m.isSelectable
+    ) ?? {
       ...POC_LOCKED_MODEL_CONFIG,
       isSelectable: false,
     };

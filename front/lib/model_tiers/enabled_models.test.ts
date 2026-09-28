@@ -368,4 +368,58 @@ describe("getModelsForAuth in the isolated POC", () => {
       GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
     ]);
   });
+
+  it("falls back to Gemini 3.7 Flash alone when no stream candidate is available", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { resolveStreamModel } = await import(
+      "@app/lib/model_tiers/enabled_models"
+    );
+
+    // No candidate at all, e.g. the locked model is degraded or capped out.
+    const resolved = resolveStreamModel([], "auto", new Set());
+
+    expect(resolved).toMatchObject({
+      fromPool: false,
+      model: {
+        modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+        isSelectable: false,
+      },
+      reasoningEffort: GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+    });
+  });
+
+  it("advertises the locked model's own effort to a member who cannot select it", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { authenticator, user, workspace } = await createResourceTest({
+      role: "user",
+    });
+    // Gemini 3.7 Flash has no effort in the Basic (cost_efficient) tier.
+    const capped = await setUserMaxAllowedTier(
+      await Authenticator.internalAdminForWorkspace(workspace.sId),
+      { userId: user.sId, tierName: "cost_efficient" }
+    );
+    if (capped.isErr()) {
+      throw capped.error;
+    }
+    const { getModelsForAuth } = await import(
+      "@app/lib/model_tiers/enabled_models"
+    );
+
+    const response = await getModelsForAuth(authenticator);
+
+    expect(response.models).toMatchObject([
+      { modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId, isSelectable: false },
+    ]);
+    expect(response.defaultModel).toMatchObject({
+      modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+      isSelectable: false,
+      defaultReasoningEffort:
+        GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort,
+    });
+    expect(
+      Object.values(response.streams).map((stream) => stream.reasoningEffort)
+    ).toEqual(
+      Array(3).fill(GEMINI_3_7_FLASH_MODEL_CONFIG.defaultReasoningEffort)
+    );
+  });
 });

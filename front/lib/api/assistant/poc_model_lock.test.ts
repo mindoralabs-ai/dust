@@ -1,7 +1,10 @@
 import {
+  GEMINI_3_7_FLASH_MODEL_CONFIG,
   GEMINI_3_7_FLASH_MODEL_ID,
   GEMINI_3_8_FLASH_MODEL_ID,
 } from "@app/types/assistant/models/google_ai_studio";
+import { NOOP_MODEL_CONFIG } from "@app/types/assistant/models/noop";
+import { GPT_5_5_MODEL_CONFIG } from "@app/types/assistant/models/openai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The POC mode is read through a cached configuration, so each case imports a
@@ -49,5 +52,35 @@ describe("POC model lock", () => {
 
     expect(isPocLockedModelId(GEMINI_3_7_FLASH_MODEL_ID)).toBe(true);
     expect(isPocLockedModelId(GEMINI_3_8_FLASH_MODEL_ID)).toBe(false);
+  });
+
+  const gpt = {
+    providerId: GPT_5_5_MODEL_CONFIG.providerId,
+    modelId: GPT_5_5_MODEL_CONFIG.modelId,
+  };
+  const noop = {
+    providerId: NOOP_MODEL_CONFIG.providerId,
+    modelId: NOOP_MODEL_CONFIG.modelId,
+  };
+
+  it("runs a saved agent on its own model outside the isolated POC", async () => {
+    const { getPocRuntimeModel } = await import(
+      "@app/lib/api/assistant/poc_model_lock"
+    );
+
+    expect(getPocRuntimeModel(gpt)).toEqual(gpt);
+  });
+
+  it("runs a saved agent on the locked model, or on noop, in the isolated POC", async () => {
+    vi.stubEnv("DUST_POC_MODE", "1");
+    const { getPocRuntimeModel } = await import(
+      "@app/lib/api/assistant/poc_model_lock"
+    );
+
+    expect(getPocRuntimeModel(gpt)).toEqual({
+      providerId: GEMINI_3_7_FLASH_MODEL_CONFIG.providerId,
+      modelId: GEMINI_3_7_FLASH_MODEL_CONFIG.modelId,
+    });
+    expect(getPocRuntimeModel(noop)).toEqual(noop);
   });
 });

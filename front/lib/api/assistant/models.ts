@@ -13,6 +13,7 @@ import { CLAUDE_4_5_HAIKU_DEFAULT_MODEL_CONFIG } from "@app/types/assistant/mode
 import { GEMINI_3_5_FLASH_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
 import { MISTRAL_SMALL_MODEL_CONFIG } from "@app/types/assistant/models/mistral";
 import { isModelId } from "@app/types/assistant/models/models";
+import { NOOP_MODEL_ID } from "@app/types/assistant/models/noop";
 import { GPT_5_MINI_MODEL_CONFIG } from "@app/types/assistant/models/openai";
 import {
   BYOK_MODEL_PROVIDER_IDS,
@@ -144,10 +145,13 @@ export function selectEnabledModel(
     featureFlags
   );
 
-  // The isolated POC can only select its locked model: any other candidate is
-  // unavailable, so the caller gets null and applies its own fallback.
+  // The isolated POC can only select its locked model or the provider-less noop
+  // model: any other candidate is unavailable, so the caller gets null and
+  // applies its own fallback.
   const selectableCandidates = isPocModelLockEnabled()
-    ? candidates.filter((m) => isPocLockedModelId(m.modelId))
+    ? candidates.filter(
+        (m) => isPocLockedModelId(m.modelId) || m.modelId === NOOP_MODEL_ID
+      )
     : candidates;
 
   return selectableCandidates.find((m) => isModelEnabled(m, context)) ?? null;

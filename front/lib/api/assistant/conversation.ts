@@ -35,6 +35,7 @@ import {
   batchRenderUserMessagesWithoutMentions,
 } from "@app/lib/api/assistant/messages";
 import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
+import { getPocRuntimeModel } from "@app/lib/api/assistant/poc_model_lock";
 import { enforcePremiumModelLimit } from "@app/lib/api/assistant/premium_model_limit";
 import { gracefullyStopAgentLoop } from "@app/lib/api/assistant/pubsub";
 import {
@@ -765,9 +766,11 @@ export async function postUserMessage(
       });
     }
 
+    // In the isolated POC, an agent runs the locked model, whatever it was saved on.
+    const runtimeModel = getPocRuntimeModel(agentConfig.model);
     const isProviderEnabled = isProviderWhitelistedForAuth(
       auth,
-      agentConfig.model.providerId
+      runtimeModel.providerId
     );
     if (!isProviderEnabled) {
       // Stop processing if any agent uses a disabled provider.
@@ -783,7 +786,7 @@ export async function postUserMessage(
       });
     }
 
-    const supportedModelConfig = getSupportedModelConfig(agentConfig.model);
+    const supportedModelConfig = getSupportedModelConfig(runtimeModel);
     if (
       !supportedModelConfig ||
       !(
@@ -1214,9 +1217,11 @@ export async function editUserMessage(
       });
     }
 
+    // In the isolated POC, an agent runs the locked model, whatever it was saved on.
+    const runtimeModel = getPocRuntimeModel(agentConfig.model);
     const isProviderEnabled = isProviderWhitelistedForAuth(
       auth,
-      agentConfig.model.providerId
+      runtimeModel.providerId
     );
     if (!isProviderEnabled) {
       // Stop processing if any agent uses a disabled provider.
