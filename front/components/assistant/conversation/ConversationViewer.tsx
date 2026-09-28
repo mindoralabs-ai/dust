@@ -14,6 +14,14 @@ import {
   createPlaceholderUserMessage,
 } from "@app/components/assistant/conversation/lib";
 import { MessageItem } from "@app/components/assistant/conversation/MessageItem";
+import type {
+  ListScrollLocation,
+  VirtuosoMessageListMethods,
+} from "@app/components/assistant/conversation/message_list/MessageList";
+import {
+  VirtuosoMessageList,
+  VirtuosoMessageListLicense,
+} from "@app/components/assistant/conversation/message_list/MessageList";
 import { handlePlanUpdatedEvent } from "@app/components/assistant/conversation/plan_mode/handle_plan_updated";
 import type {
   AgentMessageWithStreaming,
@@ -86,14 +94,6 @@ import type { Result } from "@app/types/shared/result";
 import { Err, Ok } from "@app/types/shared/result";
 import type { UserType, WorkspaceType } from "@app/types/user";
 import { cn } from "@dust-tt/sparkle";
-import type {
-  ListScrollLocation,
-  VirtuosoMessageListMethods,
-} from "@virtuoso.dev/message-list";
-import {
-  VirtuosoMessageList,
-  VirtuosoMessageListLicense,
-} from "@virtuoso.dev/message-list";
 import type { MutableRefObject } from "react";
 import {
   useCallback,

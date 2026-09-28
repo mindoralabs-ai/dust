@@ -7,6 +7,7 @@ import type { FeedbackSelectorBaseProps } from "@app/components/assistant/conver
 import { MentionInvalid } from "@app/components/assistant/conversation/MentionInvalid";
 import { MentionValidationRequired } from "@app/components/assistant/conversation/MentionValidationRequired";
 import { MessageDateIndicator } from "@app/components/assistant/conversation/MessageDateIndicator";
+import { useVirtuosoMethods } from "@app/components/assistant/conversation/message_list/MessageList";
 import type {
   VirtuosoMessage,
   VirtuosoMessageListContext,
@@ -27,7 +28,6 @@ import { useSubmitFunction } from "@app/lib/client/utils";
 import { isSupportedImageContentType } from "@app/types/files";
 import type { UserType } from "@app/types/user";
 import { cn } from "@dust-tt/sparkle";
-import { useVirtuosoMethods } from "@virtuoso.dev/message-list";
 import React, { useMemo } from "react";
 
 // Inter-message spacing lives here (not in Sparkle) because it depends on
