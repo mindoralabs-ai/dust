@@ -6,12 +6,15 @@ import {
   claimFrontUsageWork,
   completeFrontUsageClaim,
   consumeFrontUsageStartPermit,
+  DIRECT_POC_ATTEMPT_RESERVATION_TOKENS,
+  DIRECT_POC_TENANT_ID,
   heartbeatFrontUsageAttempt,
   markFrontUsageUnknown,
   newFrontUsageAttemptId,
   readFrontUsageHealth,
   settleFrontUsageExact,
   settleFrontUsageNoCharge,
+  startDirectFrontUsageAttemptWithinLimit,
   startFrontUsageAttemptForAdmission,
   startFrontUsageAttempt as startJournalAttempt,
   validateFrontUsageClaim,
@@ -512,5 +515,102 @@ describe("Front Dust usage journal PostgreSQL durability", () => {
       [attempt.attemptId]
     );
     expect(row.rows[0].manualReviewRequired).toBe(false);
+  });
+  describe("direct provider mode", () => {
+    const reservation = DIRECT_POC_ATTEMPT_RESERVATION_TOKENS;
+    const since = () => new Date(Date.now() - 60_000);
+    const directRoute = (workspaceId: string) =>
+      ({
+        tenantId: DIRECT_POC_TENANT_ID,
+        workspaceId,
+        revision: 0,
+        keyId: "direct",
+        privateRoute: "direct:none",
+        admissionUrl: "direct:none",
+        usageIngestUrl: "direct:none",
+        journalTarget: `tenant:${DIRECT_POC_TENANT_ID}:dust-usage`,
+        frontCredentialRef: "direct:none",
+        coreCredentialRef: "direct:none",
+      }) as TenantRoute;
+    const directAttempt = (workspaceId: string) => ({
+      attemptId: newFrontUsageAttemptId(),
+      tenantId: DIRECT_POC_TENANT_ID,
+      workspaceId,
+      conversationId: "conversation-test-direct",
+      model: "gemini-3.7-flash",
+      routeId: `${DIRECT_POC_TENANT_ID}:0`,
+    });
+    const startDirect = (attempt: FrontUsageAttempt, dailyTokenLimit: number) =>
+      startDirectFrontUsageAttemptWithinLimit(
+        attempt,
+        directRoute(attempt.workspaceId),
+        { since: since(), dailyTokenLimit }
+      );
+
+    it("reserves unsettled attempts and counts exact usage per workspace", async () => {
+      const workspaceId = `workspace-direct-${randomUUID()}`;
+      const limit = 3 * reservation;
+      const first = directAttempt(workspaceId);
+      expect(await startDirect(first, limit)).toBe("created");
+      await settleFrontUsageExact({
+        attempt: first,
+        providerOperationId: `vertex:${first.attemptId}`,
+        counts: {
+          inputTokens: 90_000,
+          outputTokens: 10_000,
+          cacheReadTokens: 50_000,
+          cacheWriteTokens: 0,
+        },
+      });
+      // 100k exact tokens plus this request's reservation fit in the limit.
+      expect(await startDirect(directAttempt(workspaceId), limit)).toBe(
+        "created"
+      );
+      // 100k exact tokens plus two reservations would exceed it.
+      expect(await startDirect(directAttempt(workspaceId), limit)).toBe(
+        "over_limit"
+      );
+      // Another workspace's usage is not counted.
+      expect(
+        await startDirect(directAttempt(`${workspaceId}-other`), limit)
+      ).toBe("created");
+    });
+
+    it("serializes concurrent requests near the limit", async () => {
+      const workspaceId = `workspace-direct-${randomUUID()}`;
+      const outcomes = await Promise.all(
+        [1, 2, 3].map(() =>
+          startDirect(directAttempt(workspaceId), 2 * reservation - 1)
+        )
+      );
+      expect(outcomes.filter((outcome) => outcome === "created")).toHaveLength(
+        1
+      );
+      expect(
+        outcomes.filter((outcome) => outcome === "over_limit")
+      ).toHaveLength(2);
+    });
+
+    it("never hands direct rows to the reconciler", async () => {
+      const attempt = directAttempt(`workspace-direct-${randomUUID()}`);
+      expect(await startDirect(attempt, reservation)).toBe("created");
+      await settleFrontUsageExact({
+        attempt,
+        providerOperationId: `vertex:${attempt.attemptId}`,
+        counts: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const claims = await claimFrontUsageWork(
+        `worker-direct-${randomUUID()}`,
+        100
+      );
+      expect(
+        claims.some((claim) => claim.attemptId === attempt.attemptId)
+      ).toBe(false);
+    });
   });
 });

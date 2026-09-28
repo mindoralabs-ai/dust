@@ -12,6 +12,21 @@ export function dustPocMode(): boolean {
   return true;
 }
 
+/**
+ * Direct provider mode serves one POC workspace without the signed tenant
+ * registry or CRM admission. It is off unless set to 1, and needs POC mode.
+ */
+export function dustPocDirectProviderMode(): boolean {
+  const mode = config.getDustPocDirectProviderMode();
+  if (mode === undefined || mode === "0") {
+    return false;
+  }
+  if (mode !== "1" || !dustPocMode()) {
+    throw new Error("Dust POC direct provider mode configuration unavailable");
+  }
+  return true;
+}
+
 /** Only the isolated Vertex POC workspaces may omit an OpenAI embedding key. */
 export function isConfiguredPocVertexEmbeddingWorkspace(
   workspaceId: string

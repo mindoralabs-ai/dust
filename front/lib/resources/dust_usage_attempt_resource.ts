@@ -1,6 +1,7 @@
 // biome-ignore-all lint/plugin/noRawSql: PostgreSQL atomic insert, row locks, and SKIP LOCKED leases have no Sequelize model equivalent here.
 import { createHash, randomUUID } from "node:crypto";
 import type { TenantRoute } from "@app/lib/api/tenant_route";
+import { DIRECT_POC_TENANT_ID } from "@app/lib/api/tenant_route";
 import { frontSequelize } from "@app/lib/resources/storage";
 import type { Transaction } from "sequelize";
 import { QueryTypes } from "sequelize";
@@ -190,42 +191,140 @@ export async function startFrontUsageAttempt(
   ) {
     throw new Error("Dust usage journal route mismatch");
   }
-  const digest = identityHash(attempt);
-  const routeBindingHash = frontUsageRouteBindingHash(route);
   return frontSequelize.transaction(async (transaction) => {
     await frontSequelize.query("SET LOCAL synchronous_commit = on", {
       transaction,
     });
-    const inserted = await frontSequelize.query<{ attemptId: string }>(
-      `INSERT INTO "dust_usage_attempts"
-        ("attemptId", "tenantId", "workspaceId", "conversationId", "model", "routeId", "routeBindingHash", "identityHash", "nextRetryAt", "createdAt", "updatedAt")
-       VALUES (:attemptId, :tenantId, :workspaceId, :conversationId, :model, :routeId, :routeBindingHash, :digest, now() + interval '5 minutes', now(), now())
-       ON CONFLICT ("attemptId") DO NOTHING RETURNING "attemptId"`,
-      {
-        replacements: { ...attempt, digest, routeBindingHash },
-        transaction,
-        type: QueryTypes.SELECT,
-      }
-    );
-    if (inserted.length === 1) {
-      return "created";
+    return insertFrontUsageAttempt(attempt, route, transaction);
+  });
+}
+
+async function insertFrontUsageAttempt(
+  attempt: FrontUsageAttempt,
+  route: TenantRoute,
+  transaction: Transaction
+): Promise<"created" | "duplicate"> {
+  const digest = identityHash(attempt);
+  const routeBindingHash = frontUsageRouteBindingHash(route);
+  const inserted = await frontSequelize.query<{ attemptId: string }>(
+    `INSERT INTO "dust_usage_attempts"
+      ("attemptId", "tenantId", "workspaceId", "conversationId", "model", "routeId", "routeBindingHash", "identityHash", "nextRetryAt", "createdAt", "updatedAt")
+     VALUES (:attemptId, :tenantId, :workspaceId, :conversationId, :model, :routeId, :routeBindingHash, :digest, now() + interval '5 minutes', now(), now())
+     ON CONFLICT ("attemptId") DO NOTHING RETURNING "attemptId"`,
+    {
+      replacements: { ...attempt, digest, routeBindingHash },
+      transaction,
+      type: QueryTypes.SELECT,
     }
-    const [existing] = await frontSequelize.query<JournalRow>(
-      `SELECT "identityHash", "routeBindingHash" FROM "dust_usage_attempts" WHERE "attemptId" = :attemptId`,
+  );
+  if (inserted.length === 1) {
+    return "created";
+  }
+  const [existing] = await frontSequelize.query<JournalRow>(
+    `SELECT "identityHash", "routeBindingHash" FROM "dust_usage_attempts" WHERE "attemptId" = :attemptId`,
+    {
+      replacements: { attemptId: attempt.attemptId },
+      transaction,
+      type: QueryTypes.SELECT,
+    }
+  );
+  if (
+    !existing ||
+    existing.identityHash !== digest ||
+    existing.routeBindingHash !== routeBindingHash
+  ) {
+    throw new Error("Conflicting Dust usage attempt identity");
+  }
+  return "duplicate";
+}
+
+/** Each unsettled direct attempt holds this many tokens of the daily limit. */
+export const DIRECT_POC_ATTEMPT_RESERVATION_TOKENS = 64_000;
+
+/**
+ * Start a direct-mode attempt only while its workspace stays within the daily
+ * limit. The check and the insertion share a per-workspace transaction lock,
+ * so concurrent callers count each other's reservations. Direct rows are never
+ * delivered, which lets the exact total use the undelivered-usage index; the
+ * unsettled count uses the direct tenant/workspace/date index.
+ */
+export async function startDirectFrontUsageAttemptWithinLimit(
+  attempt: FrontUsageAttempt,
+  route: TenantRoute,
+  window: { since: Date; dailyTokenLimit: number }
+): Promise<"created" | "duplicate" | "over_limit"> {
+  validateAttempt(attempt);
+  if (
+    attempt.tenantId !== DIRECT_POC_TENANT_ID ||
+    route.tenantId !== DIRECT_POC_TENANT_ID ||
+    route.workspaceId !== attempt.workspaceId ||
+    `${route.tenantId}:${route.revision}` !== attempt.routeId
+  ) {
+    throw new Error("Dust usage journal route mismatch");
+  }
+  if (
+    Number.isNaN(window.since.getTime()) ||
+    !Number.isSafeInteger(window.dailyTokenLimit) ||
+    window.dailyTokenLimit < DIRECT_POC_ATTEMPT_RESERVATION_TOKENS
+  ) {
+    throw new Error("Invalid Dust usage window");
+  }
+  return frontSequelize.transaction(async (transaction) => {
+    await frontSequelize.query("SET LOCAL synchronous_commit = on", {
+      transaction,
+    });
+    await frontSequelize.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended(:lockKey, 0))",
       {
-        replacements: { attemptId: attempt.attemptId },
+        replacements: { lockKey: `dust-poc-direct:${attempt.workspaceId}` },
+        transaction,
+      }
+    );
+    const [usage] = await frontSequelize.query<{
+      exactTokens: string;
+      unsettledAttempts: string;
+    }>(
+      `SELECT
+         (SELECT COALESCE(SUM(
+              ("eventEnvelope"::jsonb->>'input_tokens')::bigint +
+              ("eventEnvelope"::jsonb->>'output_tokens')::bigint), 0)
+            FROM "dust_usage_attempts"
+           WHERE "tenantId" = :tenantId AND "state" = 'exact'
+             AND "deliveredAt" IS NULL AND "workspaceId" = :workspaceId
+             AND "createdAt" >= :since) AS "exactTokens",
+         (SELECT COUNT(*) FROM "dust_usage_attempts"
+           WHERE "tenantId" = :tenantId AND "state" IN ('started', 'unknown')
+             AND "workspaceId" = :workspaceId
+             AND "createdAt" >= :since) AS "unsettledAttempts"`,
+      {
+        replacements: {
+          tenantId: DIRECT_POC_TENANT_ID,
+          workspaceId: attempt.workspaceId,
+          since: window.since,
+        },
         transaction,
         type: QueryTypes.SELECT,
       }
     );
+    const exactTokens = Number(usage?.exactTokens);
+    const unsettledAttempts = Number(usage?.unsettledAttempts);
     if (
-      !existing ||
-      existing.identityHash !== digest ||
-      existing.routeBindingHash !== routeBindingHash
+      !Number.isSafeInteger(exactTokens) ||
+      exactTokens < 0 ||
+      !Number.isSafeInteger(unsettledAttempts) ||
+      unsettledAttempts < 0
     ) {
-      throw new Error("Conflicting Dust usage attempt identity");
+      throw new Error("Dust Front usage journal total unavailable");
     }
-    return "duplicate";
+    // Reserve for this request as well as every unsettled one.
+    if (
+      exactTokens +
+        (unsettledAttempts + 1) * DIRECT_POC_ATTEMPT_RESERVATION_TOKENS >
+      window.dailyTokenLimit
+    ) {
+      return "over_limit";
+    }
+    return insertFrontUsageAttempt(attempt, route, transaction);
   });
 }
 
@@ -630,6 +729,7 @@ export async function claimFrontUsageWork(
             AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
             AND "nextRetryAt" <= now()
             AND "state" IN ('started', 'unknown', 'exact')
+            AND "tenantId" <> :directTenantId
        ), due AS (
          SELECT j."attemptId" FROM "dust_usage_attempts" AS j
            JOIN ranked AS r ON j."attemptId" = r."attemptId"
@@ -652,7 +752,12 @@ export async function claimFrontUsageWork(
                  j."eventEnvelope", j."eventHash", j."providerOperationId",
                  j."firstUnresolvedAt", j."retryCount", j."manualReviewRequired", j."leaseOwner", j."leaseNonce"`,
       {
-        replacements: { leaseOwner, leaseNonce, limit },
+        replacements: {
+          leaseOwner,
+          leaseNonce,
+          limit,
+          directTenantId: DIRECT_POC_TENANT_ID,
+        },
         transaction,
         type: QueryTypes.SELECT,
       }
@@ -746,4 +851,5 @@ export class DustUsageAttemptResource {
   static validateClaim = validateFrontUsageClaim;
   static completeClaim = completeFrontUsageClaim;
   static deferClaim = deferFrontUsageClaim;
+  static startDirectWithinLimit = startDirectFrontUsageAttemptWithinLimit;
 }

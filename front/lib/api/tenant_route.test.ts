@@ -6,6 +6,7 @@ import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DIRECT_POC_TENANT_ID,
   DustTenantRouteResolver,
   TenantRouteUnavailable,
 } from "./tenant_route";
@@ -318,6 +319,34 @@ describe("DustTenantRouteResolver", () => {
     expect(resolver.resolve(identity).tenantId).toBe("alpha");
     now = 1060;
     expect(resolver.resolve(identity).tenantId).toBe("alpha");
+  });
+
+  it("never accepts the direct provider journal tenant from the signer", async () => {
+    const tenantBundle = (tenantId: string) =>
+      bundle({
+        tenants: [
+          {
+            ...tenant,
+            tenant_id: tenantId,
+            journal_target: `tenant:${tenantId}:dust-usage`,
+            front_credential_ref: `/var/run/secrets/dust/tenants/${tenantId}/dust-front-usage-key`,
+            core_credential_ref: `/var/run/secrets/dust/tenants/${tenantId}/dust-core-usage-key`,
+          },
+        ],
+        memberships: [{ ...member, tenant_id: tenantId }],
+      });
+    responseBody = tenantBundle(DIRECT_POC_TENANT_ID);
+    await expect(resolver.start()).rejects.toThrow(TenantRouteUnavailable);
+    // The same bundle with any other tenant ID is accepted.
+    responseBody = tenantBundle("poc-direct-b");
+    await resolver.refresh();
+    expect(resolver.resolve(identity).tenantId).toBe("poc-direct-b");
+    expect(() =>
+      resolver.resolveForDelivery(
+        DIRECT_POC_TENANT_ID,
+        `${DIRECT_POC_TENANT_ID}:7`
+      )
+    ).toThrow(TenantRouteUnavailable);
   });
 
   it("rejects a signed revision rollback and blocks new routes", async () => {
