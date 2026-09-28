@@ -98,14 +98,17 @@ export default async function setup() {
   await journal.connect();
   try {
     await journal.query('DROP TABLE IF EXISTS "dust_usage_attempts"');
-    const migration = await readFile(
-      path.join(
-        FRONT_DIR,
-        "migrations/pre-deploy/20260923090000_create_dust_usage_journal.sql"
-      ),
-      "utf8"
-    );
-    await journal.query(migration);
+    for (const migration of [
+      "20260923090000_create_dust_usage_journal.sql",
+      "20260929090000_add_dust_usage_direct_unsettled_index.sql",
+    ]) {
+      await journal.query(
+        await readFile(
+          path.join(FRONT_DIR, "migrations/pre-deploy", migration),
+          "utf8"
+        )
+      );
+    }
   } finally {
     await journal.end();
   }

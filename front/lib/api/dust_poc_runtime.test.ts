@@ -1,8 +1,12 @@
-import { authorizeDustGenerationAttempt } from "@app/lib/api/dust_generation_gate";
+import {
+  authorizeDirectDustGenerationAttempt,
+  authorizeDustGenerationAttempt,
+} from "@app/lib/api/dust_generation_gate";
 import { DustTenantRouteResolver } from "@app/lib/api/tenant_route";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@app/lib/api/dust_generation_gate", () => ({
+  authorizeDirectDustGenerationAttempt: vi.fn(),
   authorizeDustGenerationAttempt: vi.fn(),
 }));
 vi.mock("@app/lib/api/tenant_route", () => ({
@@ -19,6 +23,7 @@ vi.mock("@app/lib/api/tenant_route", () => ({
 }));
 
 const authorize = vi.mocked(authorizeDustGenerationAttempt);
+const authorizeDirect = vi.mocked(authorizeDirectDustGenerationAttempt);
 const Resolver = vi.mocked(DustTenantRouteResolver);
 const identity = {
   workspaceId: "workspace-a",
@@ -198,5 +203,75 @@ describe("isolated Dust POC generation selection", () => {
     );
     await expect(pocRoutesForMaintenance()).rejects.toThrow("configuration");
     expect(Resolver).not.toHaveBeenCalled();
+  });
+});
+
+describe("isolated Dust POC direct provider mode", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.resetAllMocks();
+    vi.stubEnv("DUST_POC_MODE", "1");
+    vi.stubEnv("DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED", "1");
+    vi.stubEnv("DUST_POC_DIRECT_PROVIDER_MODE", "1");
+    vi.stubEnv("DUST_POC_DIRECT_WORKSPACE_ID", "workspace-a");
+    vi.stubEnv("DUST_POC_DIRECT_DAILY_TOKEN_LIMIT", "500000");
+    authorizeDirect.mockResolvedValue({
+      attempt: { attemptId: "attempt-1" },
+    } as never);
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("authorizes the configured workspace without the signed registry", async () => {
+    const { authorizePocGeneration } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await authorizePocGeneration(selection);
+    expect(authorizeDirect).toHaveBeenCalledWith({
+      identity,
+      conversationId: "conversation-a",
+      model: "gemini-3.7-flash",
+      directWorkspaceId: "workspace-a",
+      dailyTokenLimit: 500000,
+    });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(Resolver).not.toHaveBeenCalled();
+  });
+
+  it("keeps the server-selected model and provider", async () => {
+    const { authorizePocGeneration } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await expect(
+      authorizePocGeneration({ ...selection, modelId: "gemini-2.5-flash" })
+    ).rejects.toThrow("unavailable");
+    await expect(
+      authorizePocGeneration({ ...selection, inferenceRegion: "eu" })
+    ).rejects.toThrow("unavailable");
+    expect(authorizeDirect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED", "0"],
+    ["DUST_POC_DIRECT_PROVIDER_MODE", "true"],
+    ["DUST_POC_DIRECT_WORKSPACE_ID", "workspace a"],
+    ["DUST_POC_DIRECT_DAILY_TOKEN_LIMIT", "0"],
+    ["DUST_POC_DIRECT_DAILY_TOKEN_LIMIT", "12.5"],
+  ])("fails closed for %s=%s", async (key, value) => {
+    vi.stubEnv(key, value);
+    const { authorizePocGeneration } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await expect(authorizePocGeneration(selection)).rejects.toThrow();
+    expect(authorizeDirect).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it("requires POC mode", async () => {
+    vi.stubEnv("DUST_POC_MODE", "0");
+    const { dustPocDirectProviderMode } = await import(
+      "@app/lib/api/dust_poc_mode"
+    );
+    expect(() => dustPocDirectProviderMode()).toThrow("unavailable");
   });
 });

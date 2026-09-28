@@ -47,8 +47,16 @@ const config = {
     process.env.DUST_POC_SANDBOX_NETWORK_PROFILE,
   getDustPocWorkspaceIds: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_POC_WORKSPACE_IDS"),
+  getDustPocDirectProviderMode: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_POC_DIRECT_PROVIDER_MODE"),
+  getDustPocDirectWorkspaceId: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_POC_DIRECT_WORKSPACE_ID"),
+  getDustPocDirectDailyTokenLimit: (): string =>
+    EnvironmentConfig.getEnvVariable("DUST_POC_DIRECT_DAILY_TOKEN_LIMIT"),
   getDustFrontRegistryMinRevision: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_MIN_REVISION"),
+  getOptionalDustFrontRegistrySignerUrl: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_FRONT_REGISTRY_SIGNER_URL"),
   getDustFrontRegistrySignerUrl: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_SIGNER_URL"),
   getDustFrontRegistryExportKeyFile: (): string =>
