@@ -113,7 +113,10 @@ import {
   getDataSourcesAndWorkspaceIdForGlobalAgents,
   getMCPServerViewsForGlobalAgents,
 } from "@app/lib/api/assistant/global_agents/tools";
-import { isProviderWhitelistedForAuth } from "@app/lib/api/assistant/models";
+import {
+  isProviderWhitelistedForAuth,
+  selectEnabledModel,
+} from "@app/lib/api/assistant/models";
 import {
   isPocModelLockEnabled,
   POC_LOCKED_MODEL_CONFIG,
@@ -1237,17 +1240,26 @@ export async function getGlobalAgents(
 
   const globalAgents: AgentConfigurationType[] = [];
 
+  // In the isolated POC a model agent runs the locked model, so it is offered
+  // only where the workspace's plan, region and flags allow that model.
+  const canRunLockedModel =
+    isModelLocked &&
+    selectEnabledModel(auth, [POC_LOCKED_MODEL_CONFIG], {
+      featureFlags: flags,
+    }) !== null;
+
   for (const agentFetcherResult of agentCandidates) {
     if (
-      agentFetcherResult &&
-      agentFetcherResult.scope === "global" &&
-      isProviderWhitelistedForAuth(auth, agentFetcherResult.model.providerId)
+      !agentFetcherResult ||
+      agentFetcherResult.scope !== "global" ||
+      !isProviderWhitelistedForAuth(auth, agentFetcherResult.model.providerId)
     ) {
-      globalAgents.push(
-        isModelLocked
-          ? withPocLockedModel(agentFetcherResult)
-          : agentFetcherResult
-      );
+      continue;
+    }
+    if (!isModelLocked || agentFetcherResult.model.modelId === NOOP_MODEL_ID) {
+      globalAgents.push(agentFetcherResult);
+    } else if (canRunLockedModel) {
+      globalAgents.push(withPocLockedModel(agentFetcherResult));
     }
   }
 

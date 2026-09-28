@@ -4,6 +4,7 @@ import { setUserMaxAllowedTier } from "@app/lib/model_tiers/allowed_tiers";
 import { FeatureFlagFactory } from "@app/tests/utils/FeatureFlagFactory";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import { MembershipFactory } from "@app/tests/utils/MembershipFactory";
+import { SpaceFactory } from "@app/tests/utils/SpaceFactory";
 import { UserFactory } from "@app/tests/utils/UserFactory";
 import { WorkspaceFactory } from "@app/tests/utils/WorkspaceFactory";
 import { GLOBAL_AGENTS_SID } from "@app/types/assistant/assistant";
@@ -654,6 +655,28 @@ describe("getGlobalAgents POC model lock", () => {
         }),
       },
     ]);
+  });
+
+  it("offers no model agent where the workspace cannot run Gemini 3.7 Flash", async () => {
+    // A free plan excludes large models such as Gemini 3.7 Flash.
+    const workspace = await WorkspaceFactory.freeNoProductAccess();
+    const user = await UserFactory.basic();
+    await SpaceFactory.defaults(
+      await Authenticator.internalAdminForWorkspace(workspace.sId)
+    );
+    await MembershipFactory.associate(workspace, user, { role: "admin" });
+    const auth = await Authenticator.fromUserIdAndWorkspaceId(
+      user.sId,
+      workspace.sId
+    );
+
+    const agents = await getGlobalAgents(auth, MODEL_GLOBAL_AGENT_IDS, "light");
+
+    expect(
+      agents
+        .filter((agent) => agent.model.modelId !== NOOP_MODEL_ID)
+        .map((agent) => agent.sId)
+    ).toEqual([]);
   });
 
   it("shows Gemini 3.7 Flash on a stream agent but keeps a noop static reply", async () => {
