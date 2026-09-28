@@ -116,6 +116,12 @@ DustUsageAttemptModel.init(
         fields: ["tenantId", "createdAt"],
         where: { state: "exact", deliveredAt: null },
       },
+      {
+        name: "dust_usage_attempts_tenant_workspace_unsettled_idx",
+        fields: ["tenantId", "workspaceId", "createdAt"],
+        where: { state: ["started", "unknown"] },
+        concurrently: true,
+      },
     ],
   }
 );
