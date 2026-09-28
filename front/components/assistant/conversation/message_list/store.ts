@@ -53,9 +53,14 @@ export interface AutoscrollParams<Data, Context> {
   scrollLocation: ListScrollLocation;
 }
 
-// false/undefined keep the viewport. true or a scroll behavior scroll to the
-// bottom only when the list is already there. A callback decides on its own:
-// it may return false, true or a behavior (scroll to the bottom), or a location.
+/**
+ * @cc [owner:jchen0824,label:react] autoscroll-policy-semantics
+ * `false` or no policy MUST keep the viewport. `true` (as `"auto"`) or a scroll behavior MUST
+ * scroll to the bottom only when the list was at the bottom before the change. A callback MUST
+ * receive the scroll location from before the change and decides alone: `false`, `null` or
+ * `undefined` keep the viewport, `true` or a behavior scroll to the bottom even when scrolled up,
+ * and a location scrolls to that item. The scroll runs once the changed data is rendered.
+ */
 export type AutoscrollToBottom<Data, Context> =
   | boolean
   | NativeScrollBehavior
@@ -63,6 +68,16 @@ export type AutoscrollToBottom<Data, Context> =
       params: AutoscrollParams<Data, Context>
     ) => boolean | NativeScrollBehavior | ItemLocation | null | undefined);
 
+/**
+ * @cc [owner:jchen0824,label:react] synchronous-data-methods
+ * Every data method MUST apply its change before returning, so a `get`, `find` or `findIndex`
+ * right after `append`, `insert`, `map`, `prepend`, `findAndDelete` or `batch` observes it.
+ * Rendering and scrolling follow later.
+ */
+/**
+ * @cc [owner:jchen0824,label:react] find-and-delete-removes-all-matches
+ * `findAndDelete` MUST delete every item matching the predicate, not only the first.
+ */
 export interface MessageListDataMethods<Data, Context> {
   append(
     items: Data[],

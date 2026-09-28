@@ -11,6 +11,7 @@
 // ends just above the footer.
 import type {
   AutoscrollToBottom,
+  ItemAlign,
   ItemLocation,
   ItemLocationWithAlign,
   ListScrollBehavior,
@@ -22,6 +23,7 @@ import {
   MessageListStore,
   normalizeLocation,
 } from "@app/components/assistant/conversation/message_list/store";
+import { assertNever } from "@app/types/shared/utils/assert_never";
 import type {
   ComponentType,
   CSSProperties,
@@ -99,7 +101,7 @@ export interface VirtuosoMessageListProps<Data, Context>
     data: Data;
     index: number;
   }) => Key;
-  context?: Context;
+  context: Context;
   // Replacing `data.data` with a new array resets the list.
   data?: DataWithScrollModifier<Data> | null;
   EmptyPlaceholder?: ComponentType<ContextAwareProps<Context>>;
@@ -155,6 +157,98 @@ function toNativeBehavior(
   return behavior ?? "instant";
 }
 
+type ListAlign = "start" | "center" | "end";
+
+function toListAlign(align: ItemAlign | undefined): ListAlign {
+  switch (align) {
+    case undefined:
+    case "start":
+    case "start-no-overflow":
+      return "start";
+    case "center":
+    case "end":
+      return align;
+    default:
+      return assertNever(align);
+  }
+}
+
+// Scroll position that aligns an item spanning [top, top + height] within
+// `visible` pixels of viewport.
+function alignedScrollTop(
+  align: ListAlign,
+  top: number,
+  height: number,
+  visible: number
+): number {
+  switch (align) {
+    case "start":
+      return top;
+    case "center":
+      return top + height / 2 - visible / 2;
+    case "end":
+      return top + height - visible;
+    default:
+      return assertNever(align);
+  }
+}
+
+// How far an aligned item must stay clear of the sticky footer.
+function footerClearance(align: ListAlign, footerHeight: number): number {
+  switch (align) {
+    case "start":
+      return 0;
+    case "center":
+      return footerHeight / 2;
+    case "end":
+      return footerHeight;
+    default:
+      return assertNever(align);
+  }
+}
+
+const SCROLL_KEYS = new Set([
+  " ",
+  "ArrowDown",
+  "ArrowUp",
+  "End",
+  "Home",
+  "PageDown",
+  "PageUp",
+]);
+
+// Wheel and touch moves always scroll. Keys count only outside the footer and
+// editable fields, and a press only on the scroller itself (its scrollbar), so
+// typing in the input bar never looks like the user scrolling away.
+function isScrollIntent(
+  event: Event,
+  scroller: HTMLElement | null,
+  footer: HTMLElement | null
+): boolean {
+  switch (event.type) {
+    case "wheel":
+    case "touchmove":
+      return true;
+    case "keydown": {
+      const target = event.target;
+      const inFooterOrField =
+        target instanceof Element &&
+        ((footer?.contains(target) ?? false) ||
+          target.closest("input, textarea, select, [contenteditable]") !==
+            null);
+      return (
+        event instanceof KeyboardEvent &&
+        SCROLL_KEYS.has(event.key) &&
+        !inFooterOrField
+      );
+    }
+    case "pointerdown":
+      return scroller !== null && event.target === scroller;
+    default:
+      return false;
+  }
+}
+
 class LocationSource {
   private value: ListScrollLocation = DETACHED_LOCATION;
   private listeners = new Set<() => void>();
@@ -198,7 +292,7 @@ class ListController<Data, Context> {
   footer: HTMLElement | null = null;
   virtuoso: VirtuosoHandle | null = null;
   windowMode = false;
-  context: Context | undefined = undefined;
+  context: Context;
   identity: (item: Data) => unknown = (item) => item;
   onScroll: ((location: ListScrollLocation) => void) | undefined;
   onRenderedDataChange: ((data: Data[]) => void) | undefined;
@@ -237,10 +331,12 @@ class ListController<Data, Context> {
 
   constructor(
     store: MessageListStore<Data, Context>,
-    location: LocationSource
+    location: LocationSource,
+    context: Context
   ) {
     this.store = store;
     this.location = location;
+    this.context = context;
     this.methods = {
       data: store.data,
       getScrollLocation: () => this.readLocation(),
@@ -249,7 +345,7 @@ class ListController<Data, Context> {
     };
     store.view = {
       beforePrepend: () => this.capturePrependAnchor(),
-      getContext: () => this.context as Context,
+      getContext: () => this.context,
       getScrollLocation: () => this.readLocation(),
       isScrollInProgress: () => this.smoothScroll !== null,
     };
@@ -344,8 +440,12 @@ class ListController<Data, Context> {
     this.publishLocation(false);
   };
 
-  handleUserScrollIntent = (): void => {
-    this.lastUserScrollAt = performance.now();
+  handleUserScrollIntent = (event: Event): void => {
+    if (
+      isScrollIntent(event, this.windowMode ? null : this.scroller, this.footer)
+    ) {
+      this.lastUserScrollAt = performance.now();
+    }
   };
 
   private scrollTop(top: number, behavior: "instant" | "smooth"): void {
@@ -371,7 +471,11 @@ class ListController<Data, Context> {
 
   scrollToBottom(behavior: NativeScrollBehavior, onSettled?: () => void): void {
     if (behavior === "smooth") {
-      this.smoothScrollTo(true, () => this.maxScrollTop(), onSettled);
+      this.runSmoothScroll(
+        () => this.scrollTop(this.maxScrollTop(), "smooth"),
+        true,
+        onSettled
+      );
       return;
     }
     const token = ++this.scrollToken;
@@ -412,19 +516,22 @@ class ListController<Data, Context> {
     });
   }
 
-  // Animates to `targetTop()`. A scroll to the bottom follows content that
-  // keeps growing, and ends exactly at the bottom unless the user takes over.
-  private smoothScrollTo(
-    toBottom: boolean,
-    targetTop: () => number,
+  // Runs the smooth scroll that `start` begins and reports it as in progress
+  // until the position settles; resizes do not pull it back to the bottom. With
+  // `followBottom` it retargets to a growing bottom and ends exactly there,
+  // unless the user takes over.
+  private runSmoothScroll(
+    start: () => void,
+    followBottom: boolean,
     onDone?: () => void
   ): void {
     const token = ++this.scrollToken;
     const startedAt = performance.now();
     const deadline = startedAt + SCROLL_END_TIMEOUT_MS;
-    this.smoothScroll = { token, toBottom };
-    let target = targetTop();
-    this.scrollTop(target, "smooth");
+    this.smoothScroll = { token, toBottom: followBottom };
+    this.pinnedToBottom = false;
+    start();
+    let target = followBottom ? this.maxScrollTop() : Number.NaN;
 
     let lastTop = Number.NaN;
     let stableFrames = 0;
@@ -445,8 +552,8 @@ class ListController<Data, Context> {
         finish();
         return;
       }
-      if (toBottom) {
-        const next = targetTop();
+      if (followBottom) {
+        const next = this.maxScrollTop();
         if (Math.abs(next - target) > 1) {
           target = next;
           this.scrollTop(target, "smooth");
@@ -460,7 +567,7 @@ class ListController<Data, Context> {
         stableFrames >= SCROLL_END_STABLE_FRAMES ||
         performance.now() > deadline
       ) {
-        if (toBottom && this.readLocation().bottomOffset > 0) {
+        if (followBottom && this.readLocation().bottomOffset > 0) {
           this.scrollTop(this.maxScrollTop(), "instant");
         }
         finish();
@@ -501,7 +608,7 @@ class ListController<Data, Context> {
   // Visible space excludes the sticky footer.
   private renderedItemTop(
     index: number,
-    align: "start" | "center" | "end",
+    align: ListAlign,
     offset: number
   ): number | null {
     const metrics = this.metrics();
@@ -517,12 +624,7 @@ class ListController<Data, Context> {
       0,
       metrics.clientHeight - (this.footer?.offsetHeight ?? 0)
     );
-    const aligned =
-      align === "start"
-        ? top
-        : align === "end"
-          ? top + rect.height - visible
-          : top + rect.height / 2 - visible / 2;
+    const aligned = alignedScrollTop(align, top, rect.height, visible);
     return Math.max(0, Math.min(aligned + offset, this.maxScrollTop()));
   }
 
@@ -540,16 +642,13 @@ class ListController<Data, Context> {
       target.index === "LAST"
         ? count - 1
         : Math.max(0, Math.min(target.index, count - 1));
-    const align =
-      target.align === undefined || target.align === "start-no-overflow"
-        ? "start"
-        : target.align;
+    const align = toListAlign(target.align);
     const offset = target.offset ?? 0;
 
     const top = this.renderedItemTop(index, align, offset);
     if (top !== null) {
       if (behavior === "smooth") {
-        this.smoothScrollTo(false, () => top);
+        this.runSmoothScroll(() => this.scrollTop(top, "smooth"), false);
       } else {
         this.scrollToken++;
         this.smoothScroll = null;
@@ -559,19 +658,22 @@ class ListController<Data, Context> {
       return;
     }
     // Not rendered: let react-virtuoso find it, keeping it clear of the footer.
-    const footerHeight = this.footer?.offsetHeight ?? 0;
-    this.virtuoso?.scrollToIndex({
+    const location = {
       index,
       align,
-      behavior: behavior === "smooth" ? "smooth" : "auto",
-      offset:
-        offset +
-        (align === "end"
-          ? footerHeight
-          : align === "center"
-            ? footerHeight / 2
-            : 0),
-    });
+      offset: offset + footerClearance(align, this.footer?.offsetHeight ?? 0),
+    };
+    if (behavior === "smooth") {
+      this.runSmoothScroll(
+        () => this.virtuoso?.scrollToIndex({ ...location, behavior: "smooth" }),
+        false
+      );
+    } else {
+      this.scrollToken++;
+      this.smoothScroll = null;
+      this.pinnedToBottom = false;
+      this.virtuoso?.scrollToIndex({ ...location, behavior: "auto" });
+    }
   }
 
   scheduleFlush(): void {
@@ -799,63 +901,98 @@ class ListController<Data, Context> {
   }
 }
 
-interface ListRuntime {
-  store: MessageListStore<unknown, unknown>;
-  methods: VirtuosoMessageListMethods<unknown, unknown>;
+interface ListRuntime<Data, Context> {
   location: LocationSource;
-  registerItemElement: (element: Element, item: unknown) => void;
+  methods: VirtuosoMessageListMethods<Data, Context>;
+  registerItemElement: (element: Element, item: Data) => void;
+  store: MessageListStore<Data, Context>;
 }
 
-const MessageListRuntimeContext = createContext<ListRuntime | null>(null);
+// Holds the ListRuntime of the enclosing list. A context cannot carry the
+// list's type parameters, so it is typed `unknown` and narrowed by
+// `isListRuntime`.
+const MessageListRuntimeContext = createContext<unknown>(null);
 
-function useListRuntime(hookName: string): ListRuntime {
+// Checks the runtime's shape. `Data` and `Context` cannot be checked at
+// runtime: they are the types the caller declares for the enclosing list.
+function isListRuntime<Data, Context>(
+  value: unknown
+): value is ListRuntime<Data, Context> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "store" in value &&
+    value.store instanceof MessageListStore &&
+    "location" in value &&
+    value.location instanceof LocationSource &&
+    "methods" in value &&
+    "registerItemElement" in value
+  );
+}
+
+function useListRuntime<Data, Context>(
+  hookName: string
+): ListRuntime<Data, Context> {
   const runtime = useContext(MessageListRuntimeContext);
-  if (!runtime) {
+  if (!isListRuntime<Data, Context>(runtime)) {
     throw new Error(`${hookName} must be used inside a VirtuosoMessageList.`);
   }
   return runtime;
 }
 
-// The returned object never changes. The caller re-renders when the data
-// changes, so reading `methods.data.get()` while rendering stays current.
+/**
+ * @cc [owner:jchen0824,label:react] stable-methods-reference
+ * Within one mounted `VirtuosoMessageList`, `useVirtuosoMethods` MUST return the same object on
+ * every render, including after data changes, and so must the list's ref. The caller MUST still
+ * re-render when the data changes, so `methods.data.get()` read while rendering is current.
+ */
 export function useVirtuosoMethods<
   Data,
   Context = unknown,
 >(): VirtuosoMessageListMethods<Data, Context> {
-  const { store, methods } = useListRuntime("useVirtuosoMethods");
+  const { store, methods } = useListRuntime<Data, Context>(
+    "useVirtuosoMethods"
+  );
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
-  return methods as unknown as VirtuosoMessageListMethods<Data, Context>;
+  return methods;
 }
 
 export function useVirtuosoLocation(): ListScrollLocation {
-  const { location } = useListRuntime("useVirtuosoLocation");
+  const { location } = useListRuntime<unknown, unknown>("useVirtuosoLocation");
   return useSyncExternalStore(location.subscribe, location.get, location.get);
+}
+
+interface VirtuosoMessageListLicenseProps {
+  children: ReactNode;
+  // Accepted for compatibility and ignored.
+  licenseKey: string;
 }
 
 // No license is needed: this list is built on the MIT-licensed react-virtuoso.
 export function VirtuosoMessageListLicense({
   children,
-}: {
-  children: ReactNode;
-  licenseKey: string;
-}) {
+}: VirtuosoMessageListLicenseProps) {
   return <>{children}</>;
 }
 
 // A formatting context keeps item margins inside the measured item. The
 // element is registered with the item it renders, so measurements never rely
 // on indexes that may have shifted since the last render.
+interface ListItemWrapperProps<Data, Context>
+  extends ItemProps<Data>,
+    ContextProp<Context> {}
+
 function ListItemWrapper<Data, Context>({
   item,
   context: _context,
   style,
   ...props
-}: ItemProps<Data> & ContextProp<Context>) {
+}: ListItemWrapperProps<Data, Context>) {
   const runtime = useContext(MessageListRuntimeContext);
   const register = useCallback(
     (element: HTMLDivElement | null) => {
-      if (element) {
-        runtime?.registerItemElement(element, item);
+      if (element && isListRuntime<Data, Context>(runtime)) {
+        runtime.registerItemElement(element, item);
       }
     },
     [runtime, item]
@@ -867,12 +1004,10 @@ function ListItemWrapper<Data, Context>({
 
 const VIRTUOSO_COMPONENTS = { Item: ListItemWrapper };
 
-type MessageListComponentProps<Data, Context> = VirtuosoMessageListProps<
-  Data,
-  Context
-> & {
+interface MessageListComponentProps<Data, Context>
+  extends VirtuosoMessageListProps<Data, Context> {
   methodsRef: ForwardedRef<VirtuosoMessageListMethods<Data, Context>>;
-};
+}
 
 function MessageListComponent<Data, Context>({
   computeItemKey,
@@ -894,20 +1029,15 @@ function MessageListComponent<Data, Context>({
 }: MessageListComponentProps<Data, Context>) {
   const [store] = useState(() => new MessageListStore<Data, Context>());
   const [controller] = useState(
-    () => new ListController<Data, Context>(store, new LocationSource())
+    () =>
+      new ListController<Data, Context>(store, new LocationSource(), context)
   );
-  const runtime = useMemo<ListRuntime>(
+  const runtime = useMemo<ListRuntime<Data, Context>>(
     () => ({
-      store: store as unknown as MessageListStore<unknown, unknown>,
-      methods: controller.methods as unknown as VirtuosoMessageListMethods<
-        unknown,
-        unknown
-      >,
       location: controller.location,
-      registerItemElement: controller.registerItemElement as (
-        element: Element,
-        item: unknown
-      ) => void,
+      methods: controller.methods,
+      registerItemElement: controller.registerItemElement,
+      store,
     }),
     [store, controller]
   );
@@ -1156,7 +1286,7 @@ function MessageListComponent<Data, Context>({
         >
           {items.length === 0 ? (
             EmptyPlaceholder ? (
-              <EmptyPlaceholder context={context as Context} />
+              <EmptyPlaceholder context={context} />
             ) : null
           ) : mountKey !== null ? (
             <Virtuoso<Data, Context>
@@ -1188,7 +1318,7 @@ function MessageListComponent<Data, Context>({
               zIndex: 1,
             }}
           >
-            <StickyFooter context={context as Context} />
+            <StickyFooter context={context} />
           </div>
         ) : null}
       </div>
@@ -1196,6 +1326,7 @@ function MessageListComponent<Data, Context>({
   );
 }
 
+// Generic forwardRef component, as Sparkle's SearchInputWithPopover.
 export const VirtuosoMessageList = forwardRef<
   VirtuosoMessageListMethods<unknown, unknown>,
   VirtuosoMessageListProps<unknown, unknown>
