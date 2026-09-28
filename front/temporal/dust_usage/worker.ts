@@ -1,4 +1,5 @@
 import { setTimeout } from "node:timers/promises";
+import config from "@app/lib/api/config";
 import {
   dustPocDirectProviderMode,
   dustPocMode,
@@ -20,8 +21,13 @@ import logger from "@app/logger/logger";
 export async function runDustPocUsageReconciler(
   signal?: AbortSignal
 ): Promise<void> {
-  // Direct provider mode has no tenant route: its journal rows stay local.
-  if (!dustPocMode() || dustPocDirectProviderMode()) {
+  // Claims never include direct provider rows, which stay local. Keep
+  // reconciling signed rows whenever a signed registry is configured.
+  if (
+    !dustPocMode() ||
+    (dustPocDirectProviderMode() &&
+      !config.getOptionalDustFrontRegistrySignerUrl())
+  ) {
     return;
   }
   async function runLoop(task: () => Promise<void>, intervalMs: number) {

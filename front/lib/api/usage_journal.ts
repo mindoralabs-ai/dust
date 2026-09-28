@@ -8,6 +8,8 @@ export type {
 } from "@app/lib/resources/dust_usage_attempt_resource";
 export {
   buildFrontUsageEnvelope,
+  DIRECT_POC_ATTEMPT_RESERVATION_TOKENS,
+  DIRECT_POC_TENANT_ID,
   frontUsageRouteBindingHash,
   newFrontUsageAttemptId,
 } from "@app/lib/resources/dust_usage_attempt_resource";
@@ -26,5 +28,5 @@ export const claimFrontUsageWork = DustUsageAttemptResource.claimWork;
 export const validateFrontUsageClaim = DustUsageAttemptResource.validateClaim;
 export const completeFrontUsageClaim = DustUsageAttemptResource.completeClaim;
 export const deferFrontUsageClaim = DustUsageAttemptResource.deferClaim;
-export const sumFrontUsageExactTokensSince =
-  DustUsageAttemptResource.sumExactTokensSince;
+export const startDirectFrontUsageAttemptWithinLimit =
+  DustUsageAttemptResource.startDirectWithinLimit;

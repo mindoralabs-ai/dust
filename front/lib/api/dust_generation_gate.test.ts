@@ -17,9 +17,8 @@ import {
 import {
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
-  startFrontUsageAttempt,
+  startDirectFrontUsageAttemptWithinLimit,
   startFrontUsageAttemptForAdmission,
-  sumFrontUsageExactTokensSince,
 } from "@app/lib/api/usage_journal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,19 +27,19 @@ vi.mock("@app/lib/api/usage_admission", async (importOriginal) => ({
   requireDustAdmission: vi.fn(),
 }));
 vi.mock("@app/lib/api/usage_journal", () => ({
+  DIRECT_POC_ATTEMPT_RESERVATION_TOKENS: 64_000,
+  DIRECT_POC_TENANT_ID: "poc-direct",
   newFrontUsageAttemptId: vi.fn(),
-  startFrontUsageAttempt: vi.fn(),
+  startDirectFrontUsageAttemptWithinLimit: vi.fn(),
   startFrontUsageAttemptForAdmission: vi.fn(),
   settleFrontUsageNoCharge: vi.fn(),
-  sumFrontUsageExactTokensSince: vi.fn(),
 }));
 
 const admit = vi.mocked(requireDustAdmission);
 const newId = vi.mocked(newFrontUsageAttemptId);
 const start = vi.mocked(startFrontUsageAttemptForAdmission);
 const noCharge = vi.mocked(settleFrontUsageNoCharge);
-const startDirect = vi.mocked(startFrontUsageAttempt);
-const usedTokens = vi.mocked(sumFrontUsageExactTokensSince);
+const startDirect = vi.mocked(startDirectFrontUsageAttemptWithinLimit);
 
 function identity(tenant: "a" | "b"): ActiveDustIdentity {
   return {
@@ -295,7 +294,7 @@ describe("Dust Front direct POC generation gate", () => {
       conversationId: "conversation-a",
       model: "gemini-3.7-flash",
       directWorkspaceId: "workspace-a",
-      dailyTokenLimit: 1000,
+      dailyTokenLimit: 1_000_000,
       ...overrides,
     };
   }
@@ -305,10 +304,9 @@ describe("Dust Front direct POC generation gate", () => {
     let next = 0;
     newId.mockImplementation(() => `direct-${++next}`);
     startDirect.mockResolvedValue("created");
-    usedTokens.mockResolvedValue(0);
   });
 
-  it("journals one local attempt and issues a single-use permit", async () => {
+  it("journals one local attempt within the limit and issues a single-use permit", async () => {
     const authorized = await authorizeDirectDustGenerationAttempt(
       directInput()
     );
@@ -321,7 +319,7 @@ describe("Dust Front direct POC generation gate", () => {
       model: "gemini-3.7-flash",
       routeId: `${DIRECT_POC_TENANT_ID}:0`,
     });
-    const [journaled, route] = startDirect.mock.calls[0];
+    const [journaled, route, window] = startDirect.mock.calls[0];
     expect(journaled).toBe(authorized.attempt);
     expect(route).toMatchObject({
       tenantId: DIRECT_POC_TENANT_ID,
@@ -330,9 +328,8 @@ describe("Dust Front direct POC generation gate", () => {
     });
     // Direct mode has no admission or delivery destination.
     expect(JSON.stringify(route)).not.toContain("http");
-    const [tenantId, since] = usedTokens.mock.calls[0];
-    expect(tenantId).toBe(DIRECT_POC_TENANT_ID);
-    expect(since.toISOString()).toMatch(/T00:00:00\.000Z$/);
+    expect(window.dailyTokenLimit).toBe(1_000_000);
+    expect(window.since.toISOString()).toMatch(/T00:00:00\.000Z$/);
     expect(admit).not.toHaveBeenCalled();
     expect(
       consumeDustProviderPermit(authorized.providerPermit, "direct-1")
@@ -348,28 +345,17 @@ describe("Dust Front direct POC generation gate", () => {
         directInput({ identity: identity("b") })
       )
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
-    expect(usedTokens).not.toHaveBeenCalled();
     expect(startDirect).not.toHaveBeenCalled();
   });
 
-  it("refuses once the daily token limit is reached", async () => {
-    usedTokens.mockResolvedValueOnce(1000);
+  it("refuses a request that would exceed the daily limit", async () => {
+    startDirect.mockResolvedValue("over_limit");
     await expect(
       authorizeDirectDustGenerationAttempt(directInput())
     ).rejects.toBeInstanceOf(DustAdmissionDeniedError);
-    // A refused request never mints an attempt or journal row.
-    expect(newId).not.toHaveBeenCalled();
-    expect(startDirect).not.toHaveBeenCalled();
-
-    usedTokens.mockResolvedValueOnce(999);
-    await expect(
-      authorizeDirectDustGenerationAttempt(directInput())
-    ).resolves.toMatchObject({ attempt: { attemptId: "direct-1" } });
-    expect(startDirect).toHaveBeenCalledTimes(1);
   });
 
   it.each([
-    ["an unreadable journal", () => usedTokens.mockRejectedValue(new Error())],
     [
       "a failed journal start",
       () => startDirect.mockRejectedValue(new Error()),
@@ -387,10 +373,11 @@ describe("Dust Front direct POC generation gate", () => {
     -1,
     1.5,
     Number.NaN,
+    63_999,
   ])("rejects a daily token limit of %s", async (dailyTokenLimit) => {
     await expect(
       authorizeDirectDustGenerationAttempt(directInput({ dailyTokenLimit }))
     ).rejects.toBeInstanceOf(DustGenerationGateUnavailable);
-    expect(usedTokens).not.toHaveBeenCalled();
+    expect(startDirect).not.toHaveBeenCalled();
   });
 });

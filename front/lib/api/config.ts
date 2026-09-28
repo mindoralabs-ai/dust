@@ -55,6 +55,8 @@ const config = {
     EnvironmentConfig.getEnvVariable("DUST_POC_DIRECT_DAILY_TOKEN_LIMIT"),
   getDustFrontRegistryMinRevision: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_MIN_REVISION"),
+  getOptionalDustFrontRegistrySignerUrl: (): string | undefined =>
+    EnvironmentConfig.getOptionalEnvVariable("DUST_FRONT_REGISTRY_SIGNER_URL"),
   getDustFrontRegistrySignerUrl: (): string =>
     EnvironmentConfig.getEnvVariable("DUST_FRONT_REGISTRY_SIGNER_URL"),
   getDustFrontRegistryExportKeyFile: (): string =>

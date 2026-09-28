@@ -12,11 +12,12 @@ import type {
   FrontUsageStartPermit,
 } from "@app/lib/api/usage_journal";
 import {
+  DIRECT_POC_ATTEMPT_RESERVATION_TOKENS,
+  DIRECT_POC_TENANT_ID,
   newFrontUsageAttemptId,
   settleFrontUsageNoCharge,
-  startFrontUsageAttempt,
+  startDirectFrontUsageAttemptWithinLimit,
   startFrontUsageAttemptForAdmission,
-  sumFrontUsageExactTokensSince,
 } from "@app/lib/api/usage_journal";
 
 /** This module is for authenticated server-side generation paths only. */
@@ -148,9 +149,6 @@ export async function authorizeDustGenerationAttempt({
   return Object.freeze({ attempt, providerPermit });
 }
 
-/** Journal tenant of the one POC workspace served in direct provider mode. */
-export const DIRECT_POC_TENANT_ID = "poc-direct";
-
 // Direct mode never admits or delivers remotely, so the route has no network
 // destination. Fixed fields keep the journal's route binding stable.
 function directPocRoute(workspaceId: string): TenantRoute {
@@ -179,12 +177,16 @@ export type DirectDustGenerationGateInput = {
   dailyTokenLimit: number;
 };
 
+export { DIRECT_POC_TENANT_ID };
+
 /**
  * @cc [owner:jchen0824,label:security;backend] dust-poc-direct-generation
  * Direct provider mode serves exactly one configured POC workspace without the
  * signed registry or CRM admission. Each provider request still needs a newly
- * committed journal row and a single-use permit, and is refused once the
- * workspace's exact tokens for the current UTC day reach the configured limit.
+ * committed journal row and a single-use permit. The limit check and that row
+ * are serialized per workspace, and a request is refused when the workspace's
+ * exact tokens for the current UTC day, plus a fixed reservation for each of
+ * its unsettled attempts that day including this one, would exceed the limit.
  */
 export async function authorizeDirectDustGenerationAttempt({
   identity,
@@ -196,24 +198,9 @@ export async function authorizeDirectDustGenerationAttempt({
   if (
     identity.workspaceId !== directWorkspaceId ||
     !Number.isSafeInteger(dailyTokenLimit) ||
-    dailyTokenLimit < 1
+    dailyTokenLimit < DIRECT_POC_ATTEMPT_RESERVATION_TOKENS
   ) {
     throw new DustGenerationGateUnavailable();
-  }
-
-  const dayStart = new Date();
-  dayStart.setUTCHours(0, 0, 0, 0);
-  let usedTokens: number;
-  try {
-    usedTokens = await sumFrontUsageExactTokensSince(
-      DIRECT_POC_TENANT_ID,
-      dayStart
-    );
-  } catch {
-    throw new DustGenerationGateUnavailable();
-  }
-  if (usedTokens >= dailyTokenLimit) {
-    throw new DustAdmissionDeniedError();
   }
 
   const route = directPocRoute(directWorkspaceId);
@@ -225,11 +212,21 @@ export async function authorizeDirectDustGenerationAttempt({
     model,
     routeId: `${route.tenantId}:${route.revision}`,
   });
-  let started: Awaited<ReturnType<typeof startFrontUsageAttempt>>;
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+  let started: Awaited<
+    ReturnType<typeof startDirectFrontUsageAttemptWithinLimit>
+  >;
   try {
-    started = await startFrontUsageAttempt(attempt, route);
+    started = await startDirectFrontUsageAttemptWithinLimit(attempt, route, {
+      since: dayStart,
+      dailyTokenLimit,
+    });
   } catch {
     throw new DustGenerationGateUnavailable();
+  }
+  if (started === "over_limit") {
+    throw new DustAdmissionDeniedError();
   }
   // A duplicate is never another allowance.
   if (started !== "created") {

@@ -40,7 +40,7 @@ describe("Dust POC accounting worker", () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
-  it("does not start in direct provider mode", async () => {
+  it("does not start in direct provider mode without a signed registry", async () => {
     vi.stubEnv("DUST_POC_MODE", "1");
     vi.stubEnv("DUST_POC_DIRECT_PROVIDER_MODE", "1");
     const { runDustPocUsageReconciler } = await import(
@@ -52,8 +52,13 @@ describe("Dust POC accounting worker", () => {
     expect(heartbeat).not.toHaveBeenCalled();
   });
 
-  it("runs one bounded accounting batch without a provider switch", async () => {
+  it.each([
+    ["registry mode", "0"],
+    ["direct provider mode with a signed registry", "1"],
+  ])("runs one bounded accounting batch in %s", async (_label, direct) => {
     vi.stubEnv("DUST_POC_MODE", "1");
+    vi.stubEnv("DUST_POC_DIRECT_PROVIDER_MODE", direct);
+    vi.stubEnv("DUST_FRONT_REGISTRY_SIGNER_URL", "https://signer.internal");
     const { runDustPocUsageReconciler } = await import(
       "@app/temporal/dust_usage/worker"
     );
