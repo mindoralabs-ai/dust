@@ -2,10 +2,13 @@ import { buildPickModelSlashCommandItems } from "@app/components/editor/extensio
 import type { EnabledModelConfigurationType } from "@app/types/api/assistant/models";
 import { CLAUDE_SONNET_5_DEFAULT_MODEL_CONFIG } from "@app/types/assistant/models/anthropic";
 import { AUTO_COMPLEX_MODEL_CONFIG } from "@app/types/assistant/models/auto";
-import { GEMINI_3_1_FLASH_LITE_MODEL_CONFIG } from "@app/types/assistant/models/google_ai_studio";
+import {
+  GEMINI_3_1_FLASH_LITE_MODEL_CONFIG,
+  GEMINI_3_7_FLASH_MODEL_CONFIG,
+} from "@app/types/assistant/models/google_ai_studio";
 import { GPT_4_1_MODEL_CONFIG } from "@app/types/assistant/models/openai";
 import type { ModelConfigurationType } from "@app/types/assistant/models/types";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const Icon = () => null;
 
@@ -131,5 +134,35 @@ describe("buildPickModelSlashCommandItems", () => {
       `${CLAUDE_SONNET_5_DEFAULT_MODEL_CONFIG.displayName} Light`,
       `${CLAUDE_SONNET_5_DEFAULT_MODEL_CONFIG.displayName} Medium`,
     ]);
+  });
+});
+
+describe("buildPickModelSlashCommandItems in the isolated POC", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("offers no tier, since the POC runs a single model", async () => {
+    vi.resetModules();
+    vi.stubEnv("VITE_DUST_POC_MODE", "1");
+    // The POC flag is read when the module loads, so import it afresh.
+    const { buildPickModelSlashCommandItems: buildForPoc } = await import(
+      "@app/components/editor/extensions/shared/slash_suggestion/buildPickModelSlashCommandItems"
+    );
+    const items = buildForPoc({
+      getModelIcon: () => Icon,
+      lockPremiumEfforts: false,
+      models: [asSelectable(GEMINI_3_7_FLASH_MODEL_CONFIG)],
+      query: "",
+      streams: null,
+    });
+
+    expect(
+      items.some((item) => item.data.selection.display.kind === "tier")
+    ).toBe(false);
+    expect(items.map((item) => item.label)).toContain(
+      `${GEMINI_3_7_FLASH_MODEL_CONFIG.displayName} Light`
+    );
   });
 });
