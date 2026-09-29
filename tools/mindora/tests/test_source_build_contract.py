@@ -64,6 +64,23 @@ class SourceBuildContractTest(unittest.TestCase):
         self.assertIn("ENV NEXT_PUBLIC_COMMIT_HASH=${COMMIT_HASH}\n", runtime_stage)
         self.assertIn("ENV DD_GIT_COMMIT_SHA=${DD_GIT_COMMIT_SHA}\n", runtime_stage)
 
+    def test_spa_static_website_url_is_available_during_vite_build(self) -> None:
+        # config.getStaticWebsiteUrl() throws in the browser when this is not inlined.
+        dockerfile = SPA_DOCKERFILE.read_text(encoding="utf-8")
+        build_stage = dockerfile.split("\nFROM nginx:", maxsplit=1)[0]
+        env = "ENV NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL=${NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL}"
+
+        self.assertIn("ARG NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL\n", build_stage)
+        self.assertIn(env + "\n", build_stage)
+        self.assertLess(
+            build_stage.index(env),
+            build_stage.index("RUN npm -w front-spa run build:app"),
+        )
+        self.assertRegex(
+            WORKFLOW.read_text(encoding="utf-8"),
+            r"--build-arg NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL=\S+ \\\n",
+        )
+
     def test_core_image_builds_and_packages_database_initializer(self) -> None:
         dockerfile = CORE_DOCKERFILE.read_text(encoding="utf-8")
         build_stage, runtime_stage = dockerfile.split(

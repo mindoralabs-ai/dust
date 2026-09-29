@@ -123,6 +123,10 @@ docker build --platform linux/amd64 \
   -t "mindora-dust-front-api:$(git rev-parse HEAD)" .
 ```
 
+The SPA inlines its origins at build time. `dockerfiles/front-spa.Dockerfile` needs the
+`NEXT_PUBLIC_DUST_API_URL`, `NEXT_PUBLIC_DUST_APP_URL` and
+`NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL` build arguments, or pages that link to the website crash.
+
 The CI workflow verifies that its checkout equals `GITHUB_SHA` and that the
 pinned Dust source is an ancestor before building. Runtime commit metadata uses
 that actual patched `GITHUB_SHA`; `DUST_SOURCE_SHA` remains separate upstream
