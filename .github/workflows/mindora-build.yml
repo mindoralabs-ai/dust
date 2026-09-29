@@ -114,6 +114,7 @@ jobs:
             --build-arg "COMMIT_HASH_LONG=$GITHUB_SHA" \
             --build-arg NEXT_PUBLIC_DUST_API_URL=http://localhost:3000 \
             --build-arg NEXT_PUBLIC_DUST_APP_URL=http://localhost:8080 \
+            --build-arg NEXT_PUBLIC_DUST_STATIC_WEBSITE_URL=http://localhost:8080 \
             --build-arg DUST_POC_MODE=1 \
             --tag "mindora-dust-${BUILD_KEY}:${GITHUB_SHA}" .
       - name: Smoke search bootstrap artifacts in built image
