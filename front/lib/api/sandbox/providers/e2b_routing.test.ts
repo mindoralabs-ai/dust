@@ -17,11 +17,12 @@ const API_URL = "http://e2b-api.test:50001";
 const SANDBOX_URL = "http://192.0.2.10:3002";
 const SANDBOX_ID = "isbxrouting1234567890";
 
-// A self-hosted E2B reached through fixed private addresses (E2B_API_URL and
-// E2B_SANDBOX_URL) gives the client proxy no sandbox ID in the host name. The proxy
-// then routes each request by its E2b-Sandbox-Id and E2b-Sandbox-Port headers, and a
-// request without them never reaches the sandbox. e2b 2.14.0 and earlier sent them on
-// RPC calls only, not on file reads and writes.
+// Enforces @cc fixed-address-sandbox-routing (./e2b.ts). A self-hosted E2B reached
+// through fixed private addresses (E2B_API_URL and E2B_SANDBOX_URL) gives the client
+// proxy no sandbox ID in the host name. The proxy then routes each request by its
+// E2b-Sandbox-Id and E2b-Sandbox-Port headers, and a request without them never reaches
+// the sandbox. e2b 2.14.0 and earlier sent them on RPC calls only, not on file reads and
+// writes.
 describe("E2BSandboxProvider through a fixed sandbox address", () => {
   const requests: Request[] = [];
 
