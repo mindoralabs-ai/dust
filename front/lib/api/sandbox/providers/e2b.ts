@@ -343,6 +343,14 @@ interface CachedConnection {
  * All E2B-specific logic is isolated here — the rest of the codebase only
  * sees the SandboxProvider interface.
  */
+/**
+ * @cc [owner:jchen0824,label:backend] fixed-address-sandbox-routing
+ * When `E2B_SANDBOX_URL` names a fixed proxy address, every request to a sandbox, file
+ * reads and writes included, MUST carry its `E2b-Sandbox-Id` and `E2b-Sandbox-Port`
+ * headers: E2B's client proxy routes an IP host by those headers alone. Sandbox calls
+ * therefore go through the SDK's `Sandbox` handle, and the e2b SDK stays at 2.14.1 or
+ * later, the first release that adds the headers to its envd HTTP client.
+ */
 export class E2BSandboxProvider implements SandboxProvider {
   private readonly apiKey: string;
   private readonly domain: string | undefined;
