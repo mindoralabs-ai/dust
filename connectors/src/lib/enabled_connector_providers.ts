@@ -31,10 +31,26 @@ export function isKnownConnectorProvider(
 }
 
 /**
+ * @cc [owner:jchen0824,label:security] connectors-provider-groups
+ * `PROVIDER_GROUPS[worker]` lists the connector providers that the Temporal worker `worker` of
+ * `WORKER_PROVIDERS` does work for together. They share that worker's workflows, activities and
+ * code, which do not check which of them a connector belongs to, so a list MUST enable all of them
+ * or none.
+ */
+export const PROVIDER_GROUPS = {
+  slack: ["slack", "slack_bot"],
+} as const satisfies Record<
+  string,
+  readonly [ConnectorProvider, ConnectorProvider, ...ConnectorProvider[]]
+>;
+
+/**
  * @cc [owner:jchen0824,label:security;error-handling] connectors-enabled-providers-format
  * An unset `CONNECTORS_ENABLED_PROVIDERS` returns `null`: every provider is enabled. A set value,
  * including the empty string, MUST be a comma-separated list of known connector provider names,
- * each trimmed. An empty, unknown or repeated entry returns an error, never a partial list.
+ * each trimmed. An empty, unknown or repeated entry returns an error, never a partial list. A list
+ * that enables some but not all providers of a `PROVIDER_GROUPS` entry returns an error naming
+ * every provider of that group and its worker.
  */
 export function parseEnabledConnectorProviders(
   value: string | undefined
@@ -64,6 +80,19 @@ export function parseEnabledConnectorProviders(
       );
     }
     providers.add(name);
+  }
+
+  for (const [worker, group] of Object.entries(PROVIDER_GROUPS)) {
+    const enabled = group.filter((p) => providers.has(p));
+    const missing = group.filter((p) => !providers.has(p));
+    if (enabled.length > 0 && missing.length > 0) {
+      return new Err(
+        new Error(
+          `CONNECTORS_ENABLED_PROVIDERS enables ${enabled.join(", ")} but not ${missing.join(", ")}: ` +
+            `${group.join(" and ")} share the ${worker} worker and must be enabled together`
+        )
+      );
+    }
   }
 
   return new Ok(providers);

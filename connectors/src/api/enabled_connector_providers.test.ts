@@ -9,6 +9,7 @@ import {
   ADMIN_COMMAND_TARGETS,
   checkAdminCommandProvidersEnabled,
 } from "@connectors/api/admin";
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { isAppMentionMessage } from "@connectors/api/webhooks/slack/utils";
 import { startServer } from "@connectors/api_server";
 import { DustProjectConnectorManager } from "@connectors/connectors/dust_project";
@@ -21,21 +22,19 @@ import { submitFeedbackToAPI } from "@connectors/connectors/slack/feedback_api";
 import { getSlackClientForTeam } from "@connectors/connectors/slack/feedback_modal";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
 import {
-  attemptChannelJoinActivity,
-  autoReadChannelActivity,
-  migrateChannelsFromLegacyBotToNewBotActivity,
-} from "@connectors/connectors/slack/temporal/activities";
-import {
   launchJoinChannelWorkflow,
-  launchSlackGarbageCollectWorkflow,
   launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow,
   launchSlackWebhookEventWorkflow,
 } from "@connectors/connectors/slack/temporal/client";
 import { processSlackWebhookEventActivity } from "@connectors/connectors/slack/temporal/webhook_activities";
+import { SlackBotConnectorManager } from "@connectors/connectors/slack_bot";
 import { WebcrawlerConnectorManager } from "@connectors/connectors/webcrawler";
 import { launchFirecrawlCrawlStartedWorkflow } from "@connectors/connectors/webcrawler/temporal/client";
 import { runCommand } from "@connectors/lib/cli";
-import { parseEnabledConnectorProviders } from "@connectors/lib/enabled_connector_providers";
+import {
+  PROVIDER_GROUPS,
+  parseEnabledConnectorProviders,
+} from "@connectors/lib/enabled_connector_providers";
 import { GithubConnectorStateModel } from "@connectors/lib/models/github";
 import { NotionConnectorStateModel } from "@connectors/lib/models/notion";
 import {
@@ -87,7 +86,6 @@ vi.mock(
   async (importOriginal) => ({
     ...(await importOriginal()),
     launchJoinChannelWorkflow: vi.fn(),
-    launchSlackGarbageCollectWorkflow: vi.fn(),
     launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow: vi.fn(),
     launchSlackWebhookEventWorkflow: vi.fn(),
   })
@@ -131,6 +129,21 @@ vi.mock(
   })
 );
 
+function partialSlackError(enabled: SlackProvider, missing: SlackProvider) {
+  return `CONNECTORS_ENABLED_PROVIDERS enables ${enabled} but not ${missing}: slack and slack_bot share the slack worker and must be enabled together`;
+}
+
+// Lists that enable one Slack provider without the other, and the error they parse to.
+const PARTIAL_SLACK_LISTS = [
+  { list: "slack", error: partialSlackError("slack", "slack_bot") },
+  { list: "slack_bot", error: partialSlackError("slack_bot", "slack") },
+  {
+    list: "dust_project,slack_bot",
+    error: partialSlackError("slack_bot", "slack"),
+  },
+  { list: " notion , slack ", error: partialSlackError("slack", "slack_bot") },
+];
+
 const MALFORMED_VALUES = [
   "",
   " ",
@@ -141,7 +154,30 @@ const MALFORMED_VALUES = [
   "Dust_Project",
   "dust_project,dust_project",
   "constructor",
+  ...PARTIAL_SLACK_LISTS.map(({ list }) => list),
 ];
+
+// Keyed by `ConnectorProvider`, so that a provider added upstream fails type-checking here until it
+// is listed.
+const EVERY_PROVIDER: Record<ConnectorProvider, true> = {
+  bigquery: true,
+  confluence: true,
+  discord_bot: true,
+  dust_project: true,
+  github: true,
+  gong: true,
+  google_drive: true,
+  intercom: true,
+  microsoft: true,
+  microsoft_bot: true,
+  notion: true,
+  salesforce: true,
+  slack: true,
+  slack_bot: true,
+  snowflake: true,
+  webcrawler: true,
+  zendesk: true,
+};
 
 const WEBCRAWLER_CONFIGURATION = {
   url: "https://example.com",
@@ -265,6 +301,18 @@ function notEnabled(providers: readonly string[]): ApiResponse {
       },
     },
   };
+}
+
+function misconfiguredError(error: string) {
+  return {
+    type: "internal_server_error",
+    message: `Invalid connectors configuration: ${error}`,
+  };
+}
+
+// The answer to any guarded request while the list is malformed with `error`.
+function misconfigured(error: string): ApiResponse {
+  return { status: 500, body: { error: misconfiguredError(error) } };
 }
 
 function createRequest(provider: string, configuration: unknown = null) {
@@ -640,7 +688,6 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "PATCH /slack/channels/linked_with_agent",
     provider: "slack",
-    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare(provider) {
       const connector = await makeConnector(provider);
@@ -682,7 +729,6 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack",
     provider: "slack",
-    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare() {
       vi.mocked(launchSlackWebhookEventWorkflow).mockResolvedValue(
@@ -712,7 +758,6 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_interaction",
     provider: "slack",
-    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare() {
       vi.mocked(botReplaceMention).mockResolvedValue(new Ok(undefined));
@@ -738,7 +783,6 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_bot",
     provider: "slack_bot",
-    disablingList: "slack",
     servesDustProject: false,
     async prepare() {
       return {
@@ -758,7 +802,6 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_bot_interaction",
     provider: "slack_bot",
-    disablingList: "slack",
     servesDustProject: false,
     async prepare() {
       vi.mocked(botReplaceMention).mockResolvedValue(new Ok(undefined));
@@ -1007,9 +1050,16 @@ describe("startServer", () => {
     expect(processListenerCounts()).toEqual(before);
   });
 
-  it("exits the API entrypoint with that error before it listens", {
+  it.each([
+    {
+      list: "dust_project,notio",
+      error:
+        "CONNECTORS_ENABLED_PROVIDERS names an unknown connector provider: notio",
+    },
+    { list: "slack_bot", error: partialSlackError("slack_bot", "slack") },
+  ])("exits the API entrypoint with that error before it listens when the list is $list", {
     timeout: 60_000,
-  }, async () => {
+  }, async ({ list, error }) => {
     const run = promisify(execFile)(
       process.execPath,
       ["--import", "tsx", "src/start_server.ts", "-p", "3002"],
@@ -1022,7 +1072,7 @@ describe("startServer", () => {
           CONNECTORS_DATABASE_URI: "postgres://localhost/unused_test",
           DUST_CONNECTORS_SECRET: secrets.api,
           DUST_CONNECTORS_WEBHOOKS_SECRET: secrets.webhooks,
-          CONNECTORS_ENABLED_PROVIDERS: "dust_project,notio",
+          CONNECTORS_ENABLED_PROVIDERS: list,
         },
         // A process that started listening would never exit.
         timeout: 50_000,
@@ -1032,7 +1082,7 @@ describe("startServer", () => {
     await expect(run).rejects.toMatchObject({
       code: 1,
       stderr: expect.stringContaining(
-        "Invalid connectors configuration: CONNECTORS_ENABLED_PROVIDERS names an unknown connector provider: notio"
+        `Invalid connectors configuration: ${error}`
       ),
     });
   });
@@ -1054,6 +1104,61 @@ describe("parseEnabledConnectorProviders", () => {
 
   it.each(MALFORMED_VALUES)("rejects %j", (value) => {
     expect(parseEnabledConnectorProviders(value).isErr()).toBe(true);
+  });
+
+  it.each(
+    PARTIAL_SLACK_LISTS
+  )("rejects $list, which enables one Slack provider without the other", ({
+    list,
+    error,
+  }) => {
+    const res = parseEnabledConnectorProviders(list);
+    expect(res.isErr() && res.error.message).toBe(error);
+  });
+
+  it("accepts a list that enables slack and slack_bot together", () => {
+    for (const list of ["slack,slack_bot", " slack_bot , dust_project,slack"]) {
+      const res = parseEnabledConnectorProviders(list);
+      expect(res.isOk() && res.value?.has("slack")).toBe(true);
+      expect(res.isOk() && res.value?.has("slack_bot")).toBe(true);
+    }
+  });
+
+  it("accepts a list that enables neither Slack provider", () => {
+    for (const list of ["dust_project", "dust_project,notion"]) {
+      expect(parseEnabledConnectorProviders(list).isOk()).toBe(true);
+    }
+  });
+
+  it("rejects a list that enables only some providers of any provider group", () => {
+    for (const [worker, group] of Object.entries(PROVIDER_GROUPS)) {
+      expect(parseEnabledConnectorProviders(group.join(",")).isOk()).toBe(true);
+      for (const provider of group) {
+        const res = parseEnabledConnectorProviders(provider);
+        expect(res.isErr() && res.error.message).toContain(
+          `${group.join(" and ")} share the ${worker} worker and must be enabled together`
+        );
+      }
+    }
+  });
+});
+
+describe("checkConnectorProviderEnabled", () => {
+  it.each(
+    PARTIAL_SLACK_LISTS
+  )("refuses every provider as misconfigured when the list is $list", ({
+    list,
+    error,
+  }) => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+
+    for (const provider of Object.keys(EVERY_PROVIDER)) {
+      const res = checkConnectorProviderEnabled(provider);
+      expect(res.isErr() && res.error).toEqual({
+        status_code: 500,
+        api_error: misconfiguredError(error),
+      });
+    }
   });
 });
 
@@ -1116,11 +1221,27 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
           await prepared.expectHandled(await send(prepared.request));
         });
       }
+
+      // The API refuses to start under such a list, so it changes after startup.
+      it.each(
+        PARTIAL_SLACK_LISTS
+      )("refuses as misconfigured when the list becomes $list after startup", async ({
+        list,
+        error,
+      }) => {
+        vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
+        const api = await startApi();
+        const prepared = await route.prepare(route.provider);
+        vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+
+        expect(await api.send(prepared.request)).toEqual(misconfigured(error));
+        await prepared.expectNoEffect?.();
+      });
     });
   }
 
-  it("serves the slack_bot webhook when the list enables slack_bot", async () => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+  it("serves the slack_bot webhook when the list enables slack and slack_bot", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
 
     expect(
       await send(
@@ -1132,8 +1253,8 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
     ).toEqual({ status: 200, body: { challenge: "challenge" } });
   });
 
-  it("serves the slack webhook when the list enables slack", async () => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
+  it("serves the slack webhook when the list enables slack and slack_bot", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
     vi.mocked(launchSlackWebhookEventWorkflow).mockResolvedValue(
       new Ok("workflow")
     );
@@ -1151,17 +1272,30 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
     expect(launchSlackWebhookEventWorkflow).toHaveBeenCalled();
   });
 
-  it("links channels of a slack_bot connector when the list enables slack_bot", async () => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+  function linkedWithAgentRoute() {
     const route = GUARDED_ROUTES.find(
       (r) => r.route === "PATCH /slack/channels/linked_with_agent"
     );
     if (!route) {
       throw new Error("linked_with_agent route missing from the table");
     }
-    const prepared = await route.prepare("slack_bot");
+    return route;
+  }
+
+  it("links channels of a slack_bot connector when the list enables slack and slack_bot", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
+    const prepared = await linkedWithAgentRoute().prepare("slack_bot");
 
     await prepared.expectHandled(await send(prepared.request));
+  });
+
+  // The route checks the connector's own type, not only `slack`.
+  it("refuses to link channels of a slack_bot connector when the list enables neither Slack provider", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "dust_project");
+    const prepared = await linkedWithAgentRoute().prepare("slack_bot");
+
+    expect(await send(prepared.request)).toEqual(notEnabled(["slack_bot"]));
+    await prepared.expectNoEffect?.();
   });
 
   it("refuses a provider name it does not know", async () => {
@@ -1245,9 +1379,10 @@ type AdminApiCase = {
 // Commands the admin route whitelists, sent through the app `startServer` builds.
 const ADMIN_API_CASES: AdminApiCase[] = [
   {
+    // It requires only the provider that providerType names, not its major command's slack.
     title:
-      "refuses slack run-auto-join on slack_bot when the list enables only slack",
-    list: "slack",
+      "refuses slack run-auto-join on slack_bot for slack_bot when the list enables neither Slack provider",
+    list: "dust_project",
     command: async () => ({
       majorCommand: "slack",
       command: "run-auto-join",
@@ -1267,20 +1402,9 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: null,
   },
   {
-    // It acts only on the slack_bot connector, not on the slack one.
     title:
-      "runs slack run-auto-join on slack_bot when the list enables only slack_bot",
-    list: "slack_bot",
-    command: async () => ({
-      majorCommand: "slack",
-      command: "run-auto-join",
-      args: { wId: "workspace", providerType: "slack_bot" },
-    }),
-    refusal: null,
-  },
-  {
-    title: "runs slack run-auto-join on slack when the list enables slack",
-    list: "slack",
+      "runs slack run-auto-join on slack when the list enables slack and slack_bot",
+    list: "slack,slack_bot",
     command: async () => ({
       majorCommand: "slack",
       command: "run-auto-join",
@@ -1290,8 +1414,8 @@ const ADMIN_API_CASES: AdminApiCase[] = [
   },
   {
     title:
-      "refuses slack run-auto-join on slack when the list enables only slack_bot",
-    list: "slack_bot",
+      "refuses slack run-auto-join on slack when the list enables neither Slack provider",
+    list: "dust_project",
     command: async () => ({
       majorCommand: "slack",
       command: "run-auto-join",
@@ -1320,9 +1444,10 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: UNRESOLVED,
   },
   {
+    // It requires only the provider that providerType names, not its major command's slack.
     title:
-      "refuses slack whitelist-bot on slack_bot when the list enables only slack",
-    list: "slack",
+      "refuses slack whitelist-bot on slack_bot for slack_bot when the list enables neither Slack provider",
+    list: "dust_project",
     command: async () => ({
       majorCommand: "slack",
       command: "whitelist-bot",
@@ -1336,10 +1461,9 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: notEnabled(["slack_bot"]),
   },
   {
-    // It acts only on the slack_bot connector, not on the slack one.
     title:
-      "runs slack whitelist-bot on slack_bot when the list enables only slack_bot",
-    list: "slack_bot",
+      "runs slack whitelist-bot on slack_bot when the list enables slack and slack_bot",
+    list: "slack,slack_bot",
     command: async () => ({
       majorCommand: "slack",
       command: "whitelist-bot",
@@ -1354,8 +1478,8 @@ const ADMIN_API_CASES: AdminApiCase[] = [
   },
   {
     title:
-      "refuses slack whitelist-bot on slack when the list enables only slack_bot",
-    list: "slack_bot",
+      "refuses slack whitelist-bot on slack when the list enables neither Slack provider",
+    list: "dust_project",
     command: async () => ({
       majorCommand: "slack",
       command: "whitelist-bot",
@@ -1744,7 +1868,8 @@ describe("POST /connectors/admin command targets", () => {
       ).toBeNull();
     });
 
-    // It acts only on the slack_bot connector, not on the slack one.
+    // It acts only on the slack_bot connector, not on the slack one, so it requires slack_bot and
+    // not its major command's slack.
     it("runs slack whitelist-domains only when the list enables slack_bot", async () => {
       const slackCommand: AdminCommandType = {
         majorCommand: "slack",
@@ -1752,9 +1877,8 @@ describe("POST /connectors/admin command targets", () => {
         args: { wId: "workspace" },
       };
 
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
       expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
       expect(await checkAdmin(slackCommand)).toBeNull();
     });
 
@@ -1766,12 +1890,54 @@ describe("POST /connectors/admin command targets", () => {
         args: { wId: "workspace" },
       };
 
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
-      expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
       expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack"]));
       vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
       expect(await checkAdmin(slackCommand)).toBeNull();
+    });
+
+    it.each(
+      PARTIAL_SLACK_LISTS
+    )("refuses every slack command as misconfigured when the list is $list", async ({
+      list,
+      error,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+      const slackCommands: AdminCommandType[] = [
+        {
+          majorCommand: "slack",
+          command: "run-auto-join",
+          args: { wId: "workspace", providerType: "slack_bot" },
+        },
+        {
+          majorCommand: "slack",
+          command: "whitelist-bot",
+          args: {
+            wId: "workspace",
+            botName: "bot",
+            whitelistType: "index_messages",
+            providerType: "slack",
+          },
+        },
+        {
+          majorCommand: "slack",
+          command: "whitelist-domains",
+          args: { wId: "workspace" },
+        },
+        {
+          majorCommand: "slack",
+          command: "cutover-legacy-bot",
+          args: { wId: "workspace" },
+        },
+        {
+          majorCommand: "slack",
+          command: "sync-channel",
+          args: { wId: "workspace", channelId: "C1" },
+        },
+      ];
+
+      for (const slackCommand of slackCommands) {
+        expect(await checkAdmin(slackCommand)).toEqual(misconfigured(error));
+      }
     });
 
     it("refuses github resync-repo on a connector named by wId and dsId of a provider the list does not enable", async () => {
@@ -1838,23 +2004,26 @@ const ACTIVE_BOT_CASES: {
 }[] = [
   { list: undefined, activeBot: "slack", found: true },
   { list: undefined, activeBot: "slack_bot", found: true },
-  { list: "slack", activeBot: "slack", found: true },
+  { list: "slack,slack_bot", activeBot: "slack", found: true },
   { list: "slack,slack_bot", activeBot: "slack_bot", found: true },
-  { list: "slack_bot", activeBot: "slack", found: false },
-  { list: "slack", activeBot: "slack_bot", found: false },
-  { list: "dust_project", activeBot: "slack_bot", found: false },
+  { list: "dust_project", activeBot: "slack", found: false },
+  { list: "dust_project,notion", activeBot: "slack_bot", found: false },
+  // Malformed lists, including lists that enable one Slack provider without the other.
+  { list: "slack", activeBot: "slack", found: false },
+  { list: "slack_bot", activeBot: "slack_bot", found: false },
   { list: "slack_bot,", activeBot: "slack_bot", found: false },
 ];
 
 // The team's active bot is a connector of a provider the list does not enable.
 const REFUSED_ACTIVE_BOTS = [
-  { list: "slack_bot", activeBot: "slack" },
-  { list: "slack", activeBot: "slack_bot" },
+  { list: "dust_project", activeBot: "slack" },
+  { list: "dust_project", activeBot: "slack_bot" },
 ] as const;
 
 // Every caller of `SlackConfigurationResource.fetchByActiveBot` that can start work for the bot,
-// except the slack_bot webhook's own lookups, which the route tests below reach. `run` calls it for
-// team `T1` and checks its answer when it finds no bot.
+// except the slack_bot webhook's own lookups: that webhook runs only under a list that enables
+// slack_bot, and so slack, which enables the active bot's type. `run` calls it for team `T1` and
+// checks its answer when it finds no bot.
 const ACTIVE_BOT_CALLERS: { name: string; run: () => Promise<void> }[] = [
   {
     // Used by botAnswerMessage, botReplaceMention and botValidateToolExecution, which the slack,
@@ -1985,31 +2154,15 @@ describe("connectors that guarded handlers resolve beyond their route's check", 
       });
     }
 
-    it("answers a direct message to the slack_bot webhook with no bot when the active bot is a slack connector", async () => {
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
-      await makeSlackTeam("slack");
-
-      const res = await send(
-        jsonRequest("POST", webhookPath("slack_bot"), {
-          type: "event_callback",
-          team_id: "T1",
-          event: {
-            type: "message",
-            channel_type: "im",
-            channel: "D1",
-            user: "U1",
-            text: "hello",
-            ts: "1.0",
-          },
-        })
-      );
-
-      expect(res.status).toBe(421);
-      expect(getSlackClient).not.toHaveBeenCalled();
-    });
-
-    it("ignores a channel message to the slack_bot webhook when the active bot is a slack connector", async () => {
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+    // The API refuses to start under such a list, so it changes after startup.
+    it.each(
+      PARTIAL_SLACK_LISTS
+    )("refuses Slack bot events as misconfigured when the list becomes $list after startup", async ({
+      list,
+      error,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
+      const api = await startApi();
       const connectors = await makeSlackTeam("slack");
       await SlackChannelModel.create({
         connectorId: connectors.slack.id,
@@ -2020,36 +2173,35 @@ describe("connectors that guarded handlers resolve beyond their route's check", 
         agentConfigurationId: "agent",
         autoRespondWithoutMention: true,
       });
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
 
-      const res = await send(
-        jsonRequest("POST", webhookPath("slack_bot"), {
-          type: "event_callback",
-          team_id: "T1",
-          event: {
-            type: "message",
-            channel_type: "channel",
-            channel: "C1",
-            user: "U1",
-            text: "hello",
-            ts: "1.0",
-          },
-        })
-      );
+      for (const event of [
+        { channel_type: "im", channel: "D1" },
+        { channel_type: "channel", channel: "C1" },
+      ]) {
+        const res = await api.send(
+          jsonRequest("POST", webhookPath("slack_bot"), {
+            type: "event_callback",
+            team_id: "T1",
+            event: {
+              type: "message",
+              user: "U1",
+              text: "hello",
+              ts: "1.0",
+              ...event,
+            },
+          })
+        );
 
-      expect(res.status).toBe(200);
+        expect(res).toEqual(misconfigured(error));
+      }
       expect(getSlackClient).not.toHaveBeenCalled();
     });
   });
 
   describe("POST /connectors/:connector_id/config/botEnabled on slack_bot", () => {
-    it.each([
-      { list: "slack_bot", migrates: false },
-      { list: "slack,slack_bot", migrates: true },
-    ])("migrates the legacy slack connector's channels when the list is $list: $migrates", async ({
-      list,
-      migrates,
-    }) => {
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+    it("migrates the legacy slack connector's channels when the list enables slack and slack_bot", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
       const connectors = await makeSlackTeam(null);
 
       const res = await send(
@@ -2073,15 +2225,60 @@ describe("connectors that guarded handlers resolve beyond their route's check", 
           where: { connectorId: connectors.slack_bot.id },
         })
       ).toMatchObject({ botEnabled: true });
-      if (migrates) {
-        expect(
-          launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
-        ).toHaveBeenCalledWith(connectors.slack.id, connectors.slack_bot.id);
-      } else {
-        expect(
-          launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
-        ).not.toHaveBeenCalled();
-      }
+      expect(
+        launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
+      ).toHaveBeenCalledWith(connectors.slack.id, connectors.slack_bot.id);
+    });
+
+    // The API refuses to start under such a list, so it changes after startup.
+    it.each(
+      PARTIAL_SLACK_LISTS
+    )("neither enables the bot nor migrates when the list becomes $list after startup", async ({
+      list,
+      error,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
+      const api = await startApi();
+      const connectors = await makeSlackTeam(null);
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+
+      const res = await api.send(
+        jsonRequest(
+          "POST",
+          `/connectors/${connectors.slack_bot.id}/config/botEnabled`,
+          { configValue: "true" }
+        )
+      );
+
+      expect(res).toEqual(misconfigured(error));
+      expect(
+        await SlackConfigurationModel.findOne({
+          where: { connectorId: connectors.slack_bot.id },
+        })
+      ).toMatchObject({ botEnabled: false });
+      expect(
+        launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
+      ).not.toHaveBeenCalled();
+    });
+
+    // The route refuses a list that does not enable slack_bot, so the manager is called directly.
+    it("enables the bot without migrating the legacy connector's channels when the list does not enable slack", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "dust_project");
+      const connectors = await makeSlackTeam(null);
+
+      const res = await new SlackBotConnectorManager(
+        connectors.slack_bot.id
+      ).setConfigurationKey({ configKey: "botEnabled", configValue: "true" });
+
+      expect(res.isOk()).toBe(true);
+      expect(
+        await SlackConfigurationModel.findOne({
+          where: { connectorId: connectors.slack_bot.id },
+        })
+      ).toMatchObject({ botEnabled: true });
+      expect(
+        launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -2122,112 +2319,5 @@ describe("connectors that guarded handlers resolve beyond their route's check", 
         "crawl"
       );
     });
-  });
-});
-
-// The Slack worker starts under a list that enables only one Slack provider, and its channel joins,
-// legacy bot migration and webhook events can run for connectors of both.
-describe("Slack queue activities that act on a connector of either Slack provider", () => {
-  it.each([
-    { list: "slack", processes: true },
-    { list: "slack,slack_bot", processes: true },
-    { list: "slack_bot", processes: false },
-    { list: "slack,", processes: false },
-  ])("processSlackWebhookEventActivity acts on the team's slack connectors when the list is $list: $processes", async ({
-    list,
-    processes,
-  }) => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
-    vi.mocked(launchSlackGarbageCollectWorkflow).mockResolvedValue(
-      new Ok("workflow")
-    );
-    const connectors = await makeSlackTeam(null);
-
-    await processSlackWebhookEventActivity({
-      teamId: "T1",
-      event: { type: "channel_left" },
-    });
-
-    if (processes) {
-      expect(launchSlackGarbageCollectWorkflow).toHaveBeenCalledExactlyOnceWith(
-        connectors.slack.id
-      );
-    } else {
-      expect(launchSlackGarbageCollectWorkflow).not.toHaveBeenCalled();
-    }
-  });
-
-  const JOIN_CASES: {
-    list: string;
-    connectorType: SlackProvider;
-    acts: boolean;
-  }[] = [
-    { list: "slack", connectorType: "slack", acts: true },
-    { list: "slack_bot", connectorType: "slack_bot", acts: true },
-    { list: "slack_bot", connectorType: "slack", acts: false },
-    { list: "slack", connectorType: "slack_bot", acts: false },
-    { list: "slack_bot,", connectorType: "slack_bot", acts: false },
-  ];
-
-  const JOIN_ACTIVITIES = [
-    { name: "autoReadChannelActivity", run: autoReadChannelActivity },
-    { name: "attemptChannelJoinActivity", run: attemptChannelJoinActivity },
-  ];
-
-  for (const activity of JOIN_ACTIVITIES) {
-    it.each(
-      JOIN_CASES
-    )(`${activity.name} acts on a $connectorType connector when the list is $list: $acts`, async ({
-      list,
-      connectorType,
-      acts,
-    }) => {
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
-      vi.mocked(getSlackClient).mockRejectedValue(new Error("reached Slack"));
-      const connector = (await makeSlackTeam(null))[connectorType];
-
-      const run = activity.run(connector.id, "C1");
-
-      if (acts) {
-        await expect(run).rejects.toThrow("reached Slack");
-        expect(getSlackClient).toHaveBeenCalledWith(connector.id);
-      } else {
-        await expect(run).resolves.toBe(false);
-        expect(getSlackClient).not.toHaveBeenCalled();
-        expect(
-          await SlackChannelModel.count({
-            where: { connectorId: connector.id },
-          })
-        ).toBe(0);
-      }
-    });
-  }
-
-  it.each([
-    { list: "slack,slack_bot", migrates: true },
-    { list: "slack", migrates: false },
-    { list: "slack_bot", migrates: false },
-    { list: "slack,slack_bot,", migrates: false },
-  ])("migrateChannelsFromLegacyBotToNewBotActivity migrates when the list is $list: $migrates", async ({
-    list,
-    migrates,
-  }) => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
-    vi.mocked(getSlackClient).mockRejectedValue(new Error("reached Slack"));
-    // The legacy bot is disabled and the new one enabled, so the migration has work to do.
-    const connectors = await makeSlackTeam("slack_bot");
-
-    const run = migrateChannelsFromLegacyBotToNewBotActivity(
-      connectors.slack.id,
-      connectors.slack_bot.id
-    );
-
-    if (migrates) {
-      await expect(run).rejects.toThrow("reached Slack");
-      expect(getSlackClient).toHaveBeenCalledWith(connectors.slack.id);
-    } else {
-      await expect(run).resolves.toBeUndefined();
-      expect(getSlackClient).not.toHaveBeenCalled();
-    }
   });
 });

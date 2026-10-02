@@ -143,19 +143,18 @@ To index those files, run a Tika server and set the variable to its URL. Upstrea
 local stack in `docker-compose.yml` runs `apache/tika:3.2.3.0-full` with the
 repository's `tika-config.xml` on port 9998.
 
+`slack` and `slack_bot` share the `slack` worker, its workflows and activities, and
+much other code, so `CONNECTORS_ENABLED_PROVIDERS` must enable both or neither.
+`PROVIDER_GROUPS` in `connectors/src/lib/enabled_connector_providers.ts` lists the
+providers that must be enabled together. A list that enables only some providers
+of a group is malformed: the API refuses to start and the worker process refuses
+to start any worker.
+
 When `CONNECTORS_ENABLED_PROVIDERS` is set, the worker process checks it before
-starting any worker. If the value is malformed, or enables none of the providers
+starting any worker. If the value is malformed, or does not enable every provider
 that a selected worker does work for, the process logs `Error running workers` and
 exits with code 1. `WORKER_PROVIDERS` in `connectors/src/temporal/worker_registry.ts`
-lists the providers of each worker. The `slack` worker does work for `slack` and
-`slack_bot`, so a list that enables either one starts it. Its activities that can
-act on connectors of both providers check each connector's own type and do nothing
-for one that the list does not enable. These are the channel joins, the legacy-bot
-migration and the `slack` webhook events, which the worker drops unless the list
-enables `slack`. Its other workflows are started for `slack` connectors only, which
-the API does only when the list enables `slack`. A `slack` connector's workflows
-that were already running when `slack` left the list keep running on that worker:
-pause those connectors first, which stops their workflows.
+lists the providers of each worker.
 
 The worker command must keep `--workers dust_project`. Without `--workers`, the
 process selects every registered connectors worker, which

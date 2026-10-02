@@ -4,7 +4,10 @@ import {
   launchJoinChannelWorkflow,
   launchSlackWebhookEventWorkflow,
 } from "@connectors/connectors/slack/temporal/client";
-import { isKnownConnectorProvider } from "@connectors/lib/enabled_connector_providers";
+import {
+  isKnownConnectorProvider,
+  PROVIDER_GROUPS,
+} from "@connectors/lib/enabled_connector_providers";
 import logger from "@connectors/logger/logger";
 import type { Worker } from "@temporalio/worker";
 import { Runtime } from "@temporalio/worker/lib/runtime";
@@ -157,17 +160,19 @@ function deferred() {
 
 function supervision({
   runWorker = async () => {},
+  workerProviders = WORKER_PROVIDERS,
   enabledProviders,
   healthPort,
 }: {
   runWorker?: (worker: WorkerName) => Promise<void>;
+  workerProviders?: typeof WORKER_PROVIDERS;
   enabledProviders?: string;
   healthPort?: string;
 } = {}) {
   const listeners = new Map<string, () => void>();
   return {
     runWorker: vi.fn(runWorker),
-    workerProviders: WORKER_PROVIDERS,
+    workerProviders,
     enabledProviders,
     healthPort,
     onceSignal: vi.fn((signal: string, listener: () => void) => {
@@ -590,17 +595,31 @@ describe("worker provider allowlist", () => {
     }
   });
 
-  it("starts a worker when the list enables any one of the providers it does work for", async () => {
+  it("groups the providers of every worker that does work for more than one", () => {
     for (const worker of ALL_WORKERS as WorkerName[]) {
-      for (const provider of WORKER_PROVIDERS[worker]) {
-        const allowed = supervision({ enabledProviders: provider });
-        allowed.runWorker.mockImplementation(async () =>
-          allowed.send("SIGTERM")
-        );
-        await superviseWorkers([worker], allowed);
-        expect(allowed.runWorker).toHaveBeenCalledExactlyOnceWith(worker);
-        expect(allowed.exit).not.toHaveBeenCalled();
+      const providers = WORKER_PROVIDERS[worker];
+      if (providers.length > 1) {
+        expect(Object.entries(PROVIDER_GROUPS)).toContainEqual([
+          worker,
+          providers,
+        ]);
       }
+    }
+    for (const [worker, group] of Object.entries(PROVIDER_GROUPS)) {
+      expect(ALL_WORKERS).toContain(worker);
+      expect(Object.entries(WORKER_PROVIDERS)).toContainEqual([worker, group]);
+    }
+  });
+
+  it("starts a worker when the list enables every provider it does work for", async () => {
+    for (const worker of ALL_WORKERS as WorkerName[]) {
+      const allowed = supervision({
+        enabledProviders: WORKER_PROVIDERS[worker].join(","),
+      });
+      allowed.runWorker.mockImplementation(async () => allowed.send("SIGTERM"));
+      await superviseWorkers([worker], allowed);
+      expect(allowed.runWorker).toHaveBeenCalledExactlyOnceWith(worker);
+      expect(allowed.exit).not.toHaveBeenCalled();
     }
   });
 
@@ -613,15 +632,30 @@ describe("worker provider allowlist", () => {
           .join(","),
       });
       await expect(superviseWorkers([worker], refused)).rejects.toThrow(
-        `CONNECTORS_ENABLED_PROVIDERS enables no provider of these workers: ${worker} (${providers.join(", ")}).`
+        `CONNECTORS_ENABLED_PROVIDERS does not enable every provider of these workers: ${worker} (${providers.join(", ")}).`
       );
       expect(refused.runWorker).not.toHaveBeenCalled();
     }
   });
 
-  // The API starts channel joins for a slack_bot connector, and webhook events for the slack
-  // provider, under a list that enables only that provider.
-  it("runs the worker of the Slack queue under a list that enables only slack or only slack_bot", async () => {
+  // Each worker of WORKER_PROVIDERS with several providers has them in one provider group, which no
+  // valid list enables in part, so this worker map is made up.
+  it("refuses a worker when the list enables only some of the providers it does work for", async () => {
+    const options = supervision({
+      workerProviders: { ...WORKER_PROVIDERS, notion: ["notion", "github"] },
+      enabledProviders: "notion",
+    });
+
+    await expect(superviseWorkers(["notion"], options)).rejects.toThrow(
+      "CONNECTORS_ENABLED_PROVIDERS does not enable every provider of these workers: notion (notion, github)."
+    );
+    expect(options.onceSignal).not.toHaveBeenCalled();
+    expect(options.runWorker).not.toHaveBeenCalled();
+  });
+
+  // The API starts channel joins for slack_bot connectors and webhook events for the slack
+  // provider on the Slack queue.
+  it("runs the worker of the Slack queue under a list that enables slack and slack_bot", async () => {
     await launchJoinChannelWorkflow(1, "C1", "join-only");
     await launchSlackWebhookEventWorkflow("T1", "Ev1", {
       type: "channel_left",
@@ -630,29 +664,58 @@ describe("worker provider allowlist", () => {
     expect(apiQueues).toHaveLength(2);
     expect(new Set(apiQueues).size).toBe(1);
 
-    for (const enabledProviders of ["slack", "slack_bot"]) {
-      temporalWorkerOptions.length = 0;
-      const options = supervision({
-        enabledProviders,
-        runWorker: (worker) => workerFunctions[worker](),
-      });
-      pendingTemporalWorkers.push({
-        run: async () => options.send("SIGTERM"),
-      });
+    temporalWorkerOptions.length = 0;
+    const options = supervision({
+      enabledProviders: "slack,slack_bot",
+      runWorker: (worker) => workerFunctions[worker](),
+    });
+    pendingTemporalWorkers.push({
+      run: async () => options.send("SIGTERM"),
+    });
 
-      await superviseWorkers(["slack"], options);
-      expect(options.exit).not.toHaveBeenCalled();
-      expect(temporalWorkerOptions.map(({ taskQueue }) => taskQueue)).toEqual([
-        apiQueues[0],
-      ]);
+    await superviseWorkers(["slack"], options);
+    expect(options.exit).not.toHaveBeenCalled();
+    expect(temporalWorkerOptions.map(({ taskQueue }) => taskQueue)).toEqual([
+      apiQueues[0],
+    ]);
+  });
+
+  it("refuses the Slack worker and every other worker under a list that enables only one Slack provider, before anything starts", async () => {
+    const listen = vi.spyOn(Server.prototype, "listen");
+    const cases: [string, string][] = [
+      ["slack", "slack but not slack_bot"],
+      ["slack_bot", "slack_bot but not slack"],
+      ["dust_project,slack_bot", "slack_bot but not slack"],
+    ];
+    const selections: WorkerName[][] = [
+      ["slack"],
+      ["dust_project"],
+      ["dust_project", "notion"],
+    ];
+    for (const [enabledProviders, partial] of cases) {
+      for (const workers of selections) {
+        const options = supervision({
+          enabledProviders,
+          healthPort: String(await freePort()),
+        });
+        listen.mockClear();
+
+        await expect(superviseWorkers(workers, options)).rejects.toThrow(
+          `Invalid connectors configuration: CONNECTORS_ENABLED_PROVIDERS enables ${partial}: slack and slack_bot share the slack worker and must be enabled together`
+        );
+        expect(options.onceSignal).not.toHaveBeenCalled();
+        expect(listen).not.toHaveBeenCalled();
+        expect(options.runWorker).not.toHaveBeenCalled();
+        expect(options.exit).not.toHaveBeenCalled();
+      }
     }
   });
 
   it("refuses a selection with any worker the list does not enable before anything starts", async () => {
     const listen = vi.spyOn(Server.prototype, "listen");
     const cases: [string, WorkerName[], string][] = [
-      ["slack", ["dust_project"], "dust_project (dust_project)"],
-      ["slack_bot", ["slack", "notion"], "notion (notion)"],
+      ["slack,slack_bot", ["dust_project"], "dust_project (dust_project)"],
+      ["slack,slack_bot", ["slack", "notion"], "notion (notion)"],
       [
         "dust_project",
         ["dust_project", "notion_garbage_collector", "slack"],
@@ -667,7 +730,7 @@ describe("worker provider allowlist", () => {
       listen.mockClear();
 
       await expect(superviseWorkers(workers, options)).rejects.toThrow(
-        `CONNECTORS_ENABLED_PROVIDERS enables no provider of these workers: ${refused}.`
+        `CONNECTORS_ENABLED_PROVIDERS does not enable every provider of these workers: ${refused}.`
       );
       expect(options.onceSignal).not.toHaveBeenCalled();
       expect(listen).not.toHaveBeenCalled();

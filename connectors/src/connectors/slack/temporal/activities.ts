@@ -1,4 +1,3 @@
-import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { findMatchingChannelPatterns } from "@connectors/connectors/slack/auto_read_channel";
 import {
   getBotUserIdResponse,
@@ -1305,12 +1304,6 @@ export async function deleteChannelsFromConnectorDb(
   );
 }
 
-/**
- * @cc [owner:jchen0824,label:security] channel-join-enabled-provider
- * When `CONNECTORS_ENABLED_PROVIDERS` is set and is malformed or does not enable the connector's own
- * type, which can be `slack` or `slack_bot`, MUST return `false` without joining the channel or
- * calling Slack. The value is read on every call.
- */
 export async function attemptChannelJoinActivity(
   connectorId: ModelId,
   channelId: string
@@ -1322,18 +1315,6 @@ export async function attemptChannelJoinActivity(
     },
     "Attempting to join channel"
   );
-
-  const connector = await ConnectorResource.fetchById(connectorId);
-  if (!connector) {
-    throw new Error(`Connector ${connectorId} not found`);
-  }
-  if (checkConnectorProviderEnabled(connector.type).isErr()) {
-    logger.info(
-      { connectorId, channelId },
-      "Skipping the channel join: the connector's provider is not enabled"
-    );
-    return false;
-  }
 
   const res = await joinChannel(connectorId, channelId);
 
@@ -1356,12 +1337,6 @@ export async function attemptChannelJoinActivity(
   return true;
 }
 
-/**
- * @cc [owner:jchen0824,label:security] legacy-bot-migration-enabled-provider
- * When `CONNECTORS_ENABLED_PROVIDERS` is set and is malformed or does not enable the own type of
- * both connectors, MUST return without migrating any channel or calling Slack. The value is read on
- * every call.
- */
 export async function migrateChannelsFromLegacyBotToNewBotActivity(
   slackConnectorId: ModelId,
   slackBotConnectorId: ModelId
@@ -1372,17 +1347,6 @@ export async function migrateChannelsFromLegacyBotToNewBotActivity(
   const slackBotConnector =
     await ConnectorResource.fetchById(slackBotConnectorId);
   assert(slackBotConnector, "Slack bot connector not found");
-
-  if (
-    checkConnectorProviderEnabled(slackConnector.type).isErr() ||
-    checkConnectorProviderEnabled(slackBotConnector.type).isErr()
-  ) {
-    logger.info(
-      { slackConnectorId, slackBotConnectorId },
-      "Skipping the channel migration from the legacy bot: a connector's provider is not enabled"
-    );
-    return;
-  }
 
   // Only run this activity if the legacy bot is not enabled anymore and new bot is enabled.
   const slackConfiguration =
@@ -1422,12 +1386,6 @@ export async function migrateChannelsFromLegacyBotToNewBotActivity(
   }
 }
 
-/**
- * @cc [owner:jchen0824,label:security] auto-read-channel-enabled-provider
- * When `CONNECTORS_ENABLED_PROVIDERS` is set and is malformed or does not enable the connector's own
- * type, which can be `slack` or `slack_bot`, MUST return `false` without changing the channel or
- * calling Slack or Dust. The value is read on every call.
- */
 export async function autoReadChannelActivity(
   connectorId: ModelId,
   channelId: string
@@ -1435,13 +1393,6 @@ export async function autoReadChannelActivity(
   const connector = await ConnectorResource.fetchById(connectorId);
   if (!connector) {
     throw new Error(`Connector ${connectorId} not found`);
-  }
-  if (checkConnectorProviderEnabled(connector.type).isErr()) {
-    logger.info(
-      { connectorId, channelId },
-      "Skipping the channel auto-read: the connector's provider is not enabled"
-    );
-    return false;
   }
 
   const slackConfiguration =

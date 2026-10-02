@@ -13,14 +13,17 @@ configuration table is written by both `slack` and `slack_bot`). A check of the 
 of an admin major command or of another connector does not cover any other connector. This
 includes a connector named in the request body, the team's active Slack bot, and a connector looked
 up from the one the request names. When such a looked-up connector is refused, the handler starts
-no work for it and goes on with the rest of the request. A workflow that the handler starts applies
-the same checks in the worker, with the worker's own `CONNECTORS_ENABLED_PROVIDERS`. A handler
-whose request can act on several providers or connectors, such as `POST /connectors/admin`, checks
-every one of them and refuses a request whose providers it cannot resolve. An admin command whose
-handler looks up the connectors it acts on by the type an argument names, or by fixed types,
-requires no provider other than those types: not its major command's provider unless it is one of
-them. Pausing, deleting and read-only handlers stay available for every provider. When the
-variable is unset, handlers behave as upstream.
+no work for it and goes on with the rest of the request. A workflow that the handler starts runs on
+a worker that starts only when the worker's own `CONNECTORS_ENABLED_PROVIDERS` enables every
+provider it does work for. Providers that share a worker, listed in `PROVIDER_GROUPS` (`slack` and
+`slack_bot`), are enabled together or not at all: a list that enables only some of them is
+malformed, so the API does not start under it and every guarded handler refuses every provider
+with 500 while the variable holds it. A handler whose request can act on several providers or connectors, such
+as `POST /connectors/admin`, checks every one of them and refuses a request whose providers it
+cannot resolve. An admin command whose handler looks up the connectors it acts on by the type an
+argument names, or by fixed types, requires no provider other than those types: not its major
+command's provider unless it is one of them. Pausing, deleting and read-only handlers stay
+available for every provider. When the variable is unset, handlers behave as upstream.
 
 @cc [owner:jchen0824,label:security;testing] connectors-api-enabled-provider-guard-coverage
 `enabled_connector_providers.test.ts` MUST list every route that `startServer` registers, in
@@ -28,9 +31,12 @@ variable is unset, handlers behave as upstream.
 `checkConnectorProviderEnabled`, `withEnabledConnectorProviders` or
 `checkResolvedConnectorProvidersEnabled` MUST be in `GUARDED_ROUTES`, sent through the app
 `startServer` builds, with a request that its guard refuses with 403 and no side effect when the
-list does not enable the route's provider, and that reaches the handler when the variable is
-unset. The test MUST also check that `ADMIN_COMMAND_TARGETS` classifies exactly the commands of
-`AdminCommandSchema`; that an admin command acting only on connectors of providers other than its
-major command's runs with a list that enables only those providers; and, for each connector that a
-guarded handler resolves other than by the route's own check (a body connector id, the active Slack
-bot, a looked-up connector), that a list not enabling that connector's type leaves it without work.
+list does not enable the route's provider, that reaches the handler when the variable is unset,
+and that its guard refuses with 500 and no side effect when the list changes after startup to one
+that enables only some providers of a `PROVIDER_GROUPS` entry. The test MUST also check that
+`startServer` refuses to start under such a list; that `ADMIN_COMMAND_TARGETS` classifies exactly
+the commands of `AdminCommandSchema`; that an admin command acting only on connectors of providers
+other than its major command's is refused, under a list that enables none of them, for those
+providers and not for its major command's provider; and, for each connector that a guarded handler
+resolves other than by the route's own check (a body connector id, the active Slack bot, a
+looked-up connector), that a list not enabling that connector's type leaves it without work.

@@ -1,4 +1,3 @@
-import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { onChannelCreation } from "@connectors/api/webhooks/slack/created_channel";
 import { handleDeprecatedChatBot } from "@connectors/api/webhooks/slack/deprecated_bot";
 import { getBotUserIdResponse } from "@connectors/connectors/slack/lib/bot_user_helpers";
@@ -489,12 +488,6 @@ async function dispatchEvent(
  * deterministic workflow ids, and the Slack messages the bot posts are the last
  * thing a handler does.
  */
-/**
- * @cc [owner:jchen0824,label:security] slack-webhook-event-enabled-provider
- * When `CONNECTORS_ENABLED_PROVIDERS` is set and is malformed or does not enable `slack`, the
- * provider of the webhook that starts this workflow, MUST return without looking up or acting on
- * any connector and without calling Slack. The value is read on every call.
- */
 export async function processSlackWebhookEventActivity({
   event,
   teamId,
@@ -522,14 +515,6 @@ export async function processSlackWebhookEventActivity({
     logger.error(
       { err: fromError(payload.error) },
       "Dropping Slack webhook event: unexpected payload"
-    );
-    return;
-  }
-
-  // The slack webhook refuses events under a list that does not enable `slack`.
-  if (checkConnectorProviderEnabled("slack").isErr()) {
-    logger.info(
-      "Dropping Slack webhook event: the slack provider is not enabled"
     );
     return;
   }

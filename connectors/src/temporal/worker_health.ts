@@ -117,7 +117,7 @@ type WorkerSupervision = {
   exit: (code: number) => void;
 };
 
-// Rejects a selected worker when the allowlist enables none of the providers it does work for.
+// Rejects a selected worker when the allowlist does not enable every provider it does work for.
 function checkWorkersProvidersEnabled(
   workers: WorkerName[],
   workerProviders: typeof WORKER_PROVIDERS,
@@ -135,11 +135,11 @@ function checkWorkersProvidersEnabled(
   }
 
   const refused = workers.filter(
-    (worker) => !workerProviders[worker].some((p) => enabled.has(p))
+    (worker) => !workerProviders[worker].every((p) => enabled.has(p))
   );
   if (refused.length > 0) {
     throw new Error(
-      `CONNECTORS_ENABLED_PROVIDERS enables no provider of these workers: ${refused
+      `CONNECTORS_ENABLED_PROVIDERS does not enable every provider of these workers: ${refused
         .map((worker) => `${worker} (${workerProviders[worker].join(", ")})`)
         .join("; ")}.`
     );
@@ -157,10 +157,11 @@ function checkWorkersProvidersEnabled(
 /**
  * @cc [owner:jchen0824,label:security;error-handling] connectors-worker-enabled-providers
  * When `enabledProviders` is set, the returned promise MUST reject before any signal listener,
- * health listener or worker starts if `parseEnabledConnectorProviders` returns an error for it, or
- * if it enables none of the providers that `workerProviders` lists for a selected worker. A selected
- * worker for which it enables at least one of those providers MUST NOT be refused for its
- * providers. When `enabledProviders` is unset, no worker is refused for its providers.
+ * health listener or worker starts if `parseEnabledConnectorProviders` returns an error for it,
+ * whichever workers are selected, or if it does not enable every provider that `workerProviders`
+ * lists for a selected worker. A selected worker for which it enables every one of those providers
+ * MUST NOT be refused for its providers. When `enabledProviders` is unset, no worker is refused for
+ * its providers.
  */
 /**
  * @cc [owner:jchen0824,label:api;performance] connectors-worker-health-listener
