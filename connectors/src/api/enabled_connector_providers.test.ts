@@ -21,7 +21,13 @@ import { submitFeedbackToAPI } from "@connectors/connectors/slack/feedback_api";
 import { getSlackClientForTeam } from "@connectors/connectors/slack/feedback_modal";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
 import {
+  attemptChannelJoinActivity,
+  autoReadChannelActivity,
+  migrateChannelsFromLegacyBotToNewBotActivity,
+} from "@connectors/connectors/slack/temporal/activities";
+import {
   launchJoinChannelWorkflow,
+  launchSlackGarbageCollectWorkflow,
   launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow,
   launchSlackWebhookEventWorkflow,
 } from "@connectors/connectors/slack/temporal/client";
@@ -81,6 +87,7 @@ vi.mock(
   async (importOriginal) => ({
     ...(await importOriginal()),
     launchJoinChannelWorkflow: vi.fn(),
+    launchSlackGarbageCollectWorkflow: vi.fn(),
     launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow: vi.fn(),
     launchSlackWebhookEventWorkflow: vi.fn(),
   })
@@ -1260,16 +1267,16 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: null,
   },
   {
-    // Every command of a provider's major command needs that provider.
+    // It acts only on the slack_bot connector, not on the slack one.
     title:
-      "refuses slack run-auto-join on slack_bot when the list enables only slack_bot",
+      "runs slack run-auto-join on slack_bot when the list enables only slack_bot",
     list: "slack_bot",
     command: async () => ({
       majorCommand: "slack",
       command: "run-auto-join",
       args: { wId: "workspace", providerType: "slack_bot" },
     }),
-    refusal: notEnabled(["slack"]),
+    refusal: null,
   },
   {
     title: "runs slack run-auto-join on slack when the list enables slack",
@@ -1280,6 +1287,17 @@ const ADMIN_API_CASES: AdminApiCase[] = [
       args: { wId: "workspace", providerType: "slack" },
     }),
     refusal: null,
+  },
+  {
+    title:
+      "refuses slack run-auto-join on slack when the list enables only slack_bot",
+    list: "slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "slack" },
+    }),
+    refusal: notEnabled(["slack"]),
   },
   {
     title: "refuses slack run-auto-join without a providerType",
@@ -1316,6 +1334,39 @@ const ADMIN_API_CASES: AdminApiCase[] = [
       },
     }),
     refusal: notEnabled(["slack_bot"]),
+  },
+  {
+    // It acts only on the slack_bot connector, not on the slack one.
+    title:
+      "runs slack whitelist-bot on slack_bot when the list enables only slack_bot",
+    list: "slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "whitelist-bot",
+      args: {
+        wId: "workspace",
+        botName: "bot",
+        whitelistType: "summon_agent",
+        providerType: "slack_bot",
+      },
+    }),
+    refusal: null,
+  },
+  {
+    title:
+      "refuses slack whitelist-bot on slack when the list enables only slack_bot",
+    list: "slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "whitelist-bot",
+      args: {
+        wId: "workspace",
+        botName: "bot",
+        whitelistType: "index_messages",
+        providerType: "slack",
+      },
+    }),
+    refusal: notEnabled(["slack"]),
   },
   {
     title:
@@ -1693,18 +1744,32 @@ describe("POST /connectors/admin command targets", () => {
       ).toBeNull();
     });
 
-    it.each([
-      "whitelist-domains",
-      "cutover-legacy-bot",
-    ] as const)("refuses slack %s unless the list enables slack_bot", async (command) => {
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
+    // It acts only on the slack_bot connector, not on the slack one.
+    it("runs slack whitelist-domains only when the list enables slack_bot", async () => {
       const slackCommand: AdminCommandType = {
         majorCommand: "slack",
-        command,
+        command: "whitelist-domains",
         args: { wId: "workspace" },
       };
 
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
       expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+      expect(await checkAdmin(slackCommand)).toBeNull();
+    });
+
+    // It migrates the slack connector's channels to the slack_bot connector.
+    it("runs slack cutover-legacy-bot only when the list enables slack and slack_bot", async () => {
+      const slackCommand: AdminCommandType = {
+        majorCommand: "slack",
+        command: "cutover-legacy-bot",
+        args: { wId: "workspace" },
+      };
+
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
+      expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+      expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack"]));
       vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
       expect(await checkAdmin(slackCommand)).toBeNull();
     });
@@ -2057,5 +2122,112 @@ describe("connectors that guarded handlers resolve beyond their route's check", 
         "crawl"
       );
     });
+  });
+});
+
+// The Slack worker starts under a list that enables only one Slack provider, and its channel joins,
+// legacy bot migration and webhook events can run for connectors of both.
+describe("Slack queue activities that act on a connector of either Slack provider", () => {
+  it.each([
+    { list: "slack", processes: true },
+    { list: "slack,slack_bot", processes: true },
+    { list: "slack_bot", processes: false },
+    { list: "slack,", processes: false },
+  ])("processSlackWebhookEventActivity acts on the team's slack connectors when the list is $list: $processes", async ({
+    list,
+    processes,
+  }) => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+    vi.mocked(launchSlackGarbageCollectWorkflow).mockResolvedValue(
+      new Ok("workflow")
+    );
+    const connectors = await makeSlackTeam(null);
+
+    await processSlackWebhookEventActivity({
+      teamId: "T1",
+      event: { type: "channel_left" },
+    });
+
+    if (processes) {
+      expect(launchSlackGarbageCollectWorkflow).toHaveBeenCalledExactlyOnceWith(
+        connectors.slack.id
+      );
+    } else {
+      expect(launchSlackGarbageCollectWorkflow).not.toHaveBeenCalled();
+    }
+  });
+
+  const JOIN_CASES: {
+    list: string;
+    connectorType: SlackProvider;
+    acts: boolean;
+  }[] = [
+    { list: "slack", connectorType: "slack", acts: true },
+    { list: "slack_bot", connectorType: "slack_bot", acts: true },
+    { list: "slack_bot", connectorType: "slack", acts: false },
+    { list: "slack", connectorType: "slack_bot", acts: false },
+    { list: "slack_bot,", connectorType: "slack_bot", acts: false },
+  ];
+
+  const JOIN_ACTIVITIES = [
+    { name: "autoReadChannelActivity", run: autoReadChannelActivity },
+    { name: "attemptChannelJoinActivity", run: attemptChannelJoinActivity },
+  ];
+
+  for (const activity of JOIN_ACTIVITIES) {
+    it.each(
+      JOIN_CASES
+    )(`${activity.name} acts on a $connectorType connector when the list is $list: $acts`, async ({
+      list,
+      connectorType,
+      acts,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+      vi.mocked(getSlackClient).mockRejectedValue(new Error("reached Slack"));
+      const connector = (await makeSlackTeam(null))[connectorType];
+
+      const run = activity.run(connector.id, "C1");
+
+      if (acts) {
+        await expect(run).rejects.toThrow("reached Slack");
+        expect(getSlackClient).toHaveBeenCalledWith(connector.id);
+      } else {
+        await expect(run).resolves.toBe(false);
+        expect(getSlackClient).not.toHaveBeenCalled();
+        expect(
+          await SlackChannelModel.count({
+            where: { connectorId: connector.id },
+          })
+        ).toBe(0);
+      }
+    });
+  }
+
+  it.each([
+    { list: "slack,slack_bot", migrates: true },
+    { list: "slack", migrates: false },
+    { list: "slack_bot", migrates: false },
+    { list: "slack,slack_bot,", migrates: false },
+  ])("migrateChannelsFromLegacyBotToNewBotActivity migrates when the list is $list: $migrates", async ({
+    list,
+    migrates,
+  }) => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+    vi.mocked(getSlackClient).mockRejectedValue(new Error("reached Slack"));
+    // The legacy bot is disabled and the new one enabled, so the migration has work to do.
+    const connectors = await makeSlackTeam("slack_bot");
+
+    const run = migrateChannelsFromLegacyBotToNewBotActivity(
+      connectors.slack.id,
+      connectors.slack_bot.id
+    );
+
+    if (migrates) {
+      await expect(run).rejects.toThrow("reached Slack");
+      expect(getSlackClient).toHaveBeenCalledWith(connectors.slack.id);
+    } else {
+      await expect(run).resolves.toBeUndefined();
+      expect(getSlackClient).not.toHaveBeenCalled();
+    }
   });
 });

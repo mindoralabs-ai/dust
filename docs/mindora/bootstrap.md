@@ -116,7 +116,7 @@ settings that the selected TLS mode needs, as described in
 | Role | Command | Probe | Required environment |
 |---|---|---|---|
 | `connectors_api` | `node dist/start_server.js -p 3002` | `GET /` on port 3002 | `CONNECTORS_DATABASE_URI`, `DUST_CONNECTORS_SECRET`, `DUST_CONNECTORS_WEBHOOKS_SECRET`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*` |
-| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
+| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `TEXT_EXTRACTION_URL`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
 
 The API's `GET /` returns 200 without authentication. It shows only that the HTTP
 server is listening, not that the database or Temporal is reachable. Set
@@ -126,11 +126,52 @@ the API starts can reach another connector than the one the API checked, such as
 Slack team's active bot, and the worker checks that connector against its own
 value.
 
+`TEXT_EXTRACTION_URL` is the base URL of an Apache Tika server. The worker sends
+the PDF, Word and PowerPoint files of a project mount to its `/tika` endpoints to
+extract their text; it skips spreadsheets. The connectors image does not include
+Tika, and Tika is outside the POC's scope, so the POC runs no Tika server. Set the
+variable anyway:
+
+- When it is unset, the worker still starts and `/readyz` returns 200, but the
+  first such file makes the mount-file sync activity throw. Temporal retries that
+  activity without limit, so the project's sync never completes.
+- When no Tika server answers at its URL, the worker skips each such file with a
+  warning after three attempts. Those files are not indexed, and the rest of the
+  project syncs.
+
+To index those files, run a Tika server and set the variable to its URL. Upstream's
+local stack in `docker-compose.yml` runs `apache/tika:3.2.3.0-full` with the
+repository's `tika-config.xml` on port 9998.
+
+When `CONNECTORS_ENABLED_PROVIDERS` is set, the worker process checks it before
+starting any worker. If the value is malformed, or enables none of the providers
+that a selected worker does work for, the process logs `Error running workers` and
+exits with code 1. `WORKER_PROVIDERS` in `connectors/src/temporal/worker_registry.ts`
+lists the providers of each worker. The `slack` worker does work for `slack` and
+`slack_bot`, so a list that enables either one starts it. Its activities that can
+act on connectors of both providers check each connector's own type and do nothing
+for one that the list does not enable. These are the channel joins, the legacy-bot
+migration and the `slack` webhook events, which the worker drops unless the list
+enables `slack`. Its other workflows are started for `slack` connectors only, which
+the API does only when the list enables `slack`. A `slack` connector's workflows
+that were already running when `slack` left the list keep running on that worker:
+pause those connectors first, which stops their workflows.
+
 The worker command must keep `--workers dust_project`. Without `--workers`, the
-process starts every registered connectors worker. An empty or duplicated
+process selects every registered connectors worker, which
+`CONNECTORS_ENABLED_PROVIDERS=dust_project` refuses. An empty or duplicated
 `--workers` list fails startup. If a worker throws, or stops before the process
-receives SIGTERM or SIGINT, the process logs `Error running <worker> worker.` and
-exits with code 1, so the orchestrator restarts it.
+receives SIGINT, SIGTERM, SIGQUIT or SIGUSR2, the process logs
+`Error running <worker> worker.` and exits with code 1, so the orchestrator
+restarts it.
+
+Temporal's runtime shuts the workers down on exactly those four signals. On any of
+them, the process only marks itself as shutting down, so `/readyz` returns 503, and
+leaves the shutdown to the runtime. The runtime drains every
+running Temporal worker and also shuts down a worker that finishes starting after
+the signal. The process exits after the workers stop. If connecting to Temporal or
+creating a worker hangs, the process keeps running until the orchestrator sends
+SIGKILL at the end of the pod's `terminationGracePeriodSeconds`.
 
 The worker opens its health listener only when `WORKER_HEALTH_PORT` is set, and an
 invalid port fails startup. The listener binds to `127.0.0.1`, so the readiness
@@ -141,8 +182,8 @@ node -e 'fetch(`http://127.0.0.1:${process.env.WORKER_HEALTH_PORT}/readyz`).then
 ```
 
 `/readyz` returns 200 only after the `dust_project` Temporal worker is `RUNNING`.
-It returns 503 while the worker connects or starts, after SIGTERM or SIGINT, and
-whenever the worker drains, stops or fails. Only `dust_project` reports its
+It returns 503 while the worker connects or starts, after any of those four
+signals, and whenever the worker drains, stops or fails. Only `dust_project` reports its
 Temporal worker state, so readiness stays 503 if any other worker is selected.
 
 ### Run connectors migrations around the rollout

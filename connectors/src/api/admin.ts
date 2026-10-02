@@ -16,15 +16,20 @@ import type { Request, Response } from "express";
 import { fromError } from "zod-validation-error";
 
 /**
- * What an admin command can start connector work for, besides its major command's provider when
- * that is a provider (`notion`, `slack`, ...), which every command of that major command needs:
- * - `none`: nothing else. The command stops, pauses, deletes, reads or stores Dust-side state
- *   only, or acts only on connectors of its major command's provider: it looks them up by that
- *   type, or refuses another type before any side effect.
- * - `named_connector`: the connector that its `connectorId`, or its `wId` and `dsId`, name,
- *   whatever that connector's type.
- * - `provider_arg`: the connectors of the provider that its `arg` argument names.
- * - `providers`: the connectors of `providers`, which it looks up by type.
+ * The providers that an admin command requires:
+ * - `none`: its major command's provider when that is a provider (`notion`, `slack`, ...), and
+ *   nothing otherwise. The command stops, pauses, deletes, reads or stores Dust-side state only,
+ *   or acts only on connectors of its major command's provider: it looks them up by that type, or
+ *   refuses another type before any side effect.
+ * - `named_connector`: its major command's provider when that is a provider, and the type of the
+ *   connector that its `connectorId`, or its `wId` and `dsId`, name. The command finds that
+ *   connector whatever its type, and acts on it with its major command's provider's API,
+ *   workflows or tables.
+ * - `provider_arg`: only the provider that its `arg` argument names. The command acts only on the
+ *   connectors of that provider, which it looks up by that type, so it requires its major
+ *   command's provider only when the argument names it.
+ * - `providers`: only `providers`, whose connectors it looks up by type. They include its major
+ *   command's provider only when it acts on that provider's connectors.
  */
 type AdminCommandTarget =
   | { kind: "none" }
@@ -46,13 +51,16 @@ type AdminCommandTargets = {
 
 /**
  * @cc [owner:jchen0824,label:security] admin-command-targets
- * Each command's entry MUST cover every connector that its handler (`runCommand` in
- * `@connectors/lib/cli`, and the provider `lib/cli` it calls) can start work for:
+ * For every request, the providers that each command's entry requires MUST include every provider
+ * whose connectors its handler (`runCommand` in `@connectors/lib/cli`, and the provider `lib/cli`
+ * it calls) can start work for, or whose API it calls with a connector's credentials. The entry is
  * `named_connector` when the handler finds a connector by `connectorId`, or by `wId` and `dsId`,
- * without refusing another type before any side effect; `provider_arg` when it acts on the
- * connectors of the provider an argument names; `providers`, listing them, when it looks up
- * connectors of providers other than its major command's by type. A change to a handler MUST
- * re-classify its command in the same change.
+ * without refusing another type before any side effect. A handler that acts on connectors (starts
+ * work for them, calls their API or changes their configuration) only after looking them up by
+ * the type an argument names, or by fixed types that are not just its major command's provider,
+ * MUST have a `provider_arg` entry, or a `providers` entry listing exactly those types: such a
+ * request requires its major command's provider only when the handler acts on that provider's
+ * connectors. A change to a handler MUST re-classify its command in the same change.
  */
 export const ADMIN_COMMAND_TARGETS: AdminCommandTargets = {
   batch: {
@@ -185,11 +193,17 @@ export const ADMIN_COMMAND_TARGETS: AdminCommandTargets = {
     "setup-synced-query": NONE,
     "sync-query": NONE,
   },
-  // The other commands look up Slack connectors by type (`uninstall-for-unknown-team-ids` has no
-  // handler).
+  // `run-auto-join` and `whitelist-bot` act only on the connector of the provider that
+  // `providerType` names, and refuse one other than `slack` or `slack_bot` before any side effect.
+  // `whitelist-domains` acts only on the `slack_bot` connector, and `cutover-legacy-bot` on the
+  // `slack` and `slack_bot` connectors. The other commands look up Slack connectors by type
+  // (`uninstall-for-unknown-team-ids` has no handler).
   slack: {
     "add-channel-to-sync": NONE,
-    "cutover-legacy-bot": { kind: "providers", providers: ["slack_bot"] },
+    "cutover-legacy-bot": {
+      kind: "providers",
+      providers: ["slack", "slack_bot"],
+    },
     "enable-bot": NONE,
     "remove-channel-from-sync": NONE,
     "skip-channel": NONE,
@@ -303,15 +317,23 @@ async function namedConnectorProviders(
   return new Ok(providers);
 }
 
-async function resolveAdminCommandTarget(
+// The providers that `target` requires, as `AdminCommandTarget` describes, given the providers of
+// its major command.
+async function resolveAdminCommandProviders(
+  majorProviders: readonly ConnectorProvider[],
   target: AdminCommandTarget,
   args: Readonly<Record<string, unknown>>
 ): Promise<Result<readonly ConnectorProvider[], Error>> {
   switch (target.kind) {
     case "none":
-      return new Ok([]);
-    case "named_connector":
-      return namedConnectorProviders(args);
+      return new Ok(majorProviders);
+    case "named_connector": {
+      const namedRes = await namedConnectorProviders(args);
+      if (namedRes.isErr()) {
+        return namedRes;
+      }
+      return new Ok([...majorProviders, ...namedRes.value]);
+    }
     case "provider_arg": {
       const provider = args[target.arg];
       if (typeof provider !== "string" || !isKnownConnectorProvider(provider)) {
@@ -331,10 +353,11 @@ async function resolveAdminCommandTarget(
 /**
  * @cc [owner:jchen0824,label:security] admin-command-provider-guard
  * When `CONNECTORS_ENABLED_PROVIDERS` is set, returns `Ok` for an admin command only when the list
- * enables its major command's provider, when that is a provider, and every provider its entry in
- * `ADMIN_COMMAND_TARGETS` resolves to. It refuses a command without an entry, and one whose
- * entry does not resolve. A command whose major command is not a provider and whose entry is
- * `none` is `Ok` whatever the list. The connectors are looked up only when the list is set.
+ * enables every provider that its entry in `ADMIN_COMMAND_TARGETS` requires, and requires no
+ * other provider: its major command's provider, when that is a provider, only for a `none` or
+ * `named_connector` entry. It refuses a command without an entry, and one whose entry does not
+ * resolve. A command whose major command is not a provider and whose entry is `none` is `Ok`
+ * whatever the list. The connectors are looked up only when the list is set.
  */
 export async function checkAdminCommandProvidersEnabled(
   adminCommand: AdminCommandType
@@ -356,11 +379,7 @@ export async function checkAdminCommandProvidersEnabled(
         new Error(`admin command ${majorCommand} ${command} is not classified`)
       );
     }
-    const targetRes = await resolveAdminCommandTarget(target, args);
-    if (targetRes.isErr()) {
-      return targetRes;
-    }
-    return new Ok([...majorProviders, ...targetRes.value]);
+    return resolveAdminCommandProviders(majorProviders, target, args);
   });
 }
 

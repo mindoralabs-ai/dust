@@ -1,17 +1,31 @@
 import { request } from "node:http";
 import { createServer, Server } from "node:net";
+import {
+  launchJoinChannelWorkflow,
+  launchSlackWebhookEventWorkflow,
+} from "@connectors/connectors/slack/temporal/client";
+import { isKnownConnectorProvider } from "@connectors/lib/enabled_connector_providers";
 import logger from "@connectors/logger/logger";
 import type { Worker } from "@temporalio/worker";
+import { Runtime } from "@temporalio/worker/lib/runtime";
+import { compileOptions } from "@temporalio/worker/lib/runtime-options";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTemporalWorker, runInWorkerContext } from "./bundle_helper";
+import type { WorkerShutdownSignal } from "./worker_health";
 import {
   parseWorkerHealthPort,
   startWorkerHealthServer,
   superviseWorkers,
+  WORKER_SHUTDOWN_SIGNALS,
   workerSelectionArgs,
 } from "./worker_health";
 import type { WorkerName } from "./worker_registry";
+import {
+  ALL_WORKERS,
+  WORKER_PROVIDERS,
+  workerFunctions,
+} from "./worker_registry";
 
 type TemporalWorkerState = ReturnType<Worker["getState"]>;
 type FakeTemporalWorker = {
@@ -19,13 +33,43 @@ type FakeTemporalWorker = {
   getState: () => TemporalWorkerState;
 };
 
-const { pendingTemporalWorkers } = vi.hoisted(() => ({
-  pendingTemporalWorkers: new Array<FakeTemporalWorker>(),
-}));
+const { pendingTemporalWorkers, temporalWorkerOptions, startedWorkflows } =
+  vi.hoisted(() => ({
+    pendingTemporalWorkers: new Array<object>(),
+    temporalWorkerOptions: new Array<{ taskQueue?: string }>(),
+    startedWorkflows: new Array<{ taskQueue?: string }>(),
+  }));
 
 // Only Worker.create is replaced: readiness is computed by the real bundle_helper tracking.
 vi.mock("@temporalio/worker", () => ({
-  Worker: { create: async () => pendingTemporalWorkers.shift() },
+  Worker: {
+    create: async (options: { taskQueue?: string }) => {
+      temporalWorkerOptions.push(options);
+      return pendingTemporalWorkers.shift();
+    },
+  },
+}));
+
+// Worker.create never loads workflow code, so the real workers need no workflow bundle.
+vi.mock("./bundle_helper", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./bundle_helper")>()),
+  getWorkflowConfig: () => ({ workflowsPath: "worker-health-test" }),
+}));
+
+// The real workers connect, and the real launch functions start workflows, through these.
+vi.mock("@connectors/lib/temporal", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@connectors/lib/temporal")>()),
+  getTemporalWorkerConnection: async () => ({
+    connection: "worker-connection",
+    namespace: "worker-health-test",
+  }),
+  getTemporalClient: async () => ({
+    workflow: {
+      start: async (_workflow: unknown, options: { taskQueue?: string }) => {
+        startedWorkflows.push(options);
+      },
+    },
+  }),
 }));
 
 // Creates a tracked Temporal worker through the real `createTemporalWorker`, under the worker
@@ -113,20 +157,29 @@ function deferred() {
 
 function supervision({
   runWorker = async () => {},
+  enabledProviders,
   healthPort,
 }: {
   runWorker?: (worker: WorkerName) => Promise<void>;
+  enabledProviders?: string;
   healthPort?: string;
 } = {}) {
   const listeners = new Map<string, () => void>();
   return {
     runWorker: vi.fn(runWorker),
+    workerProviders: WORKER_PROVIDERS,
+    enabledProviders,
     healthPort,
     onceSignal: vi.fn((signal: string, listener: () => void) => {
       listeners.set(signal, listener);
     }),
     exit: vi.fn(),
-    send: (signal: "SIGTERM" | "SIGINT") => listeners.get(signal)?.(),
+    // Like `process.once`, a listener runs for the first signal only.
+    send: (signal: WorkerShutdownSignal) => {
+      const listener = listeners.get(signal);
+      listeners.delete(signal);
+      listener?.();
+    },
   };
 }
 
@@ -340,9 +393,9 @@ describe("worker supervision", () => {
     expect(options.exit).toHaveBeenCalledExactlyOnceWith(1);
   });
 
-  it("does not exit when a worker returns after SIGTERM or SIGINT", async () => {
+  it("does not exit when a worker returns after any signal the Temporal runtime shuts down on", async () => {
     const error = vi.spyOn(logger, "error").mockImplementation(() => {});
-    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    for (const signal of WORKER_SHUTDOWN_SIGNALS) {
       const options = supervision();
       options.runWorker.mockImplementation(async () => options.send(signal));
 
@@ -350,6 +403,30 @@ describe("worker supervision", () => {
       expect(options.exit).not.toHaveBeenCalled();
     }
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it("keeps every selected worker running until the last one returns after SIGQUIT or SIGUSR2", async () => {
+    for (const signal of ["SIGQUIT", "SIGUSR2"] as const) {
+      const drained = deferred();
+      const options = supervision({
+        runWorker: async (worker) => {
+          // Temporal drains every Worker on the signal; the second one finishes later.
+          if (worker === "bigquery") {
+            options.send(signal);
+          } else {
+            await drained.promise;
+          }
+        },
+      });
+
+      const supervising = superviseWorkers(["bigquery", "confluence"], options);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(options.exit).not.toHaveBeenCalled();
+
+      drained.resolve();
+      await supervising;
+      expect(options.exit).not.toHaveBeenCalled();
+    }
   });
 
   it("reports ready while every selected worker runs in its own context, then 503 after SIGTERM", async () => {
@@ -393,5 +470,236 @@ describe("worker supervision", () => {
     await expect(httpStatus(port)).rejects.toMatchObject({
       code: "ECONNREFUSED",
     });
+  });
+
+  it("does not exit on SIGTERM or SIGINT before any selected worker runs, and reports 503 until the worker returns", async () => {
+    const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+    const runs: [WorkerName, "SIGTERM" | "SIGINT"][] = [
+      ["google_drive", "SIGTERM"],
+      ["intercom", "SIGINT"],
+    ];
+    for (const [worker, signal] of runs) {
+      const port = await freePort();
+      const connecting = deferred();
+      const connected = deferred();
+      const running = deferred();
+      const stop = deferred();
+      const options = supervision({
+        healthPort: String(port),
+        runWorker: async () => {
+          connecting.resolve();
+          await connected.promise;
+          await createFakeTemporalWorker("RUNNING");
+          running.resolve();
+          await stop.promise;
+        },
+      });
+
+      const supervising = superviseWorkers([worker], options);
+      await connecting.promise;
+      options.send(signal);
+      expect(options.exit).not.toHaveBeenCalled();
+
+      // The worker finishes starting after the signal.
+      connected.resolve();
+      await running.promise;
+      expect(await httpStatus(port)).toBe(503);
+
+      stop.resolve();
+      await supervising;
+      expect(options.exit).not.toHaveBeenCalled();
+      await expect(httpStatus(port)).rejects.toMatchObject({
+        code: "ECONNREFUSED",
+      });
+    }
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("does not exit on SIGTERM while only some selected workers run", async () => {
+    const stop = deferred();
+    const allCreated = deferred();
+    let created = 0;
+    const options = supervision({
+      runWorker: async (worker) => {
+        await createFakeTemporalWorker(
+          worker === "microsoft" ? "RUNNING" : "INITIALIZED"
+        );
+        created += 1;
+        if (created === 2) {
+          allCreated.resolve();
+        }
+        await stop.promise;
+      },
+    });
+
+    const supervising = superviseWorkers(["microsoft", "notion"], options);
+    await allCreated.promise;
+    options.send("SIGTERM");
+    expect(options.exit).not.toHaveBeenCalled();
+
+    stop.resolve();
+    await supervising;
+    expect(options.exit).not.toHaveBeenCalled();
+  });
+});
+
+// superviseWorkers leaves signal-driven shutdown to Temporal's runtime, which must also stop a
+// Worker whose run() registers its shutdown callback after the signal.
+describe("Temporal runtime shutdown hook", () => {
+  it("shuts down on exactly the signals superviseWorkers marks shutdown on, as the SDK default does", () => {
+    // start_worker.ts pins the runtime to WORKER_SHUTDOWN_SIGNALS. Matching the SDK default keeps
+    // upstream's graceful drain on each of them; an SDK upgrade that changes it fails here.
+    expect(
+      compileOptions({ shutdownSignals: [...WORKER_SHUTDOWN_SIGNALS] })
+        .shutdownSignals
+    ).toEqual([...WORKER_SHUTDOWN_SIGNALS]);
+    expect(compileOptions({}).shutdownSignals).toEqual([
+      ...WORKER_SHUTDOWN_SIGNALS,
+    ]);
+  });
+
+  it("runs a shutdown callback registered after shutdown started", async () => {
+    const shuttingDown = {
+      state: "SHUTTING_DOWN",
+      shutdownSignalCallbacks: new Set<() => void>(),
+    };
+    const callback = vi.fn();
+
+    Runtime.prototype.registerShutdownSignalCallback.call(
+      shuttingDown,
+      callback
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(callback).toHaveBeenCalledOnce();
+  });
+});
+
+describe("worker provider allowlist", () => {
+  // Every provider that some worker does work for.
+  const workerProviders = [...new Set(Object.values(WORKER_PROVIDERS).flat())];
+
+  it("maps every registered worker to known connector providers", () => {
+    expect(Object.keys(WORKER_PROVIDERS).sort()).toEqual(
+      [...ALL_WORKERS].sort()
+    );
+    for (const worker of ALL_WORKERS as WorkerName[]) {
+      const providers = WORKER_PROVIDERS[worker];
+      expect(providers.length).toBeGreaterThan(0);
+      expect(new Set(providers).size).toBe(providers.length);
+      expect(providers.every((p) => isKnownConnectorProvider(p))).toBe(true);
+    }
+  });
+
+  it("starts a worker when the list enables any one of the providers it does work for", async () => {
+    for (const worker of ALL_WORKERS as WorkerName[]) {
+      for (const provider of WORKER_PROVIDERS[worker]) {
+        const allowed = supervision({ enabledProviders: provider });
+        allowed.runWorker.mockImplementation(async () =>
+          allowed.send("SIGTERM")
+        );
+        await superviseWorkers([worker], allowed);
+        expect(allowed.runWorker).toHaveBeenCalledExactlyOnceWith(worker);
+        expect(allowed.exit).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it("refuses a worker when the list enables none of the providers it does work for", async () => {
+    for (const worker of ALL_WORKERS as WorkerName[]) {
+      const providers = WORKER_PROVIDERS[worker];
+      const refused = supervision({
+        enabledProviders: workerProviders
+          .filter((p) => !providers.includes(p))
+          .join(","),
+      });
+      await expect(superviseWorkers([worker], refused)).rejects.toThrow(
+        `CONNECTORS_ENABLED_PROVIDERS enables no provider of these workers: ${worker} (${providers.join(", ")}).`
+      );
+      expect(refused.runWorker).not.toHaveBeenCalled();
+    }
+  });
+
+  // The API starts channel joins for a slack_bot connector, and webhook events for the slack
+  // provider, under a list that enables only that provider.
+  it("runs the worker of the Slack queue under a list that enables only slack or only slack_bot", async () => {
+    await launchJoinChannelWorkflow(1, "C1", "join-only");
+    await launchSlackWebhookEventWorkflow("T1", "Ev1", {
+      type: "channel_left",
+    });
+    const apiQueues = startedWorkflows.map(({ taskQueue }) => taskQueue);
+    expect(apiQueues).toHaveLength(2);
+    expect(new Set(apiQueues).size).toBe(1);
+
+    for (const enabledProviders of ["slack", "slack_bot"]) {
+      temporalWorkerOptions.length = 0;
+      const options = supervision({
+        enabledProviders,
+        runWorker: (worker) => workerFunctions[worker](),
+      });
+      pendingTemporalWorkers.push({
+        run: async () => options.send("SIGTERM"),
+      });
+
+      await superviseWorkers(["slack"], options);
+      expect(options.exit).not.toHaveBeenCalled();
+      expect(temporalWorkerOptions.map(({ taskQueue }) => taskQueue)).toEqual([
+        apiQueues[0],
+      ]);
+    }
+  });
+
+  it("refuses a selection with any worker the list does not enable before anything starts", async () => {
+    const listen = vi.spyOn(Server.prototype, "listen");
+    const cases: [string, WorkerName[], string][] = [
+      ["slack", ["dust_project"], "dust_project (dust_project)"],
+      ["slack_bot", ["slack", "notion"], "notion (notion)"],
+      [
+        "dust_project",
+        ["dust_project", "notion_garbage_collector", "slack"],
+        "notion_garbage_collector (notion); slack (slack, slack_bot)",
+      ],
+    ];
+    for (const [enabledProviders, workers, refused] of cases) {
+      const options = supervision({
+        enabledProviders,
+        healthPort: String(await freePort()),
+      });
+      listen.mockClear();
+
+      await expect(superviseWorkers(workers, options)).rejects.toThrow(
+        `CONNECTORS_ENABLED_PROVIDERS enables no provider of these workers: ${refused}.`
+      );
+      expect(options.onceSignal).not.toHaveBeenCalled();
+      expect(listen).not.toHaveBeenCalled();
+      expect(options.runWorker).not.toHaveBeenCalled();
+      expect(options.exit).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses a malformed list before anything starts", async () => {
+    for (const enabledProviders of [
+      "",
+      "dust_project,",
+      "dust_project,unknown_provider",
+      "dust_project,dust_project",
+    ]) {
+      const options = supervision({ enabledProviders });
+
+      await expect(superviseWorkers(["dust_project"], options)).rejects.toThrow(
+        /^Invalid connectors configuration: CONNECTORS_ENABLED_PROVIDERS /
+      );
+      expect(options.onceSignal).not.toHaveBeenCalled();
+      expect(options.runWorker).not.toHaveBeenCalled();
+    }
+  });
+
+  it("starts every selected worker when the list is unset", async () => {
+    const options = supervision();
+    options.runWorker.mockImplementation(async () => options.send("SIGTERM"));
+
+    await superviseWorkers(ALL_WORKERS as WorkerName[], options);
+    expect(options.runWorker.mock.calls.map(([worker]) => worker)).toEqual(
+      ALL_WORKERS
+    );
   });
 });

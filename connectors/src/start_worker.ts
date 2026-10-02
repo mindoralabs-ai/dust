@@ -1,10 +1,12 @@
 import {
   superviseWorkers,
+  WORKER_SHUTDOWN_SIGNALS,
   workerSelectionArgs,
 } from "@connectors/temporal/worker_health";
 import type { WorkerName } from "@connectors/temporal/worker_registry";
 import {
   ALL_WORKERS,
+  WORKER_PROVIDERS,
   workerFunctions,
 } from "@connectors/temporal/worker_registry";
 import {
@@ -17,6 +19,7 @@ import type { Logger, LogLevel } from "@temporalio/common/lib/logger";
 import { Runtime } from "@temporalio/worker/lib/runtime";
 import { hideBin } from "yargs/helpers";
 
+import { apiConfig } from "./lib/api/config";
 import { errorFromAny } from "./lib/error";
 import logger from "./logger/logger";
 
@@ -46,11 +49,20 @@ const pinoAdapter: Logger = {
 // Install once per process — before creating Worker/Client
 Runtime.install({
   logger: pinoAdapter,
+  // `superviseWorkers` marks shutdown on the same signals.
+  shutdownSignals: [...WORKER_SHUTDOWN_SIGNALS],
 });
 
+/**
+ * @cc [owner:jchen0824,label:security] connectors-start-worker-enabled-providers
+ * `superviseWorkers` MUST receive `WORKER_PROVIDERS` and this process's raw
+ * `CONNECTORS_ENABLED_PROVIDERS` value, as read by `apiConfig.getEnabledConnectorProviders`.
+ */
 async function runWorkers(workers: WorkerName[]) {
   await superviseWorkers(workers, {
     runWorker: (worker) => workerFunctions[worker](),
+    workerProviders: WORKER_PROVIDERS,
+    enabledProviders: apiConfig.getEnabledConnectorProviders(),
     healthPort: EnvironmentConfig.getOptionalEnvVariable("WORKER_HEALTH_PORT"),
     onceSignal: (signal, listener) => process.once(signal, listener),
     exit: (code) => process.exit(code),
