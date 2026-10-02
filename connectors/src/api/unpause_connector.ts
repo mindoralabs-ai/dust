@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { getConnectorManager } from "@connectors/connectors";
 import { errorFromAny } from "@connectors/lib/error";
 import logger from "@connectors/logger/logger";
@@ -25,6 +26,11 @@ const _unpauseConnectorAPIHandler = async (
         },
         status_code: 404,
       });
+    }
+
+    const enabledRes = checkConnectorProviderEnabled(connector.type);
+    if (enabledRes.isErr()) {
+      return apiError(req, res, enabledRes.error);
     }
 
     const unpauseRes = await getConnectorManager({

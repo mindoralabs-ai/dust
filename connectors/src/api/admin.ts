@@ -1,3 +1,7 @@
+import {
+  checkConnectorProviderEnabled,
+  isKnownConnectorProvider,
+} from "@connectors/api/enabled_connector_providers";
 import { runCommand } from "@connectors/lib/cli";
 import { apiError, withLogging } from "@connectors/logger/withlogging";
 import type {
@@ -136,6 +140,13 @@ const _adminAPIHandler = async (
       },
       status_code: 400,
     });
+  }
+
+  if (isKnownConnectorProvider(adminCommand.majorCommand)) {
+    const enabledRes = checkConnectorProviderEnabled(adminCommand.majorCommand);
+    if (enabledRes.isErr()) {
+      return apiError(req, res, enabledRes.error);
+    }
   }
 
   switch (req.method) {

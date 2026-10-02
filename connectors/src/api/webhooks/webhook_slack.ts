@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import type {
   SlackWebhookReqBody,
   SlackWebhookResBody,
@@ -99,4 +100,6 @@ const _webhookSlackAPIHandler = async (
   return res.status(200).end();
 };
 
-export const webhookSlackAPIHandler = withLogging(_webhookSlackAPIHandler);
+export const webhookSlackAPIHandler = withLogging(
+  withEnabledConnectorProviders(["slack", "slack_bot"], _webhookSlackAPIHandler)
+);

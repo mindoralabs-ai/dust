@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import { sendMessageToAgent } from "@connectors/api/webhooks/discord/bot";
 import {
   DISCORD_API_BASE_URL,
@@ -477,4 +478,6 @@ async function sendDiscordFollowUp(
   }
 }
 
-export const webhookDiscordAppHandler = withLogging(_webhookDiscordAppHandler);
+export const webhookDiscordAppHandler = withLogging(
+  withEnabledConnectorProviders(["discord_bot"], _webhookDiscordAppHandler)
+);

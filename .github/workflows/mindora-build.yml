@@ -19,6 +19,7 @@ on:
       - "core/**"
       - "viz/**"
       - "egress-proxy/**"
+      - "connectors/**"
       - "tools/mindora/**"
   workflow_dispatch:
 
@@ -133,6 +134,31 @@ jobs:
             docker run --rm --entrypoint /bin/sh "$image" -ec \
               'test -s /app/front/dist/create_elasticsearch_index.js && test -s /app/front/lib/user_search/indices/user_search_1.settings.asia-southeast1.json && node --check /app/front/dist/create_elasticsearch_index.js'
           fi
+      - name: Smoke connectors runtime assets in built image
+        if: matrix.target == 'connectors'
+        env:
+          BUILD_KEY: ${{ matrix.build_key }}
+        run: |
+          image="mindora-dust-${BUILD_KEY}:${GITHUB_SHA}"
+          test "$(docker image inspect --format '{{.Config.WorkingDir}}' "$image")" = /app/connectors
+          docker run --rm --network none --entrypoint /bin/sh \
+            --env NODE_ENV=production \
+            --env CONNECTORS_DATABASE_URI=postgres://probe:probe@127.0.0.1:1/probe \
+            "$image" -ec '
+              psql --version >/dev/null
+              test -s dist/temporal-bundles/dust_project.bundle.js
+              for entrypoint in dist/start_server.js dist/start_worker.js dist/migrate.js dist/cli.js; do
+                node --check "$entrypoint"
+              done
+              workers_help="$(node dist/start_worker.js --help)"
+              printf "%s\n" "$workers_help" | grep -F "\"dust_project\"" >/dev/null
+              node ../scripts/db/run-migrate.cjs --command pre-deploy >/dev/null
+            '
+          expected_migrations="$(cd connectors && find migrations/pre-deploy -maxdepth 1 -type f -name '*.sql' | LC_ALL=C sort)"
+          packaged_migrations="$(docker run --rm --network none --entrypoint /bin/sh "$image" -ec \
+            'find migrations/pre-deploy -maxdepth 1 -type f -name "*.sql" | LC_ALL=C sort')"
+          test -n "$expected_migrations"
+          test "$packaged_migrations" = "$expected_migrations"
       - name: Record local build evidence
         env:
           BUILD_KEY: ${{ matrix.build_key }}

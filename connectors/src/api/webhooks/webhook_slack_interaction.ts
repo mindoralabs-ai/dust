@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import type { SlackWebhookResBody } from "@connectors/api/webhooks/slack/utils";
 import {
   botReplaceMention,
@@ -317,5 +318,8 @@ async function handleViewSubmission(
 }
 
 export const webhookSlackInteractionsAPIHandler = withLogging(
-  _webhookSlackInteractionsAPIHandler
+  withEnabledConnectorProviders(
+    ["slack", "slack_bot"],
+    _webhookSlackInteractionsAPIHandler
+  )
 );

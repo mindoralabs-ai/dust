@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import {
   launchFirecrawlCrawlCompletedWorkflow,
   launchFirecrawlCrawlFailedWorkflow,
@@ -253,5 +254,5 @@ const _webhookFirecrawlAPIHandler = async (
 };
 
 export const webhookFirecrawlAPIHandler = withLogging(
-  _webhookFirecrawlAPIHandler
+  withEnabledConnectorProviders(["webcrawler"], _webhookFirecrawlAPIHandler)
 );

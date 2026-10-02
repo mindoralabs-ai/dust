@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import {
   createErrorAdaptiveCard,
   createInteractiveToolApprovalAdaptiveCard,
@@ -72,6 +73,11 @@ adapter.onTurnError = async (context, error) => {
  * Handles all Teams messages, adaptive cards, and message extensions
  */
 export async function webhookTeamsAPIHandler(req: Request, res: Response) {
+  const enabledRes = checkConnectorProviderEnabled("microsoft_bot");
+  if (enabledRes.isErr()) {
+    return apiError(req, res, enabledRes.error);
+  }
+
   const microsoftAppId = apiConfig.getMicrosoftBotId();
   if (!microsoftAppId) {
     logger.error(

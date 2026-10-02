@@ -4,3 +4,12 @@ The core runtime image must contain `elasticsearch_create_index`,
 The front-workers image must contain the bundled front index bootstrap and its
 settings/mappings. Deployment bootstrap runs these from their expected working
 directories with a region whose settings files are packaged in the images.
+
+@cc [owner:jchen0824,label:architecture] connectors-runtime-assets
+The connectors image must contain, under `/app/connectors`, `dist/start_server.js`,
+`dist/start_worker.js`, `dist/migrate.js`, `dist/temporal-bundles/<worker>.bundle.js`
+for every worker a deployment selects with `--workers` (the POC selects `dust_project`),
+and every `migrations/pre-deploy/*.sql` file from the checkout. It must also contain
+`/app/scripts/db/run-migrate.cjs` and `psql`, and default to the `/app/connectors`
+working directory. Deployments run connectors processes from `/app/connectors` with
+`NODE_ENV=production`.

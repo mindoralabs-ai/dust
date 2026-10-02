@@ -2,6 +2,7 @@ import { adminAPIHandler } from "@connectors/api/admin";
 import { patchConnectorConfigurationAPIHandler } from "@connectors/api/configuration";
 import { createConnectorAPIHandler } from "@connectors/api/create_connector";
 import { deleteConnectorAPIHandler } from "@connectors/api/delete_connector";
+import { readEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import {
   getConnectorAPIHandler,
   getConnectorsAPIHandler,
@@ -49,7 +50,21 @@ import { profilerAPIHandler } from "./api/profiler";
 import { syncWebhookRouterEntryHandler } from "./api/sync_webhook_router_config";
 import { webhookFirecrawlAPIHandler } from "./api/webhooks/webhook_firecrawl";
 
+/**
+ * @cc [owner:jchen0824,label:security;error-handling] connectors-api-startup-enabled-providers
+ * When `CONNECTORS_ENABLED_PROVIDERS` is set but malformed (`readEnabledConnectorProviders` returns
+ * an error), `startServer` MUST throw an error carrying that parse error before it installs any
+ * process handler or opens a listener, so that the process exits. An unset or valid value MUST NOT
+ * change startup.
+ */
 export function startServer(port: number) {
+  const enabledProvidersRes = readEnabledConnectorProviders();
+  if (enabledProvidersRes.isErr()) {
+    throw new Error(
+      `Invalid connectors configuration: ${enabledProvidersRes.error.message}`
+    );
+  }
+
   setupGlobalErrorHandler(logger);
   const app = express();
 

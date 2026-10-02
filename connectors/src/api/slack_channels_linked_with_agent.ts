@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import { getChannelById } from "@connectors/connectors/slack/lib/channels";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
 import { slackChannelIdFromInternalId } from "@connectors/connectors/slack/lib/utils";
@@ -221,7 +222,10 @@ const _patchSlackChannelsLinkedWithAgentHandler = async (
 };
 
 export const patchSlackChannelsLinkedWithAgentHandler = withLogging(
-  _patchSlackChannelsLinkedWithAgentHandler
+  withEnabledConnectorProviders(
+    ["slack", "slack_bot"],
+    _patchSlackChannelsLinkedWithAgentHandler
+  )
 );
 
 type GetSlackChannelsLinkedWithAgentResBody = WithConnectorsAPIErrorReponse<{

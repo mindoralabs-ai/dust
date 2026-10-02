@@ -68,4 +68,9 @@ export const apiConfig = {
   getProfilerSecret: (): string | undefined => {
     return EnvironmentConfig.getOptionalEnvVariable("DEBUG_PROFILER_SECRET");
   },
+  // Read without `EnvironmentConfig`, which caches values and treats an empty value as unset: the
+  // allowlist must refuse an empty value rather than enable every provider.
+  getEnabledConnectorProviders: (): string | undefined => {
+    return process.env.CONNECTORS_ENABLED_PROVIDERS;
+  },
 };

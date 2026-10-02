@@ -1,5 +1,6 @@
 import logger from "@connectors/logger/logger";
 import type { ModelId } from "@connectors/types";
+import { assertNever } from "@dust-tt/client";
 import { Context } from "@temporalio/activity";
 import {
   Client,
@@ -11,6 +12,8 @@ import {
 import { defineSearchAttributeKey } from "@temporalio/common";
 import { NativeConnection } from "@temporalio/worker";
 import fs from "fs-extra";
+
+type TemporalTlsMode = "disabled" | "server" | "mutual";
 
 // Define the connectorId search attribute key for typed access.
 export const connectorIdSearchAttribute = defineSearchAttributeKey<"INT">(
@@ -44,22 +47,125 @@ export async function getTemporalClient(): Promise<Client> {
   return client;
 }
 
-async function getConnectionOptions(): Promise<
+/**
+ * @cc [owner:jchen0824,label:security;error-handling] connectors-temporal-custom-address-explicit-security
+ * When `TEMPORAL_ADDRESS` is set, the connection MUST require `TEMPORAL_NAMESPACE` and an explicit
+ * valid `TEMPORAL_TLS_MODE`, reject settings that contradict that mode, and MUST NOT fall back to
+ * the Temporal Cloud address. `TEMPORAL_TLS_MODE`, `TEMPORAL_TLS_CA_PATH` or
+ * `TEMPORAL_TLS_SERVER_NAME` without `TEMPORAL_ADDRESS` MUST be rejected.
+ */
+/**
+ * @cc [owner:jchen0824,label:architecture] connectors-temporal-address-independent-of-namespace
+ * `TEMPORAL_ADDRESS` MUST be used unchanged as the address for API clients and workers, and
+ * MUST NOT be derived from `TEMPORAL_NAMESPACE`.
+ */
+export async function getConnectionOptions(): Promise<
   | {
       address: string;
       tls: ConnectionOptions["tls"];
     }
   | Record<string, never>
 > {
-  const { NODE_ENV = "development" } = process.env;
+  const {
+    NODE_ENV = "development",
+    TEMPORAL_ADDRESS,
+    TEMPORAL_TLS_MODE,
+    TEMPORAL_CERT_PATH,
+    TEMPORAL_CERT_KEY_PATH,
+    TEMPORAL_TLS_CA_PATH,
+    TEMPORAL_TLS_SERVER_NAME,
+    TEMPORAL_NAMESPACE,
+  } = process.env;
+
+  if (
+    !TEMPORAL_ADDRESS &&
+    (TEMPORAL_TLS_MODE || TEMPORAL_TLS_CA_PATH || TEMPORAL_TLS_SERVER_NAME)
+  ) {
+    throw new Error(
+      "TEMPORAL_ADDRESS is required when custom Temporal TLS settings are set"
+    );
+  }
+
+  if (TEMPORAL_ADDRESS) {
+    if (!TEMPORAL_NAMESPACE) {
+      throw new Error(
+        "TEMPORAL_NAMESPACE is required when TEMPORAL_ADDRESS is set"
+      );
+    }
+    if (!TEMPORAL_TLS_MODE) {
+      throw new Error(
+        "TEMPORAL_TLS_MODE is required when TEMPORAL_ADDRESS is set"
+      );
+    }
+    if (!isTemporalTlsMode(TEMPORAL_TLS_MODE)) {
+      throw new Error(
+        "TEMPORAL_TLS_MODE must be one of: disabled, server, mutual"
+      );
+    }
+
+    switch (TEMPORAL_TLS_MODE) {
+      case "disabled":
+        if (
+          TEMPORAL_CERT_PATH ||
+          TEMPORAL_CERT_KEY_PATH ||
+          TEMPORAL_TLS_CA_PATH ||
+          TEMPORAL_TLS_SERVER_NAME
+        ) {
+          throw new Error(
+            "Temporal TLS certificate settings cannot be used when TEMPORAL_TLS_MODE=disabled"
+          );
+        }
+        return { address: TEMPORAL_ADDRESS, tls: false };
+      case "server": {
+        if (TEMPORAL_CERT_PATH || TEMPORAL_CERT_KEY_PATH) {
+          throw new Error(
+            "TEMPORAL_CERT_PATH and TEMPORAL_CERT_KEY_PATH require TEMPORAL_TLS_MODE=mutual"
+          );
+        }
+        const serverRootCACertificate = TEMPORAL_TLS_CA_PATH
+          ? await fs.readFile(TEMPORAL_TLS_CA_PATH)
+          : undefined;
+        return {
+          address: TEMPORAL_ADDRESS,
+          tls: {
+            serverNameOverride: TEMPORAL_TLS_SERVER_NAME,
+            serverRootCACertificate,
+          },
+        };
+      }
+      case "mutual": {
+        if (!TEMPORAL_CERT_PATH || !TEMPORAL_CERT_KEY_PATH) {
+          throw new Error(
+            "TEMPORAL_CERT_PATH and TEMPORAL_CERT_KEY_PATH are required when TEMPORAL_TLS_MODE=mutual"
+          );
+        }
+        const [cert, key, serverRootCACertificate] = await Promise.all([
+          fs.readFile(TEMPORAL_CERT_PATH),
+          fs.readFile(TEMPORAL_CERT_KEY_PATH),
+          TEMPORAL_TLS_CA_PATH
+            ? fs.readFile(TEMPORAL_TLS_CA_PATH)
+            : Promise.resolve(undefined),
+        ]);
+        return {
+          address: TEMPORAL_ADDRESS,
+          tls: {
+            clientCertPair: { crt: cert, key },
+            serverNameOverride: TEMPORAL_TLS_SERVER_NAME,
+            serverRootCACertificate,
+          },
+        };
+      }
+      default:
+        assertNever(TEMPORAL_TLS_MODE);
+    }
+  }
+
   const isDeployed = ["production", "staging"].includes(NODE_ENV);
 
   if (!isDeployed) {
     return {};
   }
 
-  const { TEMPORAL_CERT_PATH, TEMPORAL_CERT_KEY_PATH, TEMPORAL_NAMESPACE } =
-    process.env;
   if (!TEMPORAL_CERT_PATH || !TEMPORAL_CERT_KEY_PATH || !TEMPORAL_NAMESPACE) {
     throw new Error(
       "TEMPORAL_CERT_PATH, TEMPORAL_CERT_KEY_PATH and TEMPORAL_NAMESPACE are required " +
@@ -79,6 +185,10 @@ async function getConnectionOptions(): Promise<
       },
     },
   };
+}
+
+function isTemporalTlsMode(value: string): value is TemporalTlsMode {
+  return ["disabled", "server", "mutual"].includes(value);
 }
 
 // Programmatically retrieves the arguments that were passed to a Temporal workflow.

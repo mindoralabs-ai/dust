@@ -1,4 +1,9 @@
-FROM node:24.14.0 as connectors
+FROM node:24.14.0@sha256:5a593d74b632d1c6f816457477b6819760e13624455d587eef0fa418c8d0777b AS connectors
+
+# psql runs the SQL migrations (scripts/db/migration-runner.ts)
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends postgresql-client && \
+  rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g npm@11.11.0
 

@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { getConnectorManager } from "@connectors/connectors";
 import logger from "@connectors/logger/logger";
 import { apiError, withLogging } from "@connectors/logger/withlogging";
@@ -58,6 +59,11 @@ const _postConnectorUpdateAPIHandler = async (
       },
       status_code: 404,
     });
+  }
+
+  const enabledRes = checkConnectorProviderEnabled(connector.type);
+  if (enabledRes.isErr()) {
+    return apiError(req, res, enabledRes.error);
   }
 
   const updateRes = await getConnectorManager({
