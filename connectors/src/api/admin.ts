@@ -16,82 +16,99 @@ import type { Request, Response } from "express";
 import { fromError } from "zod-validation-error";
 
 /**
- * The providers that an admin command requires:
- * - `none`: its major command's provider when that is a provider (`notion`, `slack`, ...), and
- *   nothing otherwise. The command stops, pauses, deletes, reads or stores Dust-side state only,
- *   or acts only on connectors of its major command's provider: it looks them up by that type, or
- *   refuses another type before any side effect.
+ * The providers that an admin command requires. A handler starts work for a connector or provider
+ * when it starts, signals, restarts or unpauses a workflow or schedule, syncs, upserts into (or
+ * re-parents in) a Dust data source, or calls the provider's API to change provider state.
+ * - `available`: none. The handler starts no work: it reads (Dust-side state, Temporal, or a
+ *   provider's API without changing provider state), stores Dust-side state, or pauses, stops or
+ *   deletes (connectors, workflows, Dust documents or rows) without starting or signalling a
+ *   workflow.
+ * - `none`: its major command's provider, for a major command that is a provider (`notion`,
+ *   `slack`, ...). The handler starts work only for connectors of that provider: it looks them up
+ *   by that type, or refuses another type before any side effect.
  * - `named_connector`: its major command's provider when that is a provider, and the type of the
- *   connector that its `connectorId`, or its `wId` and `dsId`, name. The command finds that
- *   connector whatever its type, and acts on it with its major command's provider's API,
- *   workflows or tables.
- * - `provider_arg`: only the provider that its `arg` argument names. The command acts only on the
- *   connectors of that provider, which it looks up by that type, so it requires its major
+ *   connector that its `connectorId`, or its `wId` and `dsId`, name. The handler finds that
+ *   connector whatever its type, and starts work for it with its major command's provider's
+ *   workflows, API or data source documents.
+ * - `provider_arg`: only the provider that its `arg` argument names. The handler starts work only
+ *   for the connectors of that provider, which it looks up by that type, so it requires its major
  *   command's provider only when the argument names it.
- * - `providers`: only `providers`, whose connectors it looks up by type. They include its major
- *   command's provider only when it acts on that provider's connectors.
+ * - `providers`: only `providers`, the types by which it looks up the connectors it starts work
+ *   for. They include its major command's provider only when it starts work for that provider's
+ *   connectors.
  */
 type AdminCommandTarget =
+  | { kind: "available" }
   | { kind: "none" }
   | { kind: "named_connector" }
   | { kind: "provider_arg"; arg: "provider" | "providerType" }
   | { kind: "providers"; providers: readonly ConnectorProvider[] };
 
-const NONE: AdminCommandTarget = { kind: "none" };
-const NAMED_CONNECTOR: AdminCommandTarget = { kind: "named_connector" };
+const AVAILABLE = { kind: "available" } as const;
+const NONE = { kind: "none" } as const;
+const NAMED_CONNECTOR = { kind: "named_connector" } as const;
 
 // Keyed by every command of `AdminCommandSchema`, so that a command added upstream fails
-// type-checking here until it is classified.
+// type-checking here until it is classified. A major command that is not a provider has no `none`
+// entry.
 type AdminCommandTargets = {
   [C in AdminCommandType as C["majorCommand"]]: Record<
     C["command"],
-    AdminCommandTarget
+    C["majorCommand"] extends ConnectorProvider
+      ? AdminCommandTarget
+      : Exclude<AdminCommandTarget, { kind: "none" }>
   >;
 };
 
 /**
  * @cc [owner:jchen0824,label:security] admin-command-targets
  * For every request, the providers that each command's entry requires MUST include every provider
- * whose connectors its handler (`runCommand` in `@connectors/lib/cli`, and the provider `lib/cli`
- * it calls) can start work for, or whose API it calls with a connector's credentials. The entry is
- * `named_connector` when the handler finds a connector by `connectorId`, or by `wId` and `dsId`,
- * without refusing another type before any side effect. A handler that acts on connectors (starts
- * work for them, calls their API or changes their configuration) only after looking them up by
- * the type an argument names, or by fixed types that are not just its major command's provider,
- * MUST have a `provider_arg` entry, or a `providers` entry listing exactly those types: such a
- * request requires its major command's provider only when the handler acts on that provider's
- * connectors. A change to a handler MUST re-classify its command in the same change.
+ * that its handler (`runCommand` in `@connectors/lib/cli`, the provider `lib/cli` it calls, and
+ * what they call) can start work for, itself or for its connectors, as `AdminCommandTarget`
+ * defines starting work. The entry is `available` only when the handler starts no work whatever
+ * its arguments: a handler that starts work only for some arguments (a flag, a value that
+ * increases), or that has a code path that might start work, is classified as starting work. The
+ * entry is `named_connector` when the handler starts work for a connector that it finds by
+ * `connectorId`, or by `wId` and `dsId`, without refusing another type before any side effect. A
+ * handler that starts work only for connectors that it looks up by the type an argument names, or
+ * by fixed types that are not just its major command's provider, MUST have a `provider_arg` entry,
+ * or a `providers` entry listing exactly those types. A command without a handler fails before
+ * any side effect; its entry is the one that a handler doing what its name says would have. A
+ * change to a handler, including adding one, MUST re-classify its command in the same change.
  */
 export const ADMIN_COMMAND_TARGETS: AdminCommandTargets = {
   batch: {
     "full-resync": { kind: "provider_arg", arg: "provider" },
     "restart-all": { kind: "provider_arg", arg: "provider" },
     "resume-all": { kind: "provider_arg", arg: "provider" },
-    "stop-all": NONE,
+    // Stops the connectors of `provider` only.
+    "stop-all": AVAILABLE,
   },
   // Every command refuses a connector that is not a Confluence connector.
   confluence: {
-    "check-page-exists": NONE,
-    "check-space-access": NONE,
-    "ignore-near-rate-limit": NONE,
-    me: NONE,
-    "resolve-space-from-url": NONE,
-    "skip-page": NONE,
+    "check-page-exists": AVAILABLE,
+    "check-space-access": AVAILABLE,
+    // No handler: the command fails. It would store a Dust-side setting.
+    "ignore-near-rate-limit": AVAILABLE,
+    me: AVAILABLE,
+    "resolve-space-from-url": AVAILABLE,
+    // Stores the page's skip reason, after reading the page from Confluence.
+    "skip-page": AVAILABLE,
     "sync-space": NONE,
-    "unignore-near-rate-limit": NONE,
+    "unignore-near-rate-limit": AVAILABLE,
+    // Re-parents the space's pages and folders in the data source.
     "update-parents": NONE,
     "upsert-page": NONE,
     "upsert-pages": NONE,
   },
   connectors: {
-    stop: NONE,
-    pause: NONE,
+    stop: AVAILABLE,
+    pause: AVAILABLE,
     // No handler: the command fails.
-    delete: NONE,
-    "get-parents": NONE,
-    // Store the connector's error state only.
-    "set-error": NONE,
-    "clear-error": NONE,
+    delete: AVAILABLE,
+    "get-parents": AVAILABLE,
+    "set-error": AVAILABLE,
+    "clear-error": AVAILABLE,
     unpause: NAMED_CONNECTOR,
     resume: NAMED_CONNECTOR,
     "full-resync": NAMED_CONNECTOR,
@@ -100,161 +117,174 @@ export const ADMIN_COMMAND_TARGETS: AdminCommandTargets = {
     "garbage-collect": NAMED_CONNECTOR,
   },
   // Every command finds its connector by `connectorId`, refusing a non-GitHub one, or by `wId` and
-  // `dsId`, whatever its type.
+  // `dsId`, whatever its type. The skip, list and clear commands read or store Dust-side state.
   github: {
     "resync-repo": NAMED_CONNECTOR,
     "resync-repo-code": NAMED_CONNECTOR,
     "code-sync": NAMED_CONNECTOR,
     "sync-issue": NAMED_CONNECTOR,
     "force-daily-code-sync": NAMED_CONNECTOR,
-    "skip-issue": NAMED_CONNECTOR,
-    "skip-repo": NAMED_CONNECTOR,
-    "unskip-repo": NAMED_CONNECTOR,
-    "list-skipped-repos": NAMED_CONNECTOR,
-    "skip-code-file": NAMED_CONNECTOR,
-    "unskip-code-file": NAMED_CONNECTOR,
-    "clear-installation-id": NAMED_CONNECTOR,
+    "skip-issue": AVAILABLE,
+    "skip-repo": AVAILABLE,
+    "unskip-repo": AVAILABLE,
+    "list-skipped-repos": AVAILABLE,
+    "skip-code-file": AVAILABLE,
+    "unskip-code-file": AVAILABLE,
+    "clear-installation-id": AVAILABLE,
   },
   // Every command refuses a connector that is not a Gong connector.
   gong: {
     "force-resync": NONE,
-    "delete-transcript": NONE,
+    "delete-transcript": AVAILABLE,
   },
   // `getConnector` finds a connector by `connectorId`, or by `wId` and `dsId`, whatever its type.
   google_drive: {
     "garbage-collect-all": NONE,
     "restart-all-incremental-sync-workflows": NONE,
-    "get-file-metadata": NAMED_CONNECTOR,
-    "check-file": NAMED_CONNECTOR,
+    "get-file-metadata": AVAILABLE,
+    "check-file": AVAILABLE,
+    // With `--fix true`, deletes files from and upserts folders into the data source.
     "get-google-parents": NAMED_CONNECTOR,
     "clean-invalid-parents": NAMED_CONNECTOR,
     "upsert-file": NAMED_CONNECTOR,
     "update-core-parents": NAMED_CONNECTOR,
     "start-full-sync": NAMED_CONNECTOR,
     "start-incremental-sync": NAMED_CONNECTOR,
-    "skip-file": NAMED_CONNECTOR,
-    "list-labels": NAMED_CONNECTOR,
-    "export-folder-structure": NAMED_CONNECTOR,
-    // No handler: the command fails. Classified as the commands that use `getConnector`.
+    "skip-file": AVAILABLE,
+    "list-labels": AVAILABLE,
+    "export-folder-structure": AVAILABLE,
+    // No handler: the command fails. It would register Google webhooks for the named connector.
     "restart-google-webhooks": NAMED_CONNECTOR,
     "register-webhook": NAMED_CONNECTOR,
     "register-all-webhooks": NAMED_CONNECTOR,
   },
   // Every command refuses a connector that is not an Intercom connector.
   intercom: {
-    "force-resync-articles": NONE,
+    // Clears the articles' upsert timestamps only; it starts no sync.
+    "force-resync-articles": AVAILABLE,
     "force-resync-all-conversations": NONE,
-    "check-conversation": NONE,
-    "fetch-conversation": NONE,
-    "fetch-articles": NONE,
-    "check-missing-conversations": NONE,
-    "check-teams": NONE,
-    "set-conversations-sliding-window": NONE,
-    "get-conversations-sliding-window": NONE,
-    "search-conversations": NONE,
+    "check-conversation": AVAILABLE,
+    "fetch-conversation": AVAILABLE,
+    "fetch-articles": AVAILABLE,
+    "check-missing-conversations": AVAILABLE,
+    "check-teams": AVAILABLE,
+    "set-conversations-sliding-window": AVAILABLE,
+    "get-conversations-sliding-window": AVAILABLE,
+    "search-conversations": AVAILABLE,
     "restart-schedules": NONE,
   },
   // `getConnector` finds a connector by `connectorId`, or by `wId` and `dsId`, whatever its type.
   microsoft: {
     "garbage-collect-all": NONE,
     "restart-all-incremental-sync-workflows": NONE,
-    "check-file": NAMED_CONNECTOR,
+    "check-file": AVAILABLE,
     "start-full-sync": NAMED_CONNECTOR,
     "start-incremental-sync": NAMED_CONNECTOR,
-    "skip-file": NAMED_CONNECTOR,
+    // Reads the file from Microsoft and stores its skip reason.
+    "skip-file": AVAILABLE,
     "sync-node": NAMED_CONNECTOR,
-    "update-parent-in-node-table": NAMED_CONNECTOR,
+    // Reads the nodes from Microsoft and stores their parents in the node table only.
+    "update-parent-in-node-table": AVAILABLE,
     "update-core-parents": NAMED_CONNECTOR,
-    // No handler: the command fails. Classified as the commands that use `getConnector`.
-    "get-parents": NAMED_CONNECTOR,
+    // No handler: the command fails. It would read parents.
+    "get-parents": AVAILABLE,
   },
   // Every command looks up Notion connectors by type.
   notion: {
-    "skip-page": NONE,
-    "skip-database": NONE,
+    "skip-page": AVAILABLE,
+    "skip-database": AVAILABLE,
     "upsert-page": NONE,
     "upsert-database": NONE,
-    "search-pages": NONE,
+    "search-pages": AVAILABLE,
     "update-core-parents": NONE,
-    "check-url": NONE,
-    "find-url": NONE,
+    "check-url": AVAILABLE,
+    "find-url": AVAILABLE,
+    // Deletes through the deletion crawl workflow, which it signals with start.
     "delete-url": NONE,
-    me: NONE,
-    "stop-all-garbage-collectors": NONE,
+    me: AVAILABLE,
+    "stop-all-garbage-collectors": AVAILABLE,
+    // No handler: the command fails. It would re-parent documents in the data source.
     "update-parents-fields": NONE,
-    "clear-parents-last-updated-at": NONE,
+    "clear-parents-last-updated-at": AVAILABLE,
     "update-orphaned-resources-parents": NONE,
-    "api-request": NONE,
+    // Sends only GET requests, and POST requests to `search`.
+    "api-request": AVAILABLE,
   },
   // Every command refuses a connector that is not a Salesforce connector.
   salesforce: {
-    "check-connection": NONE,
+    "check-connection": AVAILABLE,
+    // Sends the caller's SOQL unchanged, and `FOR VIEW` or `FOR REFERENCE` updates records'
+    // view dates in Salesforce.
     "run-soql": NONE,
+    // Runs the caller's SOQL as `run-soql` does and, with `--execute`, stores it for the next sync.
     "setup-synced-query": NONE,
     "sync-query": NONE,
   },
-  // `run-auto-join` and `whitelist-bot` act only on the connector of the provider that
-  // `providerType` names, and refuse one other than `slack` or `slack_bot` before any side effect.
-  // `whitelist-domains` acts only on the `slack_bot` connector, and `cutover-legacy-bot` on the
-  // `slack` and `slack_bot` connectors. The other commands look up Slack connectors by type
-  // (`uninstall-for-unknown-team-ids` has no handler).
+  // `run-auto-join` starts work only for the connector of the provider that `providerType` names,
+  // and refuses one other than `slack` or `slack_bot` before any side effect. `cutover-legacy-bot`
+  // migrates the `slack` connector's channels to the `slack_bot` connector. The other commands look
+  // up Slack connectors by type. `enable-bot`, `whitelist-bot` and `whitelist-domains` store
+  // Dust-side configuration only; `skip-channel` and `unskip-channel` start a garbage collection or
+  // a sync when the channel is synced.
   slack: {
     "add-channel-to-sync": NONE,
     "cutover-legacy-bot": {
       kind: "providers",
       providers: ["slack", "slack_bot"],
     },
-    "enable-bot": NONE,
+    "enable-bot": AVAILABLE,
     "remove-channel-from-sync": NONE,
     "skip-channel": NONE,
-    "skip-thread": NONE,
+    "skip-thread": AVAILABLE,
     "sync-channel": NONE,
     "sync-channel-metadata": NONE,
     "sync-thread": NONE,
-    "uninstall-for-unknown-team-ids": NONE,
+    // No handler: the command fails. It would uninstall the app from teams.
+    "uninstall-for-unknown-team-ids": AVAILABLE,
     "unskip-channel": NONE,
     "run-auto-join": { kind: "provider_arg", arg: "providerType" },
-    "whitelist-bot": { kind: "provider_arg", arg: "providerType" },
-    "whitelist-domains": { kind: "providers", providers: ["slack_bot"] },
-    "check-channel": NONE,
-    "delete-conversation": NONE,
+    "whitelist-bot": AVAILABLE,
+    "whitelist-domains": AVAILABLE,
+    "check-channel": AVAILABLE,
+    "delete-conversation": AVAILABLE,
   },
   // Every command refuses a connector that is not a Snowflake connector.
   snowflake: {
-    "fetch-databases": NONE,
-    "fetch-schemas": NONE,
-    "fetch-tables": NONE,
+    "fetch-databases": AVAILABLE,
+    "fetch-schemas": AVAILABLE,
+    "fetch-tables": AVAILABLE,
   },
-  // Read Temporal state or stop a workflow.
+  // Read Temporal state or terminate a workflow.
   temporal: {
-    "check-queue": NONE,
-    "find-unprocessed-workflows": NONE,
-    "stop-workflow": NONE,
+    "check-queue": AVAILABLE,
+    "find-unprocessed-workflows": AVAILABLE,
+    "stop-workflow": AVAILABLE,
   },
   webcrawler: {
     // Starts the scheduler of webcrawler connectors.
     "start-scheduler": NONE,
-    // Find the connector by `connectorId`, whatever its type.
-    "update-frequency": NAMED_CONNECTOR,
-    "set-actions": NAMED_CONNECTOR,
+    // Store the crawler configuration of the connector that `connectorId` names.
+    "update-frequency": AVAILABLE,
+    "set-actions": AVAILABLE,
   },
   // Every command refuses a connector that is not a Zendesk connector.
   zendesk: {
-    "check-is-admin": NONE,
-    "count-tickets": NONE,
+    "check-is-admin": AVAILABLE,
+    "count-tickets": AVAILABLE,
     "resync-tickets": NONE,
-    "fetch-ticket": NONE,
-    "fetch-brand": NONE,
+    "fetch-ticket": AVAILABLE,
+    "fetch-brand": AVAILABLE,
     "resync-help-centers": NONE,
     "resync-brand-metadata": NONE,
     "sync-ticket": NONE,
-    "get-retention-period": NONE,
+    "get-retention-period": AVAILABLE,
+    // Starts a ticket sync when the retention period increases.
     "set-retention-period": NONE,
-    "add-organization-tag": NONE,
-    "remove-organization-tag": NONE,
-    "add-ticket-tag": NONE,
-    "remove-ticket-tag": NONE,
-    "set-rate-limit": NONE,
+    "add-organization-tag": AVAILABLE,
+    "remove-organization-tag": AVAILABLE,
+    "add-ticket-tag": AVAILABLE,
+    "remove-ticket-tag": AVAILABLE,
+    "set-rate-limit": AVAILABLE,
   },
 };
 
@@ -318,10 +348,10 @@ async function namedConnectorProviders(
 }
 
 // The providers that `target` requires, as `AdminCommandTarget` describes, given the providers of
-// its major command.
+// its major command. A `none` entry of a major command that is not a provider resolves to none.
 async function resolveAdminCommandProviders(
   majorProviders: readonly ConnectorProvider[],
-  target: AdminCommandTarget,
+  target: Exclude<AdminCommandTarget, { kind: "available" }>,
   args: Readonly<Record<string, unknown>>
 ): Promise<Result<readonly ConnectorProvider[], Error>> {
   switch (target.kind) {
@@ -352,27 +382,28 @@ async function resolveAdminCommandProviders(
 
 /**
  * @cc [owner:jchen0824,label:security] admin-command-provider-guard
- * When `CONNECTORS_ENABLED_PROVIDERS` is set, returns `Ok` for an admin command only when the list
- * enables every provider that its entry in `ADMIN_COMMAND_TARGETS` requires, and requires no
- * other provider: its major command's provider, when that is a provider, only for a `none` or
- * `named_connector` entry. It refuses a command without an entry, and one whose entry does not
- * resolve. A command whose major command is not a provider and whose entry is `none` is `Ok`
- * whatever the list. The connectors are looked up only when the list is set.
+ * Returns `Ok` for an admin command whose entry in `ADMIN_COMMAND_TARGETS` is `available`, without
+ * reading `CONNECTORS_ENABLED_PROVIDERS`. For any other command, when the variable is set, returns
+ * `Ok` only when the entry resolves to at least one provider, the list enables every provider that
+ * the entry requires, and the entry requires no other provider: its major command's provider only
+ * for a `none` or `named_connector` entry. It refuses a command without an entry, and one whose
+ * entry does not resolve. When the variable is unset, it returns `Ok`. The connectors are looked
+ * up only when the list is set.
  */
 export async function checkAdminCommandProvidersEnabled(
   adminCommand: AdminCommandType
 ): Promise<Result<void, ConnectorsAPIErrorWithStatusCode>> {
   const { majorCommand, command, args } = adminCommand;
   const target = adminCommandTarget(adminCommand);
+  if (target?.kind === "available") {
+    return new Ok(undefined);
+  }
+
   const majorProviders: ConnectorProvider[] = isKnownConnectorProvider(
     majorCommand
   )
     ? [majorCommand]
     : [];
-  if (target?.kind === "none" && majorProviders.length === 0) {
-    return new Ok(undefined);
-  }
-
   return checkResolvedConnectorProvidersEnabled(async () => {
     if (!target) {
       return new Err(

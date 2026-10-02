@@ -12,6 +12,8 @@ import {
 import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { isAppMentionMessage } from "@connectors/api/webhooks/slack/utils";
 import { startServer } from "@connectors/api_server";
+import { ConfluenceClient } from "@connectors/connectors/confluence/lib/confluence_client";
+import * as confluenceUtils from "@connectors/connectors/confluence/lib/utils";
 import { DustProjectConnectorManager } from "@connectors/connectors/dust_project";
 import { launchGithubIssueSyncWorkflow } from "@connectors/connectors/github/temporal/client";
 import type { BaseConnectorManager } from "@connectors/connectors/interface";
@@ -21,6 +23,7 @@ import { botReplaceMention } from "@connectors/connectors/slack/bot";
 import { submitFeedbackToAPI } from "@connectors/connectors/slack/feedback_api";
 import { getSlackClientForTeam } from "@connectors/connectors/slack/feedback_modal";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
+import { slackThreadInternalIdFromSlackThreadIdentifier } from "@connectors/connectors/slack/lib/utils";
 import {
   launchJoinChannelWorkflow,
   launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow,
@@ -30,17 +33,30 @@ import { processSlackWebhookEventActivity } from "@connectors/connectors/slack/t
 import { SlackBotConnectorManager } from "@connectors/connectors/slack_bot";
 import { WebcrawlerConnectorManager } from "@connectors/connectors/webcrawler";
 import { launchFirecrawlCrawlStartedWorkflow } from "@connectors/connectors/webcrawler/temporal/client";
+import * as zendeskAccessToken from "@connectors/connectors/zendesk/lib/zendesk_access_token";
 import { runCommand } from "@connectors/lib/cli";
+import * as dataSources from "@connectors/lib/data_sources";
 import {
   PROVIDER_GROUPS,
   parseEnabledConnectorProviders,
 } from "@connectors/lib/enabled_connector_providers";
-import { GithubConnectorStateModel } from "@connectors/lib/models/github";
+import { ConfluenceConfigurationModel } from "@connectors/lib/models/confluence";
+import {
+  GithubCodeRepositoryModel,
+  GithubConnectorStateModel,
+} from "@connectors/lib/models/github";
+import { GongTranscriptModel } from "@connectors/lib/models/gong";
+import { GoogleDriveFilesModel } from "@connectors/lib/models/google_drive";
+import { IntercomWorkspaceModel } from "@connectors/lib/models/intercom";
 import { NotionConnectorStateModel } from "@connectors/lib/models/notion";
 import {
+  SlackBotWhitelistModel,
   SlackChannelModel,
   SlackConfigurationModel,
+  SlackMessagesModel,
 } from "@connectors/lib/models/slack";
+import { WebCrawlerConfigurationModel } from "@connectors/lib/models/webcrawler";
+import { ZendeskConfigurationModel } from "@connectors/lib/models/zendesk";
 import { ConnectorResource } from "@connectors/resources/connector_resource";
 import { SlackConfigurationResource } from "@connectors/resources/slack_configuration_resource";
 import { ConnectorModel } from "@connectors/resources/storage/models/connector_model";
@@ -221,12 +237,24 @@ function webhookPath(route: string) {
 
 const SIGNALS = ["SIGTERM", "SIGINT"] as const;
 const stopApis: Array<() => Promise<void>> = [];
+// `startServer` listens on every address. On an ephemeral port that another process holds on
+// 127.0.0.1, requests sent to 127.0.0.1 would reach that process, so the API listens there only.
+const API_HOST = "127.0.0.1";
 
 // Starts the real API (`startServer`) on an ephemeral port. Started inside a test, it serves
 // requests within that test's database transaction.
 async function startApi() {
   const signalListeners = SIGNALS.map((s) => process.listeners(s));
-  const listen = vi.spyOn(net.Server.prototype, "listen");
+  const serverListen = net.Server.prototype.listen;
+  const listen = vi
+    .spyOn(net.Server.prototype, "listen")
+    .mockImplementation(function (this: net.Server, port, listeningListener) {
+      return serverListen.call(
+        this,
+        { port, host: API_HOST },
+        listeningListener
+      );
+    });
   let server: Server | undefined;
   try {
     startServer(0);
@@ -258,12 +286,17 @@ async function startApi() {
   if (!address || typeof address === "string") {
     throw new Error("API server has no TCP address");
   }
+  if (address.address !== API_HOST) {
+    throw new Error(
+      `API server listens on ${address.address}, not on ${API_HOST}`
+    );
+  }
 
   return {
     app: server.listeners("request")[0],
     async send(request: ApiRequest): Promise<ApiResponse> {
       const res = await fetch(
-        `http://127.0.0.1:${address.port}${request.path}`,
+        `http://${API_HOST}:${address.port}${request.path}`,
         {
           method: request.method,
           headers: {
@@ -663,6 +696,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
     },
   },
   {
+    // A command that starts work for its provider: a command that starts none runs under any list.
     route: "POST /connectors/admin",
     provider: "notion",
     servesDustProject: false,
@@ -670,8 +704,8 @@ const GUARDED_ROUTES: GuardedRoute[] = [
       vi.mocked(runCommand).mockResolvedValue({ success: true });
       const command = {
         majorCommand: "notion",
-        command: "check-url",
-        args: { url: "https://www.notion.so/page" },
+        command: "upsert-page",
+        args: { wId: "workspace", dsId: "data-source", pageId: "page" },
       };
       return {
         request: jsonRequest("POST", "/connectors/admin", command),
@@ -1444,51 +1478,29 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: UNRESOLVED,
   },
   {
-    // It requires only the provider that providerType names, not its major command's slack.
+    // It deletes through a workflow that it signals.
+    title: "refuses notion delete-url when the list does not enable notion",
+    list: "dust_project",
+    command: async () => ({
+      majorCommand: "notion",
+      command: "delete-url",
+      args: {
+        wId: "workspace",
+        dsId: "data-source",
+        url: "https://www.notion.so/page",
+      },
+    }),
+    refusal: notEnabled(["notion"]),
+  },
+  {
+    // It starts a garbage collection when the channel is synced.
     title:
-      "refuses slack whitelist-bot on slack_bot for slack_bot when the list enables neither Slack provider",
+      "refuses slack skip-channel when the list enables neither Slack provider",
     list: "dust_project",
     command: async () => ({
       majorCommand: "slack",
-      command: "whitelist-bot",
-      args: {
-        wId: "workspace",
-        botName: "bot",
-        whitelistType: "summon_agent",
-        providerType: "slack_bot",
-      },
-    }),
-    refusal: notEnabled(["slack_bot"]),
-  },
-  {
-    title:
-      "runs slack whitelist-bot on slack_bot when the list enables slack and slack_bot",
-    list: "slack,slack_bot",
-    command: async () => ({
-      majorCommand: "slack",
-      command: "whitelist-bot",
-      args: {
-        wId: "workspace",
-        botName: "bot",
-        whitelistType: "summon_agent",
-        providerType: "slack_bot",
-      },
-    }),
-    refusal: null,
-  },
-  {
-    title:
-      "refuses slack whitelist-bot on slack when the list enables neither Slack provider",
-    list: "dust_project",
-    command: async () => ({
-      majorCommand: "slack",
-      command: "whitelist-bot",
-      args: {
-        wId: "workspace",
-        botName: "bot",
-        whitelistType: "index_messages",
-        providerType: "slack",
-      },
+      command: "skip-channel",
+      args: { wId: "workspace", channelId: "C1", skipReason: "noise" },
     }),
     refusal: notEnabled(["slack"]),
   },
@@ -1593,8 +1605,9 @@ const ADMIN_API_CASES: AdminApiCase[] = [
     refusal: UNRESOLVED,
   },
   {
+    // It stores the crawler configuration only, whatever the connector's type.
     title:
-      "refuses webcrawler update-frequency on a dust_project connector when the list enables only webcrawler",
+      "runs webcrawler update-frequency on a dust_project connector when the list enables only webcrawler",
     list: "webcrawler",
     command: async () => ({
       majorCommand: "webcrawler",
@@ -1604,7 +1617,7 @@ const ADMIN_API_CASES: AdminApiCase[] = [
         crawlFrequency: "never",
       },
     }),
-    refusal: notEnabled(["dust_project"]),
+    refusal: null,
   },
   {
     title: "runs webcrawler update-frequency on a webcrawler connector",
@@ -1868,18 +1881,15 @@ describe("POST /connectors/admin command targets", () => {
       ).toBeNull();
     });
 
-    // It acts only on the slack_bot connector, not on the slack one, so it requires slack_bot and
-    // not its major command's slack.
-    it("runs slack whitelist-domains only when the list enables slack_bot", async () => {
-      const slackCommand: AdminCommandType = {
-        majorCommand: "slack",
-        command: "whitelist-domains",
-        args: { wId: "workspace" },
-      };
-
-      expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
-      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
-      expect(await checkAdmin(slackCommand)).toBeNull();
+    // It stores the slack_bot connector's whitelisted domains only.
+    it("runs slack whitelist-domains when the list enables neither Slack provider", async () => {
+      expect(
+        await checkAdmin({
+          majorCommand: "slack",
+          command: "whitelist-domains",
+          args: { wId: "workspace", whitelistedDomains: "example.com:group" },
+        })
+      ).toBeNull();
     });
 
     // It migrates the slack connector's channels to the slack_bot connector.
@@ -1897,7 +1907,7 @@ describe("POST /connectors/admin command targets", () => {
 
     it.each(
       PARTIAL_SLACK_LISTS
-    )("refuses every slack command as misconfigured when the list is $list", async ({
+    )("refuses every slack command that starts work as misconfigured when the list is $list", async ({
       list,
       error,
     }) => {
@@ -1910,6 +1920,36 @@ describe("POST /connectors/admin command targets", () => {
         },
         {
           majorCommand: "slack",
+          command: "cutover-legacy-bot",
+          args: { wId: "workspace" },
+        },
+        {
+          majorCommand: "slack",
+          command: "sync-channel",
+          args: { wId: "workspace", channelId: "C1" },
+        },
+        {
+          majorCommand: "slack",
+          command: "skip-channel",
+          args: { wId: "workspace", channelId: "C1", skipReason: "noise" },
+        },
+      ];
+
+      for (const slackCommand of slackCommands) {
+        expect(await checkAdmin(slackCommand)).toEqual(misconfigured(error));
+      }
+    });
+
+    // They start no work, so the list does not concern them.
+    it.each(
+      PARTIAL_SLACK_LISTS
+    )("runs slack commands that start no work when the list is $list", async ({
+      list,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+      const slackCommands: AdminCommandType[] = [
+        {
+          majorCommand: "slack",
           command: "whitelist-bot",
           args: {
             wId: "workspace",
@@ -1920,23 +1960,13 @@ describe("POST /connectors/admin command targets", () => {
         },
         {
           majorCommand: "slack",
-          command: "whitelist-domains",
-          args: { wId: "workspace" },
-        },
-        {
-          majorCommand: "slack",
-          command: "cutover-legacy-bot",
-          args: { wId: "workspace" },
-        },
-        {
-          majorCommand: "slack",
-          command: "sync-channel",
-          args: { wId: "workspace", channelId: "C1" },
+          command: "delete-conversation",
+          args: { wId: "workspace", channelId: "C1", threadTs: "1.0" },
         },
       ];
 
       for (const slackCommand of slackCommands) {
-        expect(await checkAdmin(slackCommand)).toEqual(misconfigured(error));
+        expect(await checkAdmin(slackCommand)).toBeNull();
       }
     });
 
@@ -1957,6 +1987,474 @@ describe("POST /connectors/admin command targets", () => {
         })
       ).toEqual(notEnabled(["dust_project"]));
     });
+  });
+});
+
+// The `runCommand` that the admin route calls, which this file replaces for the routes.
+async function actualRunCommand(command: AdminCommandType) {
+  const cli = await vi.importActual<typeof import("@connectors/lib/cli")>(
+    "@connectors/lib/cli"
+  );
+  return cli.runCommand(command);
+}
+
+type AvailableAdminCase = {
+  title: string;
+  // A list that enables none of the providers the command acts on.
+  list: string;
+  // Creates what the handler acts on. Returns the command, the handler's answer, and a check of
+  // what the handler did.
+  prepare: () => Promise<{
+    command: AdminCommandType;
+    result: unknown;
+    expectEffect: () => Promise<void> | void;
+  }>;
+};
+
+// Commands that start no work and that the admin route whitelists, sent through the app
+// `startServer` builds to their real handler.
+const AVAILABLE_ADMIN_API_CASES: AvailableAdminCase[] = [
+  {
+    title:
+      "slack delete-conversation when the list enables neither Slack provider",
+    list: "dust_project",
+    async prepare() {
+      const { slack } = await makeSlackTeam(null);
+      const documentId = slackThreadInternalIdFromSlackThreadIdentifier({
+        channelId: "C1",
+        threadTs: "1.0",
+      });
+      await SlackMessagesModel.create({
+        connectorId: slack.id,
+        channelId: "C1",
+        messageTs: "1.0",
+        documentId,
+      });
+      const deleteDocument = vi
+        .spyOn(dataSources, "deleteDataSourceDocument")
+        .mockResolvedValue(undefined);
+      return {
+        command: {
+          majorCommand: "slack",
+          command: "delete-conversation",
+          args: { wId: "workspace", channelId: "C1", threadTs: "1.0" },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(deleteDocument).toHaveBeenCalledWith(
+            expect.objectContaining({ dataSourceId: slack.dataSourceId }),
+            documentId,
+            expect.anything()
+          );
+          expect(
+            await SlackMessagesModel.count({ where: { connectorId: slack.id } })
+          ).toBe(0);
+        },
+      };
+    },
+  },
+  {
+    title:
+      "confluence check-page-exists when the list does not enable confluence",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("confluence");
+      await ConfluenceConfigurationModel.create({
+        connectorId: connector.id,
+        cloudId: "cloud",
+        url: "https://acme.atlassian.net",
+        userAccountId: "user",
+      });
+      vi.spyOn(confluenceUtils, "getConfluenceClient").mockResolvedValue(
+        new ConfluenceClient("token", { cloudId: "cloud" })
+      );
+      const getPages = vi
+        .spyOn(ConfluenceClient.prototype, "getPagesByIdsInSpace")
+        .mockResolvedValue({ results: [], _links: {} });
+      return {
+        command: {
+          majorCommand: "confluence",
+          command: "check-page-exists",
+          args: {
+            connectorId: connector.id,
+            url: "https://acme.atlassian.net/wiki/spaces/SPACE/pages/123/Page",
+          },
+        },
+        result: { exists: false },
+        expectEffect() {
+          expect(getPages).toHaveBeenCalledWith({
+            spaceKey: "SPACE",
+            pageIds: ["123"],
+          });
+        },
+      };
+    },
+  },
+  {
+    title:
+      "connectors set-error on a webcrawler connector when the list does not enable webcrawler",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("webcrawler");
+      return {
+        command: {
+          majorCommand: "connectors",
+          command: "set-error",
+          args: {
+            wId: "workspace",
+            connectorId: connector.id.toString(),
+            error: "oauth_token_revoked",
+          },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(await ConnectorModel.findByPk(connector.id)).toMatchObject({
+            errorType: "oauth_token_revoked",
+          });
+        },
+      };
+    },
+  },
+  {
+    title:
+      "intercom set-conversations-sliding-window when the list does not enable intercom",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("intercom");
+      await IntercomWorkspaceModel.create({
+        connectorId: connector.id,
+        intercomWorkspaceId: "intercom-workspace",
+        name: "Acme",
+        region: "US",
+        conversationsSlidingWindow: 90,
+        syncAllConversations: "disabled",
+        shouldSyncNotes: true,
+      });
+      return {
+        command: {
+          majorCommand: "intercom",
+          command: "set-conversations-sliding-window",
+          args: { connectorId: connector.id, conversationsSlidingWindow: 7 },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await IntercomWorkspaceModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ conversationsSlidingWindow: 7 });
+        },
+      };
+    },
+  },
+  {
+    title:
+      "notion clear-parents-last-updated-at when the list does not enable notion",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("notion");
+      await NotionConnectorStateModel.create({
+        connectorId: connector.id,
+        notionWorkspaceId: "notion-workspace",
+        parentsLastUpdatedAt: new Date(),
+      });
+      return {
+        command: {
+          majorCommand: "notion",
+          command: "clear-parents-last-updated-at",
+          args: { wId: "workspace", connectorId: connector.id.toString() },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await NotionConnectorStateModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ parentsLastUpdatedAt: null });
+        },
+      };
+    },
+  },
+  {
+    title:
+      "slack whitelist-bot on slack when the list enables neither Slack provider",
+    list: "dust_project",
+    async prepare() {
+      const { slack } = await makeSlackTeam(null);
+      return {
+        command: {
+          majorCommand: "slack",
+          command: "whitelist-bot",
+          args: {
+            wId: "workspace",
+            botName: "bot",
+            whitelistType: "index_messages",
+            providerType: "slack",
+          },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await SlackBotWhitelistModel.findOne({
+              where: { connectorId: slack.id },
+            })
+          ).toMatchObject({ botName: "bot", whitelistType: "index_messages" });
+        },
+      };
+    },
+  },
+  {
+    title:
+      "webcrawler update-frequency when the list does not enable webcrawler",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("webcrawler");
+      await WebCrawlerConfigurationModel.create({
+        connectorId: connector.id,
+        url: "https://example.com",
+        depth: 1,
+        maxPageToCrawl: 10,
+        crawlMode: "website",
+        crawlFrequency: "weekly",
+        sitemapOnly: false,
+      });
+      return {
+        command: {
+          majorCommand: "webcrawler",
+          command: "update-frequency",
+          args: {
+            connectorId: connector.id.toString(),
+            crawlFrequency: "never",
+          },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await WebCrawlerConfigurationModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ crawlFrequency: "never" });
+        },
+      };
+    },
+  },
+];
+
+// Commands that start no work and that the admin route does not whitelist: their guard, then their
+// real handler.
+const AVAILABLE_ADMIN_COMMAND_CASES: AvailableAdminCase[] = [
+  {
+    title: "github skip-repo when the list does not enable github",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("github");
+      await GithubCodeRepositoryModel.create({
+        connectorId: connector.id,
+        repoId: "1",
+        repoLogin: "org",
+        repoName: "repo",
+        sourceUrl: "https://github.com/org/repo",
+        forceDailySync: false,
+      });
+      return {
+        command: {
+          majorCommand: "github",
+          command: "skip-repo",
+          args: {
+            connectorId: connector.id.toString(),
+            repoId: "1",
+            skipReason: "too large",
+          },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await GithubCodeRepositoryModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ skipReason: "too large" });
+        },
+      };
+    },
+  },
+  {
+    title: "gong delete-transcript when the list does not enable gong",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("gong");
+      await GongTranscriptModel.create({
+        connectorId: connector.id,
+        callId: "call",
+        callDate: Date.now(),
+        title: "Call",
+        url: "https://app.gong.io/call?id=call",
+      });
+      const deleteDocument = vi
+        .spyOn(dataSources, "deleteDataSourceDocument")
+        .mockResolvedValue(undefined);
+      return {
+        command: {
+          majorCommand: "gong",
+          command: "delete-transcript",
+          args: { connectorId: connector.id, callId: "call" },
+        },
+        result: { callId: "call" },
+        async expectEffect() {
+          expect(deleteDocument).toHaveBeenCalledWith(
+            expect.objectContaining({ dataSourceId: connector.dataSourceId }),
+            `gong-transcript-${connector.id}-call`,
+            expect.anything()
+          );
+          expect(
+            await GongTranscriptModel.count({
+              where: { connectorId: connector.id },
+            })
+          ).toBe(0);
+        },
+      };
+    },
+  },
+  {
+    title: "google_drive skip-file when the list does not enable google_drive",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("google_drive");
+      return {
+        command: {
+          majorCommand: "google_drive",
+          command: "skip-file",
+          args: {
+            connectorId: connector.id.toString(),
+            fileId: "file",
+            reason: "too large",
+          },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await GoogleDriveFilesModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ driveFileId: "file", skipReason: "too large" });
+        },
+      };
+    },
+  },
+  {
+    title: "zendesk set-rate-limit when the list does not enable zendesk",
+    list: "dust_project",
+    async prepare() {
+      const connector = await makeAdminTarget("zendesk");
+      await ZendeskConfigurationModel.create({
+        connectorId: connector.id,
+        subdomain: "acme",
+        retentionPeriodDays: 180,
+        syncUnresolvedTickets: false,
+        hideCustomerDetails: false,
+        customFieldsConfig: [],
+      });
+      vi.spyOn(
+        zendeskAccessToken,
+        "getZendeskSubdomainAndAccessToken"
+      ).mockResolvedValue({ accessToken: "token", subdomain: "acme" });
+      return {
+        command: {
+          majorCommand: "zendesk",
+          command: "set-rate-limit",
+          args: { connectorId: connector.id, rateLimitTps: 5 },
+        },
+        result: { success: true },
+        async expectEffect() {
+          expect(
+            await ZendeskConfigurationModel.findOne({
+              where: { connectorId: connector.id },
+            })
+          ).toMatchObject({ rateLimitTransactionsPerSecond: 5 });
+        },
+      };
+    },
+  },
+];
+
+// Commands that start no work and whose handlers call their provider's API: only their guard runs.
+const AVAILABLE_PROVIDER_API_COMMANDS: AdminCommandType[] = [
+  {
+    majorCommand: "microsoft",
+    command: "check-file",
+    args: { connectorId: "1", internalId: "file" },
+  },
+  {
+    majorCommand: "salesforce",
+    command: "check-connection",
+    args: { wId: "workspace", dsId: "data-source" },
+  },
+  {
+    majorCommand: "snowflake",
+    command: "fetch-databases",
+    args: { connectorId: 1 },
+  },
+  {
+    majorCommand: "zendesk",
+    command: "fetch-ticket",
+    args: { connectorId: 1, ticketId: 1 },
+  },
+];
+
+describe("admin commands that start no work", () => {
+  afterEach(() => {
+    vi.mocked(runCommand).mockReset();
+  });
+
+  for (const adminCase of AVAILABLE_ADMIN_API_CASES) {
+    it(`runs ${adminCase.title}`, async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", adminCase.list);
+      vi.mocked(runCommand).mockImplementation(actualRunCommand);
+      const { command, result, expectEffect } = await adminCase.prepare();
+
+      expect(
+        await send(jsonRequest("POST", "/connectors/admin", command))
+      ).toEqual({ status: 200, body: result });
+      await expectEffect();
+    });
+  }
+
+  for (const adminCase of AVAILABLE_ADMIN_COMMAND_CASES) {
+    it(`runs ${adminCase.title}`, async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", adminCase.list);
+      const { command, result, expectEffect } = await adminCase.prepare();
+
+      expect(await checkAdmin(command)).toBeNull();
+      expect(await actualRunCommand(command)).toEqual(result);
+      await expectEffect();
+    });
+  }
+
+  it.each(
+    AVAILABLE_PROVIDER_API_COMMANDS
+  )("lets $majorCommand $command through when the list does not enable $majorCommand", async (command) => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "dust_project");
+
+    expect(await checkAdmin(command)).toBeNull();
+  });
+
+  // The caller's SOQL can update records in Salesforce, so these require salesforce.
+  it.each([
+    "run-soql",
+    "setup-synced-query",
+  ] as const)("refuses salesforce %s when the list does not enable salesforce", async (command) => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "dust_project");
+
+    expect(
+      await checkAdmin({
+        majorCommand: "salesforce",
+        command,
+        args: {
+          wId: "workspace",
+          dsId: "data-source",
+          soql: "SELECT Id FROM Account FOR VIEW",
+        },
+      })
+    ).toEqual(notEnabled(["salesforce"]));
   });
 });
 

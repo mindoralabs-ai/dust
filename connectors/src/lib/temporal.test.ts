@@ -193,11 +193,19 @@ describe("Temporal connection configuration", () => {
       missingAddressError,
     ],
     [
+      { TEMPORAL_ADDRESS: "", TEMPORAL_TLS_MODE: "server" },
+      missingAddressError,
+    ],
+    [
       { TEMPORAL_ADDRESS: "temporal.internal:7233" },
       "TEMPORAL_NAMESPACE is required when TEMPORAL_ADDRESS is set",
     ],
     [
       customAddress,
+      "TEMPORAL_TLS_MODE is required when TEMPORAL_ADDRESS is set",
+    ],
+    [
+      { ...customAddress, TEMPORAL_TLS_MODE: "" },
       "TEMPORAL_TLS_MODE is required when TEMPORAL_ADDRESS is set",
     ],
     [
@@ -280,6 +288,118 @@ describe("Temporal connection configuration", () => {
 
     await expect(getConnectionOptions()).rejects.toThrow(message);
     expect(readFile).not.toHaveBeenCalled();
+  });
+
+  // An empty custom setting counts as unset in every check. The server name is still passed on
+  // unchanged, so an empty one reaches the connection as an empty string.
+  it.each([
+    [{ TEMPORAL_ADDRESS: "" }, {}],
+    [
+      {
+        NODE_ENV: "production",
+        TEMPORAL_ADDRESS: "",
+        TEMPORAL_NAMESPACE: "cloud-namespace",
+        TEMPORAL_CERT_PATH: "/cloud.crt",
+        TEMPORAL_CERT_KEY_PATH: "/cloud.key",
+      },
+      {
+        address: "cloud-namespace.tmprl.cloud:7233",
+        tls: {
+          clientCertPair: {
+            crt: Buffer.from("/cloud.crt"),
+            key: Buffer.from("/cloud.key"),
+          },
+        },
+      },
+    ],
+    [
+      {
+        TEMPORAL_TLS_MODE: "",
+        TEMPORAL_TLS_CA_PATH: "",
+        TEMPORAL_TLS_SERVER_NAME: "",
+      },
+      {},
+    ],
+    [
+      {
+        ...customAddress,
+        TEMPORAL_TLS_MODE: "disabled",
+        TEMPORAL_TLS_CA_PATH: "",
+        TEMPORAL_TLS_SERVER_NAME: "",
+      },
+      { address: "temporal.internal:7233", tls: false },
+    ],
+    [
+      {
+        ...customAddress,
+        TEMPORAL_TLS_MODE: "server",
+        TEMPORAL_TLS_CA_PATH: "",
+        TEMPORAL_TLS_SERVER_NAME: "",
+      },
+      {
+        address: "temporal.internal:7233",
+        tls: {
+          serverNameOverride: undefined,
+          serverRootCACertificate: undefined,
+        },
+      },
+    ],
+    [
+      {
+        ...customAddress,
+        TEMPORAL_TLS_MODE: "mutual",
+        TEMPORAL_CERT_PATH: "/client.crt",
+        TEMPORAL_CERT_KEY_PATH: "/client.key",
+        TEMPORAL_TLS_CA_PATH: "",
+        TEMPORAL_TLS_SERVER_NAME: "",
+      },
+      {
+        address: "temporal.internal:7233",
+        tls: {
+          clientCertPair: {
+            crt: Buffer.from("/client.crt"),
+            key: Buffer.from("/client.key"),
+          },
+          serverNameOverride: undefined,
+          serverRootCACertificate: undefined,
+        },
+      },
+    ],
+  ])("treats an empty custom setting as unset in checks %#", async (env, expected) => {
+    for (const [name, value] of Object.entries(env)) {
+      vi.stubEnv(name, value);
+    }
+
+    await expect(getConnectionOptions()).resolves.toEqual(expected);
+    expect(readFile).not.toHaveBeenCalledWith("");
+  });
+
+  it("reads the custom settings again on every connection setup", async () => {
+    vi.stubEnv("TEMPORAL_ADDRESS", "temporal.internal:7233");
+    vi.stubEnv("TEMPORAL_TLS_MODE", "disabled");
+    vi.stubEnv("TEMPORAL_NAMESPACE", "dust-connectors");
+    await expect(getConnectionOptions()).resolves.toEqual({
+      address: "temporal.internal:7233",
+      tls: false,
+    });
+
+    vi.stubEnv("TEMPORAL_ADDRESS", "temporal.other:7233");
+    vi.stubEnv("TEMPORAL_TLS_MODE", "server");
+    vi.stubEnv("TEMPORAL_TLS_CA_PATH", "/other-ca.pem");
+    vi.stubEnv("TEMPORAL_TLS_SERVER_NAME", "temporal.other.internal");
+    await expect(getConnectionOptions()).resolves.toEqual({
+      address: "temporal.other:7233",
+      tls: {
+        serverNameOverride: "temporal.other.internal",
+        serverRootCACertificate: Buffer.from("/other-ca.pem"),
+      },
+    });
+
+    vi.stubEnv("TEMPORAL_ADDRESS", undefined);
+    vi.stubEnv("TEMPORAL_TLS_MODE", undefined);
+    vi.stubEnv("TEMPORAL_TLS_CA_PATH", undefined);
+    vi.stubEnv("TEMPORAL_TLS_SERVER_NAME", undefined);
+    await expect(getConnectionOptions()).resolves.toEqual({});
   });
 
   it("passes the custom configuration to the API client and the worker", async () => {
