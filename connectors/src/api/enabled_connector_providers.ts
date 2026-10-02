@@ -1,4 +1,7 @@
-import { apiConfig } from "@connectors/lib/api/config";
+import {
+  isKnownConnectorProvider,
+  readEnabledConnectorProviders,
+} from "@connectors/lib/enabled_connector_providers";
 import { apiError } from "@connectors/logger/withlogging";
 import type {
   ConnectorsAPIErrorWithStatusCode,
@@ -7,85 +10,6 @@ import type {
 import type { ConnectorProvider, Result } from "@dust-tt/client";
 import { Err, Ok } from "@dust-tt/client";
 import type { Request, Response } from "express";
-
-// Keyed by `ConnectorProvider` so that a provider added upstream fails type-checking here until it
-// is listed. `isConnectorProvider` cannot validate names: it accepts any string.
-const KNOWN_CONNECTOR_PROVIDERS: Record<ConnectorProvider, true> = {
-  bigquery: true,
-  confluence: true,
-  discord_bot: true,
-  dust_project: true,
-  github: true,
-  gong: true,
-  google_drive: true,
-  intercom: true,
-  microsoft: true,
-  microsoft_bot: true,
-  notion: true,
-  salesforce: true,
-  slack: true,
-  slack_bot: true,
-  snowflake: true,
-  webcrawler: true,
-  zendesk: true,
-};
-
-export function isKnownConnectorProvider(
-  name: string
-): name is ConnectorProvider {
-  return Object.hasOwn(KNOWN_CONNECTOR_PROVIDERS, name);
-}
-
-/**
- * @cc [owner:jchen0824,label:security;error-handling] connectors-enabled-providers-format
- * An unset `CONNECTORS_ENABLED_PROVIDERS` returns `null`: every provider is enabled. A set value,
- * including the empty string, MUST be a comma-separated list of known connector provider names,
- * each trimmed. An empty, unknown or repeated entry returns an error, never a partial list.
- */
-export function parseEnabledConnectorProviders(
-  value: string | undefined
-): Result<ReadonlySet<ConnectorProvider> | null, Error> {
-  if (value === undefined) {
-    return new Ok(null);
-  }
-
-  const providers = new Set<ConnectorProvider>();
-  for (const entry of value.split(",")) {
-    const name = entry.trim();
-    if (!name) {
-      return new Err(
-        new Error("CONNECTORS_ENABLED_PROVIDERS has an empty entry")
-      );
-    }
-    if (!isKnownConnectorProvider(name)) {
-      return new Err(
-        new Error(
-          `CONNECTORS_ENABLED_PROVIDERS names an unknown connector provider: ${name}`
-        )
-      );
-    }
-    if (providers.has(name)) {
-      return new Err(
-        new Error(`CONNECTORS_ENABLED_PROVIDERS lists ${name} more than once`)
-      );
-    }
-    providers.add(name);
-  }
-
-  return new Ok(providers);
-}
-
-/**
- * Parses this deployment's `CONNECTORS_ENABLED_PROVIDERS`, read on every call.
- */
-export function readEnabledConnectorProviders(): Result<
-  ReadonlySet<ConnectorProvider> | null,
-  Error
-> {
-  return parseEnabledConnectorProviders(
-    apiConfig.getEnabledConnectorProviders()
-  );
-}
 
 /**
  * @cc [owner:jchen0824,label:security] connectors-enabled-providers-check
@@ -99,13 +23,7 @@ function checkAnyConnectorProviderEnabled(
 ): Result<void, ConnectorsAPIErrorWithStatusCode> {
   const enabledRes = readEnabledConnectorProviders();
   if (enabledRes.isErr()) {
-    return new Err({
-      status_code: 500,
-      api_error: {
-        type: "internal_server_error",
-        message: `Invalid connectors configuration: ${enabledRes.error.message}`,
-      },
-    });
+    return new Err(invalidConfigurationError(enabledRes.error));
   }
 
   const enabled = enabledRes.value;
@@ -116,19 +34,79 @@ function checkAnyConnectorProviderEnabled(
     return new Ok(undefined);
   }
 
-  return new Err({
+  return new Err(notEnabledError(providers));
+}
+
+function invalidConfigurationError(
+  error: Error
+): ConnectorsAPIErrorWithStatusCode {
+  return {
+    status_code: 500,
+    api_error: {
+      type: "internal_server_error",
+      message: `Invalid connectors configuration: ${error.message}`,
+    },
+  };
+}
+
+function notEnabledError(
+  providers: readonly string[]
+): ConnectorsAPIErrorWithStatusCode {
+  return {
     status_code: 403,
     api_error: {
       type: "invalid_request_error",
       message: `Connector provider not enabled on this deployment: ${providers.join(", ")}`,
     },
-  });
+  };
 }
 
 export function checkConnectorProviderEnabled(
   provider: string
 ): Result<void, ConnectorsAPIErrorWithStatusCode> {
   return checkAnyConnectorProviderEnabled([provider]);
+}
+
+/**
+ * @cc [owner:jchen0824,label:security] connectors-enabled-providers-check-resolved
+ * When `CONNECTORS_ENABLED_PROVIDERS` is unset, returns `Ok` without calling `resolveProviders`.
+ * When the value is malformed, returns 500 `internal_server_error` without calling it. Otherwise
+ * returns `Ok` only when `resolveProviders` returns at least one provider and the list enables
+ * every one of them, and 403 `invalid_request_error` when it fails, returns no provider, or
+ * returns one the list does not enable (naming the first such provider). The value is read once
+ * per call.
+ */
+export async function checkResolvedConnectorProvidersEnabled(
+  resolveProviders: () => Promise<Result<readonly ConnectorProvider[], Error>>
+): Promise<Result<void, ConnectorsAPIErrorWithStatusCode>> {
+  const enabledRes = readEnabledConnectorProviders();
+  if (enabledRes.isErr()) {
+    return new Err(invalidConfigurationError(enabledRes.error));
+  }
+  const enabled = enabledRes.value;
+  if (enabled === null) {
+    return new Ok(undefined);
+  }
+
+  const providersRes = await resolveProviders();
+  if (providersRes.isErr() || providersRes.value.length === 0) {
+    return new Err({
+      status_code: 403,
+      api_error: {
+        type: "invalid_request_error",
+        message: `Cannot check which connector providers this request acts on: ${
+          providersRes.isErr() ? providersRes.error.message : "it names none"
+        }`,
+      },
+    });
+  }
+
+  const disabled = providersRes.value.find((p) => !enabled.has(p));
+  if (disabled !== undefined) {
+    return new Err(notEnabledError([disabled]));
+  }
+
+  return new Ok(undefined);
 }
 
 /**

@@ -116,12 +116,15 @@ settings that the selected TLS mode needs, as described in
 | Role | Command | Probe | Required environment |
 |---|---|---|---|
 | `connectors_api` | `node dist/start_server.js -p 3002` | `GET /` on port 3002 | `CONNECTORS_DATABASE_URI`, `DUST_CONNECTORS_SECRET`, `DUST_CONNECTORS_WEBHOOKS_SECRET`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*` |
-| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
+| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
 
 The API's `GET /` returns 200 without authentication. It shows only that the HTTP
 server is listening, not that the database or Temporal is reachable. Set
 `CONNECTORS_ENABLED_PROVIDERS=dust_project` so the API refuses connectors whose
-workers this deployment does not run.
+workers this deployment does not run. Give the workers the same value: a workflow
+the API starts can reach another connector than the one the API checked, such as a
+Slack team's active bot, and the worker checks that connector against its own
+value.
 
 The worker command must keep `--workers dust_project`. Without `--workers`, the
 process starts every registered connectors worker. An empty or duplicated

@@ -1,16 +1,33 @@
 @cc [owner:jchen0824,label:security;api] connectors-api-enabled-provider-guard
 When `CONNECTORS_ENABLED_PROVIDERS` is set, a handler that creates a connector, or that can start
 work for a connector or provider (a workflow, a sync, a provider-side write), MUST refuse every
-provider the list does not enable, through `checkConnectorProviderEnabled` or
-`withEnabledConnectorProviders`, before any side effect: no connector row, no OAuth or credential
-call, no workflow. A provider-specific route checks only its own provider, and a route that acts
-on one connector checks that connector's own type. Pausing, deleting and read-only handlers stay
-available for every provider. When the variable is unset, handlers behave as upstream.
+provider the list does not enable before any side effect for it: no connector row, no OAuth or
+credential call, no workflow. It checks through `checkConnectorProviderEnabled`,
+`withEnabledConnectorProviders` or `checkResolvedConnectorProvidersEnabled`, or through a lookup
+that returns only connectors of enabled types, such as
+`SlackConfigurationResource.fetchByActiveBot`. A provider-specific route checks its own provider.
+Every connector that the handler, or the code it calls, can start work for MUST be checked by that
+connector's own type where it is resolved, unless that lookup can only return connectors of a type
+already checked: it filters on that type, or reads a table that only that provider writes (Slack's
+configuration table is written by both `slack` and `slack_bot`). A check of the route's provider,
+of an admin major command or of another connector does not cover any other connector. This
+includes a connector named in the request body, the team's active Slack bot, and a connector looked
+up from the one the request names. When such a looked-up connector is refused, the handler starts
+no work for it and goes on with the rest of the request. A workflow that the handler starts applies
+the same checks in the worker, with the worker's own `CONNECTORS_ENABLED_PROVIDERS`. A handler
+whose request can act on several providers or connectors, such as `POST /connectors/admin`, checks
+every one of them and refuses a request whose providers it cannot resolve. Pausing, deleting and
+read-only handlers stay available for every provider. When the variable is unset, handlers behave
+as upstream.
 
 @cc [owner:jchen0824,label:security;testing] connectors-api-enabled-provider-guard-coverage
 `enabled_connector_providers.test.ts` MUST list every route that `startServer` registers, in
 `GUARDED_ROUTES` or in `UNGUARDED_ROUTES`. A route whose handler is guarded by
-`checkConnectorProviderEnabled` or `withEnabledConnectorProviders` MUST be in `GUARDED_ROUTES`,
-sent through the app `startServer` builds, with a request that its guard refuses with 403 and no
-side effect when the list does not enable the route's provider, and that reaches the handler when
-the variable is unset.
+`checkConnectorProviderEnabled`, `withEnabledConnectorProviders` or
+`checkResolvedConnectorProvidersEnabled` MUST be in `GUARDED_ROUTES`, sent through the app
+`startServer` builds, with a request that its guard refuses with 403 and no side effect when the
+list does not enable the route's provider, and that reaches the handler when the variable is
+unset. The test MUST also check that `ADMIN_COMMAND_TARGETS` classifies exactly the commands of
+`AdminCommandSchema`, and, for each connector that a guarded handler resolves other than by the
+route's own check (a body connector id, the active Slack bot, a looked-up connector), that a list
+not enabling that connector's type leaves it without work.

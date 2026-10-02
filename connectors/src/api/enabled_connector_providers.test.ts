@@ -5,7 +5,11 @@ import { Server } from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
-import { parseEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
+import {
+  ADMIN_COMMAND_TARGETS,
+  checkAdminCommandProvidersEnabled,
+} from "@connectors/api/admin";
+import { isAppMentionMessage } from "@connectors/api/webhooks/slack/utils";
 import { startServer } from "@connectors/api_server";
 import { DustProjectConnectorManager } from "@connectors/connectors/dust_project";
 import { launchGithubIssueSyncWorkflow } from "@connectors/connectors/github/temporal/client";
@@ -13,20 +17,34 @@ import type { BaseConnectorManager } from "@connectors/connectors/interface";
 import { ConnectorManagerError } from "@connectors/connectors/interface";
 import { processNotionWebhookEvent } from "@connectors/connectors/notion/lib/webhooks";
 import { botReplaceMention } from "@connectors/connectors/slack/bot";
+import { submitFeedbackToAPI } from "@connectors/connectors/slack/feedback_api";
+import { getSlackClientForTeam } from "@connectors/connectors/slack/feedback_modal";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
 import {
   launchJoinChannelWorkflow,
+  launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow,
   launchSlackWebhookEventWorkflow,
 } from "@connectors/connectors/slack/temporal/client";
+import { processSlackWebhookEventActivity } from "@connectors/connectors/slack/temporal/webhook_activities";
 import { WebcrawlerConnectorManager } from "@connectors/connectors/webcrawler";
 import { launchFirecrawlCrawlStartedWorkflow } from "@connectors/connectors/webcrawler/temporal/client";
 import { runCommand } from "@connectors/lib/cli";
+import { parseEnabledConnectorProviders } from "@connectors/lib/enabled_connector_providers";
 import { GithubConnectorStateModel } from "@connectors/lib/models/github";
 import { NotionConnectorStateModel } from "@connectors/lib/models/notion";
-import { SlackChannelModel } from "@connectors/lib/models/slack";
+import {
+  SlackChannelModel,
+  SlackConfigurationModel,
+} from "@connectors/lib/models/slack";
+import { ConnectorResource } from "@connectors/resources/connector_resource";
+import { SlackConfigurationResource } from "@connectors/resources/slack_configuration_resource";
 import { ConnectorModel } from "@connectors/resources/storage/models/connector_model";
-import type { ConnectorConfiguration } from "@connectors/types";
+import type {
+  AdminCommandType,
+  ConnectorConfiguration,
+} from "@connectors/types";
 import * as connectorsTypes from "@connectors/types";
+import { AdminCommandSchema } from "@connectors/types";
 import type { ConnectorProvider } from "@dust-tt/client";
 import { Err, Ok } from "@dust-tt/client";
 import { WebClient } from "@slack/web-api";
@@ -63,6 +81,7 @@ vi.mock(
   async (importOriginal) => ({
     ...(await importOriginal()),
     launchJoinChannelWorkflow: vi.fn(),
+    launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow: vi.fn(),
     launchSlackWebhookEventWorkflow: vi.fn(),
   })
 );
@@ -332,8 +351,8 @@ type GuardedRoute = {
   prepare: (provider: ConnectorProvider) => Promise<PreparedRequest>;
 };
 
-// Every route whose handler calls `checkConnectorProviderEnabled` or is wrapped by
-// `withEnabledConnectorProviders`.
+// Every route whose handler calls `checkConnectorProviderEnabled` or
+// `checkResolvedConnectorProvidersEnabled`, or is wrapped by `withEnabledConnectorProviders`.
 const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /connectors/create/:connector_provider",
@@ -1179,5 +1198,864 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
     });
     expect(create).not.toHaveBeenCalled();
     expect(await ConnectorModel.count()).toBe(0);
+  });
+});
+
+// Each connector a test creates needs its own data source.
+function makeAdminTarget(type: ConnectorProvider) {
+  return ConnectorModel.create({
+    type,
+    connectionId: "connection",
+    workspaceAPIKey: "sk-test",
+    workspaceId: "workspace",
+    dataSourceId: `data-source-${type}`,
+    pausedAt: null,
+  });
+}
+
+const UNRESOLVED: ApiResponse = {
+  status: 403,
+  body: {
+    error: {
+      type: "invalid_request_error",
+      message: expect.stringMatching(
+        /^Cannot check which connector providers this request acts on: /
+      ),
+    },
+  },
+};
+
+type AdminApiCase = {
+  title: string;
+  // `undefined` leaves the variable unset.
+  list: string | undefined;
+  // Creates the connectors the command names.
+  command: () => Promise<AdminCommandType>;
+  // The answer, or `null` when the command reaches `runCommand`.
+  refusal: ApiResponse | null;
+};
+
+// Commands the admin route whitelists, sent through the app `startServer` builds.
+const ADMIN_API_CASES: AdminApiCase[] = [
+  {
+    title:
+      "refuses slack run-auto-join on slack_bot when the list enables only slack",
+    list: "slack",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "slack_bot" },
+    }),
+    refusal: notEnabled(["slack_bot"]),
+  },
+  {
+    title:
+      "runs slack run-auto-join on slack_bot when the list enables slack and slack_bot",
+    list: "slack,slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "slack_bot" },
+    }),
+    refusal: null,
+  },
+  {
+    // Every command of a provider's major command needs that provider.
+    title:
+      "refuses slack run-auto-join on slack_bot when the list enables only slack_bot",
+    list: "slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "slack_bot" },
+    }),
+    refusal: notEnabled(["slack"]),
+  },
+  {
+    title: "runs slack run-auto-join on slack when the list enables slack",
+    list: "slack",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "slack" },
+    }),
+    refusal: null,
+  },
+  {
+    title: "refuses slack run-auto-join without a providerType",
+    list: "slack,slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace" },
+    }),
+    refusal: UNRESOLVED,
+  },
+  {
+    title: "refuses slack run-auto-join on a providerType that is no provider",
+    list: "slack,slack_bot",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace", providerType: "constructor" },
+    }),
+    refusal: UNRESOLVED,
+  },
+  {
+    title:
+      "refuses slack whitelist-bot on slack_bot when the list enables only slack",
+    list: "slack",
+    command: async () => ({
+      majorCommand: "slack",
+      command: "whitelist-bot",
+      args: {
+        wId: "workspace",
+        botName: "bot",
+        whitelistType: "summon_agent",
+        providerType: "slack_bot",
+      },
+    }),
+    refusal: notEnabled(["slack_bot"]),
+  },
+  {
+    title:
+      "refuses google_drive upsert-file on a webcrawler connector named by connectorId",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        connectorId: (await makeAdminTarget("webcrawler")).id.toString(),
+        fileId: "file",
+      },
+    }),
+    refusal: notEnabled(["webcrawler"]),
+  },
+  {
+    title:
+      "refuses google_drive upsert-file on a webcrawler connector named by wId and dsId",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        dsId: (await makeAdminTarget("webcrawler")).dataSourceId,
+        fileId: "file",
+      },
+    }),
+    refusal: notEnabled(["webcrawler"]),
+  },
+  {
+    title:
+      "refuses google_drive upsert-file when its dsId names a connector of a provider the list does not enable",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        connectorId: (await makeAdminTarget("google_drive")).id.toString(),
+        dsId: (await makeAdminTarget("webcrawler")).dataSourceId,
+        fileId: "file",
+      },
+    }),
+    refusal: notEnabled(["webcrawler"]),
+  },
+  {
+    title: "runs google_drive upsert-file on a google_drive connector",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        connectorId: (await makeAdminTarget("google_drive")).id.toString(),
+        fileId: "file",
+      },
+    }),
+    refusal: null,
+  },
+  {
+    title: "refuses google_drive upsert-file naming no connector",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: { wId: "workspace", fileId: "file" },
+    }),
+    refusal: UNRESOLVED,
+  },
+  {
+    title: "refuses google_drive upsert-file on a connectorId no connector has",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        connectorId: `${(await makeAdminTarget("google_drive")).id + 1}`,
+        fileId: "file",
+      },
+    }),
+    refusal: UNRESOLVED,
+  },
+  {
+    // Postgres reads `<id>_0` as another connector id than `parseInt` does.
+    title:
+      "refuses google_drive upsert-file on a connectorId that is not only digits",
+    list: "google_drive",
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: {
+        wId: "workspace",
+        connectorId: `${(await makeAdminTarget("google_drive")).id}_0`,
+        fileId: "file",
+      },
+    }),
+    refusal: UNRESOLVED,
+  },
+  {
+    title:
+      "refuses webcrawler update-frequency on a dust_project connector when the list enables only webcrawler",
+    list: "webcrawler",
+    command: async () => ({
+      majorCommand: "webcrawler",
+      command: "update-frequency",
+      args: {
+        connectorId: (await makeAdminTarget("dust_project")).id.toString(),
+        crawlFrequency: "never",
+      },
+    }),
+    refusal: notEnabled(["dust_project"]),
+  },
+  {
+    title: "runs webcrawler update-frequency on a webcrawler connector",
+    list: "webcrawler",
+    command: async () => ({
+      majorCommand: "webcrawler",
+      command: "update-frequency",
+      args: {
+        connectorId: (await makeAdminTarget("webcrawler")).id.toString(),
+        crawlFrequency: "never",
+      },
+    }),
+    refusal: null,
+  },
+  {
+    title: "runs connectors set-error on a connector of any provider",
+    list: "dust_project",
+    command: async () => ({
+      majorCommand: "connectors",
+      command: "set-error",
+      args: {
+        wId: "workspace",
+        connectorId: (await makeAdminTarget("webcrawler")).id.toString(),
+        error: "oauth_token_revoked",
+      },
+    }),
+    refusal: null,
+  },
+  {
+    title:
+      "runs google_drive upsert-file naming no connector when the variable is unset",
+    list: undefined,
+    command: async () => ({
+      majorCommand: "google_drive",
+      command: "upsert-file",
+      args: { wId: "workspace", connectorId: "0", fileId: "file" },
+    }),
+    refusal: null,
+  },
+  {
+    title:
+      "runs slack run-auto-join without a providerType when the variable is unset",
+    list: undefined,
+    command: async () => ({
+      majorCommand: "slack",
+      command: "run-auto-join",
+      args: { wId: "workspace" },
+    }),
+    refusal: null,
+  },
+];
+
+async function checkAdmin(command: AdminCommandType) {
+  const res = await checkAdminCommandProvidersEnabled(command);
+  return res.isErr()
+    ? { status: res.error.status_code, body: { error: res.error.api_error } }
+    : null;
+}
+
+const CONNECTORS_COMMANDS_STARTING_WORK = [
+  "unpause",
+  "resume",
+  "full-resync",
+  "restart",
+  "set-permission",
+  "garbage-collect",
+] as const;
+
+const CONNECTORS_COMMANDS_STARTING_NO_WORK = [
+  "stop",
+  "pause",
+  "delete",
+  "get-parents",
+  "set-error",
+  "clear-error",
+] as const;
+
+const BATCH_COMMANDS_STARTING_WORK = [
+  "full-resync",
+  "restart-all",
+  "resume-all",
+] as const;
+
+const TEMPORAL_COMMANDS = [
+  "check-queue",
+  "find-unprocessed-workflows",
+  "stop-workflow",
+] as const;
+
+describe("POST /connectors/admin command targets", () => {
+  it("classifies exactly the commands of AdminCommandSchema", () => {
+    const schemaCommands = AdminCommandSchema.options.flatMap((schema) =>
+      schema.shape.command.options.map(
+        (literal) => `${schema.shape.majorCommand.value} ${literal.value}`
+      )
+    );
+    const classified = Object.entries(ADMIN_COMMAND_TARGETS).flatMap(
+      ([majorCommand, targets]) =>
+        Object.keys(targets).map((command) => `${majorCommand} ${command}`)
+    );
+
+    // A command added upstream fails here until `ADMIN_COMMAND_TARGETS` classifies it.
+    expect(classified.sort()).toEqual(schemaCommands.sort());
+  });
+
+  for (const adminCase of ADMIN_API_CASES) {
+    it(adminCase.title, async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", adminCase.list);
+      vi.mocked(runCommand).mockResolvedValue({ success: true });
+      const command = await adminCase.command();
+
+      const res = await send(jsonRequest("POST", "/connectors/admin", command));
+
+      if (adminCase.refusal) {
+        expect(res).toEqual(adminCase.refusal);
+        expect(runCommand).not.toHaveBeenCalled();
+      } else {
+        expect(res).toEqual({ status: 200, body: { success: true } });
+        expect(runCommand).toHaveBeenCalledWith(command);
+      }
+    });
+  }
+
+  // The commands below are not whitelisted by the admin route: their guard is checked directly,
+  // for when a command is whitelisted.
+  describe("checkAdminCommandProvidersEnabled", () => {
+    beforeEach(() => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "dust_project");
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_WORK
+    )("refuses connectors %s on a connector of a provider the list does not enable", async (command) => {
+      const connector = await makeAdminTarget("webcrawler");
+
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace", connectorId: connector.id.toString() },
+        })
+      ).toEqual(notEnabled(["webcrawler"]));
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_WORK
+    )("refuses connectors %s on a connector named by wId and dsId of a provider the list does not enable", async (command) => {
+      const connector = await makeAdminTarget("webcrawler");
+
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace", dsId: connector.dataSourceId },
+        })
+      ).toEqual(notEnabled(["webcrawler"]));
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_WORK
+    )("runs connectors %s on a connector of a provider the list enables", async (command) => {
+      const connector = await makeAdminTarget("dust_project");
+
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace", connectorId: connector.id.toString() },
+        })
+      ).toBeNull();
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_WORK
+    )("refuses connectors %s naming no connector", async (command) => {
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace" },
+        })
+      ).toEqual(UNRESOLVED);
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_WORK
+    )("runs connectors %s naming no connector when the variable is unset", async (command) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", undefined);
+
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace" },
+        })
+      ).toBeNull();
+    });
+
+    it.each(
+      CONNECTORS_COMMANDS_STARTING_NO_WORK
+    )("runs connectors %s on a connector of any provider", async (command) => {
+      const connector = await makeAdminTarget("webcrawler");
+
+      expect(
+        await checkAdmin({
+          majorCommand: "connectors",
+          command,
+          args: { wId: "workspace", connectorId: connector.id.toString() },
+        })
+      ).toBeNull();
+      expect(
+        await checkAdmin({ majorCommand: "connectors", command, args: {} })
+      ).toBeNull();
+    });
+
+    it.each(
+      BATCH_COMMANDS_STARTING_WORK
+    )("refuses batch %s on a provider the list does not enable", async (command) => {
+      expect(
+        await checkAdmin({
+          majorCommand: "batch",
+          command,
+          args: { provider: "webcrawler" },
+        })
+      ).toEqual(notEnabled(["webcrawler"]));
+    });
+
+    it.each(
+      BATCH_COMMANDS_STARTING_WORK
+    )("runs batch %s on a provider the list enables", async (command) => {
+      expect(
+        await checkAdmin({
+          majorCommand: "batch",
+          command,
+          args: { provider: "dust_project" },
+        })
+      ).toBeNull();
+    });
+
+    it.each(
+      BATCH_COMMANDS_STARTING_WORK
+    )("refuses batch %s without a provider", async (command) => {
+      expect(
+        await checkAdmin({ majorCommand: "batch", command, args: {} })
+      ).toEqual(UNRESOLVED);
+    });
+
+    it("runs batch stop-all on any provider", async () => {
+      expect(
+        await checkAdmin({
+          majorCommand: "batch",
+          command: "stop-all",
+          args: { provider: "webcrawler" },
+        })
+      ).toBeNull();
+    });
+
+    it.each(TEMPORAL_COMMANDS)("runs temporal %s", async (command) => {
+      expect(
+        await checkAdmin({ majorCommand: "temporal", command, args: {} })
+      ).toBeNull();
+    });
+
+    it.each([
+      "whitelist-domains",
+      "cutover-legacy-bot",
+    ] as const)("refuses slack %s unless the list enables slack_bot", async (command) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
+      const slackCommand: AdminCommandType = {
+        majorCommand: "slack",
+        command,
+        args: { wId: "workspace" },
+      };
+
+      expect(await checkAdmin(slackCommand)).toEqual(notEnabled(["slack_bot"]));
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack,slack_bot");
+      expect(await checkAdmin(slackCommand)).toBeNull();
+    });
+
+    it("refuses github resync-repo on a connector named by wId and dsId of a provider the list does not enable", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "github");
+      const connector = await makeAdminTarget("dust_project");
+
+      expect(
+        await checkAdmin({
+          majorCommand: "github",
+          command: "resync-repo",
+          args: {
+            wId: "workspace",
+            dsId: connector.dataSourceId,
+            owner: "org",
+            repo: "repo",
+          },
+        })
+      ).toEqual(notEnabled(["dust_project"]));
+    });
+  });
+});
+
+type SlackProvider = Extract<ConnectorProvider, "slack" | "slack_bot">;
+
+// Slack team `T1`, with a connector of each Slack provider in one Dust workspace and the provider
+// whose bot is enabled, if any.
+async function makeSlackTeam(activeBot: SlackProvider | null) {
+  const makeSlackConnector = (type: SlackProvider) =>
+    ConnectorResource.makeNew(
+      type,
+      {
+        connectionId: "connection",
+        workspaceAPIKey: "sk-test",
+        workspaceId: "workspace",
+        dataSourceId: `data-source-${type}`,
+      },
+      {
+        autoReadChannelPatterns: [],
+        botEnabled: type === activeBot,
+        feedbackVisibleToAuthorOnly: true,
+        restrictedSpaceAgentsEnabled: true,
+        slackTeamId: "T1",
+      }
+    );
+
+  return {
+    slack: await makeSlackConnector("slack"),
+    slack_bot: await makeSlackConnector("slack_bot"),
+  };
+}
+
+// This file replaces the module wholesale for the routes.
+function importActualSlackBot() {
+  return vi.importActual<typeof import("@connectors/connectors/slack/bot")>(
+    "@connectors/connectors/slack/bot"
+  );
+}
+
+const ACTIVE_BOT_CASES: {
+  // `undefined` leaves the variable unset.
+  list: string | undefined;
+  activeBot: SlackProvider;
+  found: boolean;
+}[] = [
+  { list: undefined, activeBot: "slack", found: true },
+  { list: undefined, activeBot: "slack_bot", found: true },
+  { list: "slack", activeBot: "slack", found: true },
+  { list: "slack,slack_bot", activeBot: "slack_bot", found: true },
+  { list: "slack_bot", activeBot: "slack", found: false },
+  { list: "slack", activeBot: "slack_bot", found: false },
+  { list: "dust_project", activeBot: "slack_bot", found: false },
+  { list: "slack_bot,", activeBot: "slack_bot", found: false },
+];
+
+// The team's active bot is a connector of a provider the list does not enable.
+const REFUSED_ACTIVE_BOTS = [
+  { list: "slack_bot", activeBot: "slack" },
+  { list: "slack", activeBot: "slack_bot" },
+] as const;
+
+// Every caller of `SlackConfigurationResource.fetchByActiveBot` that can start work for the bot,
+// except the slack_bot webhook's own lookups, which the route tests below reach. `run` calls it for
+// team `T1` and checks its answer when it finds no bot.
+const ACTIVE_BOT_CALLERS: { name: string; run: () => Promise<void> }[] = [
+  {
+    // Used by botAnswerMessage, botReplaceMention and botValidateToolExecution, which the slack,
+    // slack_bot, slack_interaction and slack_bot_interaction webhooks call.
+    name: "getSlackConnector",
+    async run() {
+      const { getSlackConnector } = await importActualSlackBot();
+      const res = await getSlackConnector({
+        slackTeamId: "T1",
+        slackChannel: "C1",
+        slackUserId: "U1",
+        slackMessageTs: "1.0",
+      });
+      expect(res.isErr()).toBe(true);
+    },
+  },
+  {
+    name: "botAnswerUserQuestion",
+    async run() {
+      const { botAnswerUserQuestion } = await importActualSlackBot();
+      const res = await botAnswerUserQuestion({
+        actionId: "action",
+        answer: { selectedOptions: [] },
+        conversationId: "conversation",
+        messageId: "message",
+        slackChatBotMessageId: 7,
+        slackTeamId: "T1",
+        slackChannel: "C1",
+        slackThreadTs: "1.0",
+        responseUrl: undefined,
+      });
+      expect(res.isErr() && res.error.message).toBe(
+        "Failed to find a Slack configuration for which the bot is enabled. Slack team id: T1."
+      );
+    },
+  },
+  {
+    name: "getSlackClientForTeam",
+    async run() {
+      await expect(getSlackClientForTeam("T1")).rejects.toThrow(
+        "Failed to find Slack configuration for team T1"
+      );
+    },
+  },
+  {
+    name: "submitFeedbackToAPI",
+    async run() {
+      await submitFeedbackToAPI({
+        conversationId: "conversation",
+        messageId: "message",
+        workspaceId: "workspace",
+        slackUserId: "U1",
+        slackTeamId: "T1",
+        thumbDirection: "up",
+        feedbackContent: "",
+        slackChannelId: "C1",
+        slackMessageTs: "1.0",
+        slackThreadTs: "1.0",
+        responseUrl: "https://hooks.slack.com/actions/response",
+      });
+    },
+  },
+  {
+    name: "isAppMentionMessage",
+    async run() {
+      expect(await isAppMentionMessage("<@U1> hello", "T1")).toBe(false);
+    },
+  },
+  {
+    // Run by the connectors worker for the slack webhook.
+    name: "processSlackWebhookEventActivity on a direct message",
+    async run() {
+      await processSlackWebhookEventActivity({
+        teamId: "T1",
+        event: {
+          type: "direct_message",
+          channelId: "D1",
+          ts: "1.0",
+          userId: "U1",
+        },
+      });
+    },
+  },
+  {
+    name: "processSlackWebhookEventActivity on member_joined_channel",
+    async run() {
+      await processSlackWebhookEventActivity({
+        teamId: "T1",
+        event: { type: "member_joined_channel", channelId: "C1", userId: "U1" },
+      });
+    },
+  },
+];
+
+describe("connectors that guarded handlers resolve beyond their route's check", () => {
+  describe("the team's active Slack bot", () => {
+    it.each(
+      ACTIVE_BOT_CASES
+    )("finds an active $activeBot bot when the list is $list: $found", async ({
+      list,
+      activeBot,
+      found,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+      const connectors = await makeSlackTeam(activeBot);
+
+      const slackConfig =
+        await SlackConfigurationResource.fetchByActiveBot("T1");
+
+      expect(slackConfig?.connectorId ?? null).toBe(
+        found ? connectors[activeBot].id : null
+      );
+    });
+
+    for (const caller of ACTIVE_BOT_CALLERS) {
+      it.each(
+        REFUSED_ACTIVE_BOTS
+      )(`${caller.name} acts for no bot when the list is $list and the active bot is $activeBot`, async ({
+        list,
+        activeBot,
+      }) => {
+        vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+        await makeSlackTeam(activeBot);
+
+        await caller.run();
+
+        expect(getSlackClient).not.toHaveBeenCalled();
+      });
+    }
+
+    it("answers a direct message to the slack_bot webhook with no bot when the active bot is a slack connector", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+      await makeSlackTeam("slack");
+
+      const res = await send(
+        jsonRequest("POST", webhookPath("slack_bot"), {
+          type: "event_callback",
+          team_id: "T1",
+          event: {
+            type: "message",
+            channel_type: "im",
+            channel: "D1",
+            user: "U1",
+            text: "hello",
+            ts: "1.0",
+          },
+        })
+      );
+
+      expect(res.status).toBe(421);
+      expect(getSlackClient).not.toHaveBeenCalled();
+    });
+
+    it("ignores a channel message to the slack_bot webhook when the active bot is a slack connector", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+      const connectors = await makeSlackTeam("slack");
+      await SlackChannelModel.create({
+        connectorId: connectors.slack.id,
+        slackChannelId: "C1",
+        slackChannelName: "general",
+        private: false,
+        permission: "read_write",
+        agentConfigurationId: "agent",
+        autoRespondWithoutMention: true,
+      });
+
+      const res = await send(
+        jsonRequest("POST", webhookPath("slack_bot"), {
+          type: "event_callback",
+          team_id: "T1",
+          event: {
+            type: "message",
+            channel_type: "channel",
+            channel: "C1",
+            user: "U1",
+            text: "hello",
+            ts: "1.0",
+          },
+        })
+      );
+
+      expect(res.status).toBe(200);
+      expect(getSlackClient).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /connectors/:connector_id/config/botEnabled on slack_bot", () => {
+    it.each([
+      { list: "slack_bot", migrates: false },
+      { list: "slack,slack_bot", migrates: true },
+    ])("migrates the legacy slack connector's channels when the list is $list: $migrates", async ({
+      list,
+      migrates,
+    }) => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", list);
+      const connectors = await makeSlackTeam(null);
+
+      const res = await send(
+        jsonRequest(
+          "POST",
+          `/connectors/${connectors.slack_bot.id}/config/botEnabled`,
+          { configValue: "true" }
+        )
+      );
+
+      expect(res).toEqual({
+        status: 200,
+        body: {
+          connectorId: connectors.slack_bot.id,
+          configKey: "botEnabled",
+          configValue: "true",
+        },
+      });
+      expect(
+        await SlackConfigurationModel.findOne({
+          where: { connectorId: connectors.slack_bot.id },
+        })
+      ).toMatchObject({ botEnabled: true });
+      if (migrates) {
+        expect(
+          launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
+        ).toHaveBeenCalledWith(connectors.slack.id, connectors.slack_bot.id);
+      } else {
+        expect(
+          launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow
+        ).not.toHaveBeenCalled();
+      }
+    });
+  });
+
+  describe("POST /webhooks/:webhooks_secret/firecrawl", () => {
+    function crawlStarted(connectorId: number) {
+      return jsonRequest("POST", webhookPath("firecrawl"), {
+        success: true,
+        type: "crawl.started",
+        id: "crawl",
+        data: [],
+        metadata: { connectorId: connectorId.toString() },
+        error: null,
+      });
+    }
+
+    it("refuses a body naming a connector of a provider the list does not enable", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "webcrawler");
+      const connector = await makeConnector("notion");
+
+      expect(await send(crawlStarted(connector.id))).toEqual(
+        notEnabled(["notion"])
+      );
+      expect(launchFirecrawlCrawlStartedWorkflow).not.toHaveBeenCalled();
+    });
+
+    it("serves a body naming a connector of a provider the list enables", async () => {
+      vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "webcrawler,notion");
+      vi.mocked(launchFirecrawlCrawlStartedWorkflow).mockResolvedValue(
+        new Ok("workflow")
+      );
+      const connector = await makeConnector("notion");
+
+      const res = await send(crawlStarted(connector.id));
+
+      expect(res.status).toBe(200);
+      expect(launchFirecrawlCrawlStartedWorkflow).toHaveBeenCalledWith(
+        connector.id,
+        "crawl"
+      );
+    });
   });
 });

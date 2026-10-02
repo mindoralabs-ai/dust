@@ -2,7 +2,6 @@ import { adminAPIHandler } from "@connectors/api/admin";
 import { patchConnectorConfigurationAPIHandler } from "@connectors/api/configuration";
 import { createConnectorAPIHandler } from "@connectors/api/create_connector";
 import { deleteConnectorAPIHandler } from "@connectors/api/delete_connector";
-import { readEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import {
   getConnectorAPIHandler,
   getConnectorsAPIHandler,
@@ -32,6 +31,7 @@ import { webhookSlackBotAPIHandler } from "@connectors/api/webhooks/webhook_slac
 import { webhookSlackBotInteractionsAPIHandler } from "@connectors/api/webhooks/webhook_slack_bot_interaction";
 import { webhookSlackInteractionsAPIHandler } from "@connectors/api/webhooks/webhook_slack_interaction";
 import { webhookTeamsAPIHandler } from "@connectors/api/webhooks/webhook_teams";
+import { readEnabledConnectorProviders } from "@connectors/lib/enabled_connector_providers";
 import logger from "@connectors/logger/logger";
 import { authMiddleware } from "@connectors/middleware/auth";
 import { rateLimiter, setupGlobalErrorHandler } from "@connectors/types";
