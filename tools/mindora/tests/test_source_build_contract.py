@@ -1,4 +1,5 @@
 import fnmatch
+import json
 import pathlib
 import re
 import unittest
@@ -9,6 +10,8 @@ WORKFLOW = ROOT / ".github/workflows/mindora-build.yml"
 SPA_DOCKERFILE = ROOT / "dockerfiles/front-spa.Dockerfile"
 CORE_DOCKERFILE = ROOT / "dockerfiles/core.Dockerfile"
 VIZ_DOCKERFILE = ROOT / "dockerfiles/viz.Dockerfile"
+CONNECTORS_DOCKERFILE = ROOT / "dockerfiles/connectors.Dockerfile"
+IMAGE_CONTRACT = ROOT / "docs/mindora/image-contract.json"
 
 
 def pull_request_paths(workflow: str) -> list[str]:
@@ -36,6 +39,8 @@ class SourceBuildContractTest(unittest.TestCase):
             "front-spa/src/app/main.tsx",
             "viz/src/index.ts",
             "egress-proxy/src/main.rs",
+            "connectors/src/start_worker.ts",
+            "dockerfiles/connectors.Dockerfile",
         )
 
         for changed_input in changed_inputs:
@@ -111,6 +116,42 @@ class SourceBuildContractTest(unittest.TestCase):
             ),
             dockerfile.index("RUN npm run build"),
         )
+
+    def test_enabled_roles_name_a_stage_of_their_dockerfile(self) -> None:
+        manifest = json.loads(IMAGE_CONTRACT.read_text(encoding="utf-8"))
+
+        for role, component in manifest["components"].items():
+            if component.get("enabled") is not True:
+                continue
+            with self.subTest(role=role):
+                dockerfile_path = ROOT / component["dockerfile"]
+                dockerfile = dockerfile_path.read_text(encoding="utf-8")
+                self.assertRegex(
+                    dockerfile,
+                    rf"(?m)^FROM \S+ AS {re.escape(component['target'])}$",
+                )
+
+    def test_connectors_image_packages_migration_and_worker_runtime(self) -> None:
+        dockerfile = CONNECTORS_DOCKERFILE.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            dockerfile,
+            r"(?m)^FROM node:[0-9.]+@sha256:[0-9a-f]{64} AS connectors$",
+        )
+        self.assertRegex(dockerfile, r"(?m)^\s*apt-get install .*\bpostgresql-client\b")
+        # The migration command runs ../scripts/db/run-migrate.cjs from /app/connectors.
+        self.assertIn("COPY /scripts/db /app/scripts/db\n", dockerfile)
+        connectors_build = dockerfile.split(
+            "\nWORKDIR /app/connectors\n", maxsplit=1
+        )[1]
+        self.assertLess(
+            connectors_build.index("npm run build:temporal-bundles\n"),
+            connectors_build.index("RUN npm run build\n"),
+        )
+        self.assertEqual(
+            re.findall(r"(?m)^WORKDIR (\S+)$", dockerfile)[-1], "/app/connectors"
+        )
+        self.assertRegex(dockerfile, r"(?m)^ARG DATADOG_API_KEY$")
 
 
 if __name__ == "__main__":

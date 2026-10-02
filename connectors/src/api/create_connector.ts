@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { createConnector } from "@connectors/connectors";
 import type {
   ConnectorManagerError,
@@ -61,6 +62,13 @@ const _createConnectorAPIHandler = async (
           message: `Unknown connector provider ${req.params.connector_provider}`,
         },
       });
+    }
+
+    const enabledRes = checkConnectorProviderEnabled(
+      req.params.connector_provider
+    );
+    if (enabledRes.isErr()) {
+      return apiError(req, res, enabledRes.error);
     }
 
     const {

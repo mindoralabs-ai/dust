@@ -68,4 +68,24 @@ export const apiConfig = {
   getProfilerSecret: (): string | undefined => {
     return EnvironmentConfig.getOptionalEnvVariable("DEBUG_PROFILER_SECRET");
   },
+  // Read without `EnvironmentConfig`, which caches values and treats an empty value as unset: the
+  // allowlist must refuse an empty value rather than enable every provider.
+  getEnabledConnectorProviders: (): string | undefined => {
+    return process.env.CONNECTORS_ENABLED_PROVIDERS;
+  },
+  // The custom Temporal connection settings are read without `EnvironmentConfig`, which caches
+  // values and treats an empty value as unset: each connection setup validates the values the
+  // environment holds at that moment, unchanged.
+  getTemporalAddress: (): string | undefined => {
+    return process.env.TEMPORAL_ADDRESS;
+  },
+  getTemporalTlsMode: (): string | undefined => {
+    return process.env.TEMPORAL_TLS_MODE;
+  },
+  getTemporalTlsCaPath: (): string | undefined => {
+    return process.env.TEMPORAL_TLS_CA_PATH;
+  },
+  getTemporalTlsServerName: (): string | undefined => {
+    return process.env.TEMPORAL_TLS_SERVER_NAME;
+  },
 };

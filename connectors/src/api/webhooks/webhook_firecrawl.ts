@@ -1,11 +1,15 @@
 import {
+  checkConnectorProviderEnabled,
+  withEnabledConnectorProviders,
+} from "@connectors/api/enabled_connector_providers";
+import {
   launchFirecrawlCrawlCompletedWorkflow,
   launchFirecrawlCrawlFailedWorkflow,
   launchFirecrawlCrawlPageWorkflow,
   launchFirecrawlCrawlStartedWorkflow,
 } from "@connectors/connectors/webcrawler/temporal/client";
 import mainLogger from "@connectors/logger/logger";
-import { withLogging } from "@connectors/logger/withlogging";
+import { apiError, withLogging } from "@connectors/logger/withlogging";
 import { ConnectorResource } from "@connectors/resources/connector_resource";
 import type { WithConnectorsAPIErrorReponse } from "@connectors/types";
 import { assertNever } from "@dust-tt/client";
@@ -89,6 +93,12 @@ const _webhookFirecrawlAPIHandler = async (
     logger.error({ connectorId: metadata.connectorId }, "Connector not found");
     // We ignore the webhook.
     return res.status(200).end();
+  }
+
+  // The body names the connector: its own type must be enabled, not only the route's provider.
+  const enabledRes = checkConnectorProviderEnabled(connector.type);
+  if (enabledRes.isErr()) {
+    return apiError(req, res, enabledRes.error);
   }
 
   if (connector.isPaused()) {
@@ -253,5 +263,5 @@ const _webhookFirecrawlAPIHandler = async (
 };
 
 export const webhookFirecrawlAPIHandler = withLogging(
-  _webhookFirecrawlAPIHandler
+  withEnabledConnectorProviders(["webcrawler"], _webhookFirecrawlAPIHandler)
 );

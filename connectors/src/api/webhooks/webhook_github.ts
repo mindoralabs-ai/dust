@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import {
   GithubWebhookPayloadSchema,
   isCommentPayload,
@@ -722,4 +723,6 @@ async function garbageCollectDiscussion(
   }
 }
 
-export const webhookGithubAPIHandler = withLogging(_webhookGithubAPIHandler);
+export const webhookGithubAPIHandler = withLogging(
+  withEnabledConnectorProviders(["github"], _webhookGithubAPIHandler)
+);

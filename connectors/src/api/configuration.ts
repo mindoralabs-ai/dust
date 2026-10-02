@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { getConnectorManager } from "@connectors/connectors";
 import { apiError, withLogging } from "@connectors/logger/withlogging";
 import { ConnectorResource } from "@connectors/resources/connector_resource";
@@ -34,6 +35,11 @@ const _patchConnectorConfiguration = async (
       },
       status_code: 404,
     });
+  }
+
+  const enabledRes = checkConnectorProviderEnabled(connector.type);
+  if (enabledRes.isErr()) {
+    return apiError(req, res, enabledRes.error);
   }
 
   let patchRes: Result<void, Error> | null = null;

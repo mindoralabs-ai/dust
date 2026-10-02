@@ -1,0 +1,53 @@
+@cc [owner:jchen0824,label:security;api] connectors-api-enabled-provider-guard
+When `CONNECTORS_ENABLED_PROVIDERS` is set, a handler that creates a connector, or that can start
+work for a connector or provider (a workflow, a sync, a provider-side write), MUST refuse every
+provider the list does not enable before any side effect for it: no connector row, no OAuth or
+credential call, no workflow. It checks through `checkConnectorProviderEnabled`,
+`withEnabledConnectorProviders` or `checkResolvedConnectorProvidersEnabled`, or through a lookup
+that returns only connectors of enabled types, such as
+`SlackConfigurationResource.fetchByActiveBot`. A provider-specific route checks its own provider.
+Every connector that the handler, or the code it calls, can start work for MUST be checked by that
+connector's own type where it is resolved, unless that lookup can only return connectors of a type
+already checked: it filters on that type, or reads a table that only that provider writes (Slack's
+configuration table is written by both `slack` and `slack_bot`). A check of the route's provider,
+of an admin major command or of another connector does not cover any other connector. This
+includes a connector named in the request body, the team's active Slack bot, and a connector looked
+up from the one the request names. When such a looked-up connector is refused, the handler starts
+no work for it and goes on with the rest of the request. A workflow that the handler starts runs on
+a worker that starts only when the worker's own `CONNECTORS_ENABLED_PROVIDERS` enables every
+provider it does work for. Providers that share a worker, listed in `PROVIDER_GROUPS` (`slack` and
+`slack_bot`), are enabled together or not at all: a list that enables only some of them is
+malformed, so the API does not start under it and every guarded handler refuses every provider
+with 500 while the variable holds it. A handler whose request can act on several providers or connectors, such
+as `POST /connectors/admin`, checks every one of them and refuses a request whose providers it
+cannot resolve. An admin command requires the providers that `ADMIN_COMMAND_TARGETS` records for
+it, which include every provider that its handler can start work for, itself or for its
+connectors: by starting, signalling, restarting or unpausing a workflow or schedule, syncing,
+upserting into or re-parenting in a Dust data source, or changing provider state through the
+provider's API. It requires its major command's provider only when its handler can start work for
+that provider, and no provider when its handler starts none: when it only reads (Dust-side state,
+Temporal, or the provider's API without changing provider state), stores Dust-side state, or
+pauses, stops or deletes without starting or signalling a workflow. Pausing, stopping, deleting
+and read-only handlers stay available for every provider. When the variable is unset, handlers
+behave as upstream.
+
+@cc [owner:jchen0824,label:security;testing] connectors-api-enabled-provider-guard-coverage
+`enabled_connector_providers.test.ts` MUST list every route that `startServer` registers, in
+`GUARDED_ROUTES` or in `UNGUARDED_ROUTES`. A route whose handler is guarded by
+`checkConnectorProviderEnabled`, `withEnabledConnectorProviders` or
+`checkResolvedConnectorProvidersEnabled` MUST be in `GUARDED_ROUTES`, sent through the app
+`startServer` builds, with a request that its guard refuses with 403 and no side effect when the
+list does not enable the route's provider, that reaches the handler when the variable is unset,
+and that its guard refuses with 500 and no side effect when the list changes after startup to one
+that enables only some providers of a `PROVIDER_GROUPS` entry. The test MUST also check that
+`startServer` refuses to start under such a list; that `ADMIN_COMMAND_TARGETS` classifies exactly
+the commands of `AdminCommandSchema`; that an admin command starting work only for connectors of
+providers other than its major command's is refused, under a list that enables none of them, for
+those providers and not for its major command's provider; that `slack delete-conversation` and
+`confluence check-page-exists`, sent through the app, run their real handler under a list that
+enables none of the providers they act on; that, for every other major command, at least one
+command that starts no work passes its guard under such a list and, unless its handler calls a
+provider's API or Temporal, then runs its real handler, through the app when the admin route
+whitelists it; and, for each connector that a guarded handler
+resolves other than by the route's own check (a body connector id, the active Slack bot, a
+looked-up connector), that a list not enabling that connector's type leaves it without work.

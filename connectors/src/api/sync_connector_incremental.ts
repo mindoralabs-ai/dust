@@ -1,5 +1,6 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { getConnectorManager } from "@connectors/connectors";
-import { withLogging } from "@connectors/logger/withlogging";
+import { apiError, withLogging } from "@connectors/logger/withlogging";
 import { ConnectorResource } from "@connectors/resources/connector_resource";
 import type { WithConnectorsAPIErrorReponse } from "@connectors/types";
 import type { Request, Response } from "express";
@@ -42,6 +43,11 @@ const _syncConnectorIncrementalAPIHandler = async (
       },
     });
     return;
+  }
+
+  const enabledRes = checkConnectorProviderEnabled(connector.type);
+  if (enabledRes.isErr()) {
+    return apiError(req, res, enabledRes.error);
   }
 
   const launchRes = await getConnectorManager({

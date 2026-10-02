@@ -1,3 +1,4 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import type {
   CreateConnectorErrorCode,
   RetrievePermissionsErrorCode,
@@ -308,6 +309,12 @@ export class SlackBotConnectorManager extends BaseConnectorManager<SlackConfigur
     return new Ok(undefined);
   }
 
+  /**
+   * @cc [owner:jchen0824,label:security] bot-enabled-legacy-migration-enabled-provider
+   * Enabling the bot MUST NOT start the channel migration from the workspace's legacy `slack`
+   * connector when `CONNECTORS_ENABLED_PROVIDERS` is set and does not enable that connector's
+   * type: the bot is still enabled and the call returns that result.
+   */
   async setConfigurationKey({
     configKey,
     configValue,
@@ -348,6 +355,20 @@ export class SlackBotConnectorManager extends BaseConnectorManager<SlackConfigur
             );
           if (!legacySlackConnector) {
             return new Err(new Error("Legacy Slack connector not found"));
+          }
+
+          // The migration works on the legacy connector, so its own type must be enabled too.
+          if (
+            checkConnectorProviderEnabled(legacySlackConnector.type).isErr()
+          ) {
+            logger.info(
+              {
+                connectorId: this.connectorId,
+                legacySlackConnectorId: legacySlackConnector.id,
+              },
+              "Skipping the channel migration from the legacy bot: its provider is not enabled"
+            );
+            return res;
           }
 
           await launchSlackMigrateChannelsFromLegacyBotToNewBotWorkflow(

@@ -1,4 +1,5 @@
 import { apiConfig } from "@connectors/lib/api/config";
+import { readEnabledConnectorProviders } from "@connectors/lib/enabled_connector_providers";
 import {
   SlackBotWhitelistModel,
   SlackChannelModel,
@@ -194,12 +195,38 @@ export class SlackConfigurationResource extends BaseResource<SlackConfigurationM
     });
   }
 
+  /**
+   * @cc [owner:jchen0824,label:security] fetch-by-active-bot-enabled-provider
+   * When `CONNECTORS_ENABLED_PROVIDERS` is set, returns the team's active bot configuration only
+   * when the list enables the type of its connector, which can be `slack` or `slack_bot`, and
+   * `null` otherwise, including when the value is malformed. The value is read on every call. When
+   * it is unset, returns the active bot configuration whatever its connector's type.
+   */
   static async fetchByActiveBot(slackTeamId: string) {
+    const enabledProvidersRes = readEnabledConnectorProviders();
+    if (enabledProvidersRes.isErr()) {
+      return null;
+    }
+    const enabledProviders = enabledProvidersRes.value;
+
     const blob = await this.model.findOne({
       where: {
         slackTeamId,
         botEnabled: true,
       },
+      include: enabledProviders
+        ? [
+            {
+              model: ConnectorModel,
+              as: "connector",
+              attributes: [],
+              required: true,
+              where: {
+                type: [...enabledProviders],
+              },
+            },
+          ]
+        : undefined,
     });
     if (!blob) {
       return null;

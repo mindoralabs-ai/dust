@@ -42,6 +42,18 @@
       "dockerfile": "dockerfiles/egress-proxy.Dockerfile",
       "target": "egress-proxy",
       "migration_command": null
+    },
+    "connectors_api": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/connectors.Dockerfile",
+      "target": "connectors",
+      "migration_command": "node ../scripts/db/run-migrate.cjs --command pre-deploy --execute"
+    },
+    "connectors_workers": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/connectors.Dockerfile",
+      "target": "connectors",
+      "migration_command": null
     }
   }
 }

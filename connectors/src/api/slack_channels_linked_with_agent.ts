@@ -1,9 +1,11 @@
+import { checkConnectorProviderEnabled } from "@connectors/api/enabled_connector_providers";
 import { getChannelById } from "@connectors/connectors/slack/lib/channels";
 import { getSlackClient } from "@connectors/connectors/slack/lib/slack_client";
 import { slackChannelIdFromInternalId } from "@connectors/connectors/slack/lib/utils";
 import { launchJoinChannelWorkflow } from "@connectors/connectors/slack/temporal/client";
 import { SlackChannelModel } from "@connectors/lib/models/slack";
 import { apiError, withLogging } from "@connectors/logger/withlogging";
+import { ConnectorResource } from "@connectors/resources/connector_resource";
 import type { WithConnectorsAPIErrorReponse } from "@connectors/types";
 import { normalizeError } from "@connectors/types";
 import { withTransaction } from "@connectors/types/shared/utils/sql_utils";
@@ -65,6 +67,15 @@ const _patchSlackChannelsLinkedWithAgentHandler = async (
     auto_respond_without_mention_skip_thread_replies:
       autoRespondWithoutMentionSkipThreadReplies,
   } = bodyValidation.right;
+
+  // The request acts on one connector, so only that connector's own provider can enable it.
+  const connector = await ConnectorResource.fetchById(connectorId);
+  if (connector) {
+    const enabledRes = checkConnectorProviderEnabled(connector.type);
+    if (enabledRes.isErr()) {
+      return apiError(req, res, enabledRes.error);
+    }
+  }
 
   const slackChannelIds = slackChannelInternalIds.map((s) =>
     slackChannelIdFromInternalId(s)

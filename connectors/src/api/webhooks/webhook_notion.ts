@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import type { NotionWebhookEvent } from "@connectors/connectors/notion/lib/webhooks";
 import { processNotionWebhookEvent } from "@connectors/connectors/notion/lib/webhooks";
 import { NotionConnectorStateModel } from "@connectors/lib/models/notion";
@@ -155,4 +156,6 @@ const _webhookNotionAPIHandler = async (
   return res.status(200).end();
 };
 
-export const webhookNotionAPIHandler = withLogging(_webhookNotionAPIHandler);
+export const webhookNotionAPIHandler = withLogging(
+  withEnabledConnectorProviders(["notion"], _webhookNotionAPIHandler)
+);

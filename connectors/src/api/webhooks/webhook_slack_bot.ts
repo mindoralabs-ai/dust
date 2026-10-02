@@ -1,3 +1,4 @@
+import { withEnabledConnectorProviders } from "@connectors/api/enabled_connector_providers";
 import {
   isChannelCreatedEvent,
   onChannelCreation,
@@ -326,5 +327,5 @@ const _webhookSlackBotAPIHandler = async (
 };
 
 export const webhookSlackBotAPIHandler = withLogging(
-  _webhookSlackBotAPIHandler
+  withEnabledConnectorProviders(["slack_bot"], _webhookSlackBotAPIHandler)
 );

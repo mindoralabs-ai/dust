@@ -22,9 +22,12 @@ It enables these roles:
 | `sqlite_worker` | `dockerfiles/core.Dockerfile` / `core` | `sqlite-worker` | none recorded |
 | `viz_renderer` | `dockerfiles/viz.Dockerfile` / `viz` | `npm --silent run start` | none |
 | `egress_proxy` | `dockerfiles/egress-proxy.Dockerfile` / `egress-proxy` | `cargo run --release --bin egress-proxy` | none |
+| `connectors_api` | `dockerfiles/connectors.Dockerfile` / `connectors` | `node dist/start_server.js -p 3002` | connectors pre-deploy before rollout, as described below |
+| `connectors_workers` | `dockerfiles/connectors.Dockerfile` / `connectors` | `node dist/start_worker.js --workers dust_project` | none |
 
 Core API and SQLite worker intentionally share one image and select different
-commands at deployment. Frame sandbox state is persistent state mounted into a
+commands at deployment. The connectors API and the connectors workers also share
+one image. Frame sandbox state is persistent state mounted into a
 sandbox, not another Dust-built service image. E2B and the Temporal, Redis,
 Qdrant, and Elasticsearch images are separate qualification inputs and are not
 silently substituted by this build.
@@ -100,6 +103,104 @@ MCP opt-out in the runtime PR does not disable employee login.
 
 This packaging PR creates images; it does not prove the selected WorkOS environment,
 worker queues, session revocation or full runtime have been configured or tested.
+
+### Run the connectors API and workers
+
+Both connectors roles run from `/app/connectors` in the connectors image with
+`NODE_ENV=production`. Provide credentials and secrets through the deployment's
+secret-aware mechanism, never on the command line. `TEMPORAL_*` below means
+`TEMPORAL_ADDRESS`, `TEMPORAL_TLS_MODE`, `TEMPORAL_NAMESPACE` and any certificate
+settings that the selected TLS mode needs, as described in
+[temporal.md](temporal.md).
+
+| Role | Command | Probe | Required environment |
+|---|---|---|---|
+| `connectors_api` | `node dist/start_server.js -p 3002` | `GET /` on port 3002 | `CONNECTORS_DATABASE_URI`, `DUST_CONNECTORS_SECRET`, `DUST_CONNECTORS_WEBHOOKS_SECRET`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*` |
+| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `TEXT_EXTRACTION_URL`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
+
+The API's `GET /` returns 200 without authentication. It shows only that the HTTP
+server is listening, not that the database or Temporal is reachable. Set
+`CONNECTORS_ENABLED_PROVIDERS=dust_project` so the API refuses connectors whose
+workers this deployment does not run. Give the workers the same value: a workflow
+the API starts can reach another connector than the one the API checked, such as a
+Slack team's active bot, and the worker checks that connector against its own
+value.
+
+`TEXT_EXTRACTION_URL` is the base URL of an Apache Tika server. The worker sends
+the PDF, Word and PowerPoint files of a project mount to its `/tika` endpoints to
+extract their text; it skips spreadsheets. The connectors image does not include
+Tika, and Tika is outside the POC's scope, so the POC runs no Tika server. Set the
+variable anyway:
+
+- When it is unset, the worker still starts and `/readyz` returns 200, but the
+  first such file makes the mount-file sync activity throw. Temporal retries that
+  activity without limit, so the project's sync never completes.
+- When no Tika server answers at its URL, the worker skips each such file with a
+  warning after three attempts. Those files are not indexed, and the rest of the
+  project syncs.
+
+To index those files, run a Tika server and set the variable to its URL. Upstream's
+local stack in `docker-compose.yml` runs `apache/tika:3.2.3.0-full` with the
+repository's `tika-config.xml` on port 9998.
+
+`slack` and `slack_bot` share the `slack` worker, its workflows and activities, and
+much other code, so `CONNECTORS_ENABLED_PROVIDERS` must enable both or neither.
+`PROVIDER_GROUPS` in `connectors/src/lib/enabled_connector_providers.ts` lists the
+providers that must be enabled together. A list that enables only some providers
+of a group is malformed: the API refuses to start and the worker process refuses
+to start any worker.
+
+When `CONNECTORS_ENABLED_PROVIDERS` is set, the worker process checks it before
+starting any worker. If the value is malformed, or does not enable every provider
+that a selected worker does work for, the process logs `Error running workers` and
+exits with code 1. `WORKER_PROVIDERS` in `connectors/src/temporal/worker_registry.ts`
+lists the providers of each worker.
+
+The worker command must keep `--workers dust_project`. Without `--workers`, the
+process selects every registered connectors worker, which
+`CONNECTORS_ENABLED_PROVIDERS=dust_project` refuses. An empty or duplicated
+`--workers` list fails startup. If a worker throws, or stops before the process
+receives SIGINT, SIGTERM, SIGQUIT or SIGUSR2, the process logs
+`Error running <worker> worker.` and exits with code 1, so the orchestrator
+restarts it.
+
+Temporal's runtime shuts the workers down on exactly those four signals. On any of
+them, the process only marks itself as shutting down, so `/readyz` returns 503, and
+leaves the shutdown to the runtime. The runtime drains every
+running Temporal worker and also shuts down a worker that finishes starting after
+the signal. The process exits after the workers stop. If connecting to Temporal or
+creating a worker hangs, the process keeps running until the orchestrator sends
+SIGKILL at the end of the pod's `terminationGracePeriodSeconds`.
+
+The worker opens its health listener only when `WORKER_HEALTH_PORT` is set, and an
+invalid port fails startup. The listener binds to `127.0.0.1`, so the readiness
+probe must run inside the container, for example as an exec probe:
+
+```sh
+node -e 'fetch(`http://127.0.0.1:${process.env.WORKER_HEALTH_PORT}/readyz`).then((r) => process.exit(r.status === 200 ? 0 : 1), () => process.exit(1))'
+```
+
+`/readyz` returns 200 only after the `dust_project` Temporal worker is `RUNNING`.
+It returns 503 while the worker connects or starts, after any of those four
+signals, and whenever the worker drains, stops or fails. Only `dust_project` reports its
+Temporal worker state, so readiness stays 503 if any other worker is selected.
+
+### Run connectors migrations around the rollout
+
+The connectors image contains the shared migration runner and `psql`, which runs
+the SQL files. Before deploying a new connectors API and worker release, and
+before the first start on a fresh database, run from `/app/connectors` with
+`CONNECTORS_DATABASE_URI` and `NODE_ENV=production`:
+
+```sh
+node ../scripts/db/run-migrate.cjs --command pre-deploy --execute
+```
+
+This runs `node dist/migrate.js --command pre-deploy --execute`. On a fresh
+database, the first pre-deploy migration creates the connectors schema. After
+every old connectors API and worker pod has been replaced, run the same command
+with `--command post-deploy`. As with Front, never combine the two phases into
+one job.
 
 ## Deterministic inputs and local builds
 

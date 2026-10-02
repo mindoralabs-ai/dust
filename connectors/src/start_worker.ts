@@ -1,15 +1,25 @@
+import {
+  superviseWorkers,
+  WORKER_SHUTDOWN_SIGNALS,
+  workerSelectionArgs,
+} from "@connectors/temporal/worker_health";
 import type { WorkerName } from "@connectors/temporal/worker_registry";
 import {
   ALL_WORKERS,
+  WORKER_PROVIDERS,
   workerFunctions,
 } from "@connectors/temporal/worker_registry";
-import { isDevelopment, setupGlobalErrorHandler } from "@connectors/types";
+import {
+  EnvironmentConfig,
+  isDevelopment,
+  setupGlobalErrorHandler,
+} from "@connectors/types";
 import { closeRedisClients } from "@connectors/types/shared/redis_client";
 import type { Logger, LogLevel } from "@temporalio/common/lib/logger";
 import { Runtime } from "@temporalio/worker/lib/runtime";
-import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
+import { apiConfig } from "./lib/api/config";
 import { errorFromAny } from "./lib/error";
 import logger from "./logger/logger";
 
@@ -39,24 +49,24 @@ const pinoAdapter: Logger = {
 // Install once per process — before creating Worker/Client
 Runtime.install({
   logger: pinoAdapter,
+  // `superviseWorkers` marks shutdown on the same signals.
+  shutdownSignals: [...WORKER_SHUTDOWN_SIGNALS],
 });
 
+/**
+ * @cc [owner:jchen0824,label:security] connectors-start-worker-enabled-providers
+ * `superviseWorkers` MUST receive `WORKER_PROVIDERS` and this process's raw
+ * `CONNECTORS_ENABLED_PROVIDERS` value, as read by `apiConfig.getEnabledConnectorProviders`.
+ */
 async function runWorkers(workers: WorkerName[]) {
-  // Start all workers in parallel
-  try {
-    const promises = workers.map((worker) =>
-      Promise.resolve()
-        .then(() => workerFunctions[worker]())
-        .catch((err) => {
-          logger.error(errorFromAny(err), `Error running ${worker} worker.`);
-        })
-    );
-
-    // Wait for all workers to complete
-    await Promise.all(promises);
-  } catch (e) {
-    logger.error(errorFromAny(e), "Unexpected error during worker startup.");
-  }
+  await superviseWorkers(workers, {
+    runWorker: (worker) => workerFunctions[worker](),
+    workerProviders: WORKER_PROVIDERS,
+    enabledProviders: apiConfig.getEnabledConnectorProviders(),
+    healthPort: EnvironmentConfig.getOptionalEnvVariable("WORKER_HEALTH_PORT"),
+    onceSignal: (signal, listener) => process.once(signal, listener),
+    exit: (code) => process.exit(code),
+  });
 
   // Shutdown Temporal native runtime *once*
   // Fix the issue of connectors hanging after receiving SIGINT in dev
@@ -69,19 +79,11 @@ async function runWorkers(workers: WorkerName[]) {
   await closeRedisClients();
 }
 
-yargs(hideBin(process.argv))
-  .option("workers", {
-    alias: "w",
-    type: "array",
-    choices: ALL_WORKERS,
-    default: ALL_WORKERS,
-    demandOption: true,
-    description: "Choose one or multiple workers to run.",
-  })
-  .help()
-  .alias("help", "h")
+workerSelectionArgs(hideBin(process.argv), ALL_WORKERS)
   .parseAsync()
-  .then(async (args) => runWorkers(args.workers as WorkerName[]))
+  .then(async (args) =>
+    runWorkers((args.workers ?? ALL_WORKERS) as WorkerName[])
+  )
   .catch((err) => {
     logger.error(errorFromAny(err), "Error running workers");
     process.exit(1);
