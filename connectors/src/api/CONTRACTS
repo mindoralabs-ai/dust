@@ -3,8 +3,9 @@ When `CONNECTORS_ENABLED_PROVIDERS` is set, a handler that creates a connector, 
 work for a connector or provider (a workflow, a sync, a provider-side write), MUST refuse every
 provider the list does not enable, through `checkConnectorProviderEnabled` or
 `withEnabledConnectorProviders`, before any side effect: no connector row, no OAuth or credential
-call, no workflow. Pausing, deleting and read-only handlers stay available for every provider. When
-the variable is unset, handlers behave as upstream.
+call, no workflow. A provider-specific route checks only its own provider, and a route that acts
+on one connector checks that connector's own type. Pausing, deleting and read-only handlers stay
+available for every provider. When the variable is unset, handlers behave as upstream.
 
 @cc [owner:jchen0824,label:security;testing] connectors-api-enabled-provider-guard-coverage
 `enabled_connector_providers.test.ts` MUST list every route that `startServer` registers, in

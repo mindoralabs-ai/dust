@@ -327,8 +327,5 @@ const _webhookSlackBotAPIHandler = async (
 };
 
 export const webhookSlackBotAPIHandler = withLogging(
-  withEnabledConnectorProviders(
-    ["slack", "slack_bot"],
-    _webhookSlackBotAPIHandler
-  )
+  withEnabledConnectorProviders(["slack_bot"], _webhookSlackBotAPIHandler)
 );

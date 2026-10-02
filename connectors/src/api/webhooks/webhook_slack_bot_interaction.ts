@@ -614,7 +614,7 @@ async function handleViewSubmission(
 
 export const webhookSlackBotInteractionsAPIHandler = withLogging(
   withEnabledConnectorProviders(
-    ["slack", "slack_bot"],
+    ["slack_bot"],
     _webhookSlackBotInteractionsAPIHandler
   )
 );

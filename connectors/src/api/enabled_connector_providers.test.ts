@@ -614,7 +614,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "PATCH /slack/channels/linked_with_agent",
     provider: "slack",
-    guardedProviders: ["slack", "slack_bot"],
+    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare(provider) {
       const connector = await makeConnector(provider);
@@ -656,7 +656,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack",
     provider: "slack",
-    guardedProviders: ["slack", "slack_bot"],
+    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare() {
       vi.mocked(launchSlackWebhookEventWorkflow).mockResolvedValue(
@@ -686,7 +686,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_interaction",
     provider: "slack",
-    guardedProviders: ["slack", "slack_bot"],
+    disablingList: "slack_bot",
     servesDustProject: false,
     async prepare() {
       vi.mocked(botReplaceMention).mockResolvedValue(new Ok(undefined));
@@ -712,7 +712,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_bot",
     provider: "slack_bot",
-    guardedProviders: ["slack", "slack_bot"],
+    disablingList: "slack",
     servesDustProject: false,
     async prepare() {
       return {
@@ -732,7 +732,7 @@ const GUARDED_ROUTES: GuardedRoute[] = [
   {
     route: "POST /webhooks/:webhook_secret/slack_bot_interaction",
     provider: "slack_bot",
-    guardedProviders: ["slack", "slack_bot"],
+    disablingList: "slack",
     servesDustProject: false,
     async prepare() {
       vi.mocked(botReplaceMention).mockResolvedValue(new Ok(undefined));
@@ -1093,11 +1093,8 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
     });
   }
 
-  it.each([
-    "slack",
-    "slack_bot",
-  ])("serves a Slack webhook when the list enables %s", async (provider) => {
-    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", provider);
+  it("serves the slack_bot webhook when the list enables slack_bot", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
 
     expect(
       await send(
@@ -1107,6 +1104,38 @@ describe("routes guarded by CONNECTORS_ENABLED_PROVIDERS", () => {
         })
       )
     ).toEqual({ status: 200, body: { challenge: "challenge" } });
+  });
+
+  it("serves the slack webhook when the list enables slack", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack");
+    vi.mocked(launchSlackWebhookEventWorkflow).mockResolvedValue(
+      new Ok("workflow")
+    );
+
+    const res = await send(
+      jsonRequest("POST", webhookPath("slack"), {
+        type: "event_callback",
+        team_id: "T1",
+        event_id: "Ev1",
+        event: { type: "app_mention", channel: "C1", ts: "1.0" },
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(launchSlackWebhookEventWorkflow).toHaveBeenCalled();
+  });
+
+  it("links channels of a slack_bot connector when the list enables slack_bot", async () => {
+    vi.stubEnv("CONNECTORS_ENABLED_PROVIDERS", "slack_bot");
+    const route = GUARDED_ROUTES.find(
+      (r) => r.route === "PATCH /slack/channels/linked_with_agent"
+    );
+    if (!route) {
+      throw new Error("linked_with_agent route missing from the table");
+    }
+    const prepared = await route.prepare("slack_bot");
+
+    await prepared.expectHandled(await send(prepared.request));
   });
 
   it("refuses a provider name it does not know", async () => {
