@@ -96,6 +96,15 @@ app.post("/", validate("param", ParamsSchema), async (ctx) => {
         },
       });
     }
+    if (rUpsert.error.code === "quota_exceeded") {
+      return apiError(ctx, {
+        status_code: 429,
+        api_error: {
+          type: "rate_limit_error",
+          message: rUpsert.error.message,
+        },
+      });
+    }
     let status_code: number;
     let type: APIErrorType;
 

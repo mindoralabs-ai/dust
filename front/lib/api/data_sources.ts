@@ -679,6 +679,14 @@ export async function upsertDocument({
         )
       );
     }
+    if (upsertRes.error.code === "quota_exceeded") {
+      return new Err(
+        new DustError(
+          "quota_exceeded",
+          "The workspace's embedding token quota is exhausted. Try again later."
+        )
+      );
+    }
     return new Err(
       new DustError(
         "core_api_error",

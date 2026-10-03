@@ -49,3 +49,37 @@ it.each([
   expect(upsertDocument).toHaveBeenCalledOnce();
   vi.mocked(upsertDocument).mockReset();
 });
+
+it.each([
+  "POST",
+  "PATCH",
+])("returns 429 when the embedding quota refuses a %s document upsert", async (method) => {
+  const { workspace, globalSpace } = await createPrivateApiMockRequest({
+    role: "admin",
+  });
+  const view = await DataSourceViewFactory.folder(workspace, globalSpace);
+  vi.mocked(upsertDocument).mockResolvedValue(
+    new Err(new DustError("quota_exceeded", "Try again later."))
+  );
+
+  const base = `/api/w/${workspace.sId}/spaces/${globalSpace.sId}/data_sources/${view.dataSource.sId}/documents`;
+  const response = await honoApp.request(
+    method === "POST" ? base : `${base}/doc-1`,
+    {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Document",
+        mime_type: "text/plain",
+        text: "hello",
+      }),
+    }
+  );
+
+  expect(response.status).toBe(429);
+  expect(await response.json()).toMatchObject({
+    error: { type: "rate_limit_error" },
+  });
+  expect(upsertDocument).toHaveBeenCalledOnce();
+  vi.mocked(upsertDocument).mockReset();
+});

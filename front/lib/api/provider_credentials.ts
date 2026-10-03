@@ -89,8 +89,9 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  *
  * By default, BYOK workspaces must have `OPENAI_EMBEDDING_API_KEY` configured
  * (used by search, upsert, data source creation).
- * Configured Vertex POC workspaces omit this OpenAI-only requirement; Core's
- * signed workspace assertion and route gate still authorize provider I/O.
+ * Configured Vertex POC workspaces, or in direct provider mode the one direct
+ * workspace, omit this OpenAI-only requirement; Core's signed workspace
+ * assertion and its own workspace gate still authorize provider I/O.
  * Pass `skipEmbeddingApiKeyRequirement: true` for call sites that only need LLM
  * keys (agent loop, token counting, image generation, etc.).
  */

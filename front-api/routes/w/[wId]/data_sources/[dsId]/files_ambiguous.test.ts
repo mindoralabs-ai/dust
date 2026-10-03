@@ -43,3 +43,31 @@ it("returns 409 when a file document upsert has an ambiguous provider effect", a
   });
   expect(processAndUpsertToDataSource).toHaveBeenCalledOnce();
 });
+
+it("returns 429 when the embedding quota refuses a file document upsert", async () => {
+  const { auth, workspace, user, globalSpace } =
+    await createPrivateApiMockRequest({ role: "admin" });
+  const view = await DataSourceViewFactory.folder(workspace, globalSpace);
+  const file = await FileFactory.csv(auth, user, {
+    useCase: "upsert_document",
+  });
+  vi.mocked(processAndUpsertToDataSource).mockResolvedValue(
+    new Err(new DustError("quota_exceeded", "Try again later."))
+  );
+
+  const response = await honoApp.request(
+    `/api/w/${workspace.sId}/data_sources/${view.dataSource.sId}/files`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileId: file.sId }),
+    }
+  );
+
+  expect(response.status).toBe(429);
+  expect(await response.json()).toMatchObject({
+    error: { type: "rate_limit_error" },
+  });
+  expect(processAndUpsertToDataSource).toHaveBeenCalledOnce();
+  vi.mocked(processAndUpsertToDataSource).mockReset();
+});

@@ -215,6 +215,7 @@ describe("isolated Dust POC direct provider mode", () => {
     vi.stubEnv("DUST_POC_DIRECT_PROVIDER_MODE", "1");
     vi.stubEnv("DUST_POC_DIRECT_WORKSPACE_ID", "workspace-a");
     vi.stubEnv("DUST_POC_DIRECT_DAILY_TOKEN_LIMIT", "500000");
+    vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "1");
     authorizeDirect.mockResolvedValue({
       attempt: { attemptId: "attempt-1" },
     } as never);
@@ -273,5 +274,75 @@ describe("isolated Dust POC direct provider mode", () => {
       "@app/lib/api/dust_poc_mode"
     );
     expect(() => dustPocDirectProviderMode()).toThrow("unavailable");
+  });
+
+  it("selects Vertex for the direct workspace without the signed registry", async () => {
+    const { selectPocEmbeddingProvider } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    expect(await selectPocEmbeddingProvider(identity, "workspace-a")).toBe(
+      "vertex_ai"
+    );
+    expect(Resolver).not.toHaveBeenCalled();
+  });
+
+  it("leaves an unrelated workspace's embedding provider alone", async () => {
+    const { selectPocEmbeddingProvider } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    expect(
+      await selectPocEmbeddingProvider(
+        { ...identity, workspaceId: "workspace-c" },
+        "workspace-c"
+      )
+    ).toBeNull();
+    expect(Resolver).not.toHaveBeenCalled();
+  });
+
+  it("lets only the direct workspace omit an OpenAI embedding key", async () => {
+    const { isConfiguredPocVertexEmbeddingWorkspace } = await import(
+      "@app/lib/api/dust_poc_mode"
+    );
+    expect(isConfiguredPocVertexEmbeddingWorkspace("workspace-a")).toBe(true);
+    expect(isConfiguredPocVertexEmbeddingWorkspace("workspace-c")).toBe(false);
+  });
+
+  it.each([
+    ["the embedding switch is off", "0", identity],
+    ["there is no member identity", "1", null],
+    [
+      "the identity is for another workspace",
+      "1",
+      { ...identity, workspaceId: "workspace-c" },
+    ],
+  ])("refuses the direct workspace when %s", async (_case, enabled, caller) => {
+    vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", enabled);
+    const { selectPocEmbeddingProvider } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    await expect(
+      selectPocEmbeddingProvider(caller, "workspace-a")
+    ).rejects.toThrow("Dust POC embedding unavailable");
+    expect(Resolver).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["DUST_POC_DIRECT_PROVIDER_MODE", "true"],
+    ["DUST_POC_DIRECT_WORKSPACE_ID", "workspace a"],
+  ])("fails embedding selection closed for %s=%s", async (key, value) => {
+    vi.stubEnv(key, value);
+    const { selectPocEmbeddingProvider } = await import(
+      "@app/lib/api/dust_poc_runtime"
+    );
+    const { isConfiguredPocVertexEmbeddingWorkspace } = await import(
+      "@app/lib/api/dust_poc_mode"
+    );
+    await expect(
+      selectPocEmbeddingProvider(identity, "workspace-a")
+    ).rejects.toThrow("configuration unavailable");
+    expect(() =>
+      isConfiguredPocVertexEmbeddingWorkspace("workspace-a")
+    ).toThrow("configuration unavailable");
+    expect(Resolver).not.toHaveBeenCalled();
   });
 });

@@ -718,6 +718,17 @@ app.post(
             },
           });
         }
+        if (upsertRes.error.code === "quota_exceeded") {
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message:
+                "The workspace's embedding token quota is exhausted. Try again later.",
+              data_source_error: upsertRes.error,
+            },
+          });
+        }
         return apiError(ctx, {
           status_code: 500,
           api_error: {
