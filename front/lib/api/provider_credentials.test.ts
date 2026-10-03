@@ -1,3 +1,4 @@
+import config from "@app/lib/api/config";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import { ProviderCredentialFactory } from "@app/tests/utils/ProviderCredentialFactory";
@@ -185,6 +186,39 @@ describe("getLlmCredentials", () => {
         );
       } finally {
         vi.unstubAllEnvs();
+      }
+    });
+
+    it("lets the direct POC workspace omit an OpenAI embedding key without DUST_POC_WORKSPACE_IDS", async () => {
+      const { authenticator } = await createResourceTest({
+        role: "admin",
+        isByok: true,
+      });
+      const { authenticator: unrelated } = await createResourceTest({
+        role: "admin",
+        isByok: true,
+      });
+      // EnvironmentConfig caches values for the whole file, so set the direct
+      // workspace through config rather than the environment.
+      const spies = [
+        vi.spyOn(config, "getDustPocMode").mockReturnValue("1"),
+        vi.spyOn(config, "getDustPocDirectProviderMode").mockReturnValue("1"),
+        vi
+          .spyOn(config, "getDustPocDirectWorkspaceId")
+          .mockReturnValue(authenticator.getNonNullableWorkspace().sId),
+        vi.spyOn(config, "getDustPocWorkspaceIds").mockImplementation(() => {
+          throw new Error("DUST_POC_WORKSPACE_IDS is required but not set");
+        }),
+      ];
+      try {
+        expect(await getLlmCredentials(authenticator)).toEqual(BASE_VARIABLES);
+        await expect(getLlmCredentials(unrelated)).rejects.toThrow(
+          "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."
+        );
+      } finally {
+        for (const spy of spies) {
+          spy.mockRestore();
+        }
       }
     });
   });

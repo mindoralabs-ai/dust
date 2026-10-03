@@ -8,6 +8,7 @@ vi.mock("@app/lib/lock", () => ({
   }),
 }));
 
+import config from "@app/lib/api/config";
 import { createDataSourceAndConnectorForProject } from "@app/lib/api/projects/connector";
 import { getProjectConversationsDatasourceName } from "@app/lib/api/projects/data_sources";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
@@ -34,6 +35,34 @@ import { Err, Ok } from "@app/types/shared/result";
 
 describe("createDataSourceAndConnectorForProject", () => {
   afterEach(() => vi.unstubAllEnvs());
+  const spiesToRestore: { mockRestore: () => void }[] = [];
+  afterEach(() => {
+    for (const spy of spiesToRestore.splice(0)) {
+      spy.mockRestore();
+    }
+  });
+
+  // EnvironmentConfig caches values for the whole file, so each test sets its
+  // own direct POC workspace through config rather than the environment.
+  function configureDirectPoc(
+    workspaceId: string,
+    { embeddingSelectionEnabled = true } = {}
+  ) {
+    spiesToRestore.push(
+      vi.spyOn(config, "getDustPocMode").mockReturnValue("1"),
+      vi.spyOn(config, "getDustPocDirectProviderMode").mockReturnValue("1"),
+      vi
+        .spyOn(config, "getDustPocDirectWorkspaceId")
+        .mockReturnValue(workspaceId),
+      vi
+        .spyOn(config, "getDustFrontVertexEmbeddingSelectionEnabled")
+        .mockReturnValue(embeddingSelectionEnabled),
+      vi.spyOn(config, "getDustPocWorkspaceIds").mockImplementation(() => {
+        throw new Error("DUST_POC_WORKSPACE_IDS is required but not set");
+      })
+    );
+  }
+
   let workspace: Awaited<ReturnType<typeof WorkspaceFactory.basic>>;
   let adminAuth: Authenticator;
   let globalGroup: GroupResource;
@@ -256,7 +285,19 @@ describe("createDataSourceAndConnectorForProject", () => {
       syncConnectorSpy.mockRestore();
     });
 
-    it("should return early if connector already exists", async () => {
+    it.each([
+      [
+        "with signed POC configuration",
+        (workspaceId: string) => {
+          vi.stubEnv("DUST_POC_MODE", "1");
+          vi.stubEnv("DUST_POC_WORKSPACE_IDS", workspaceId);
+        },
+      ],
+      [
+        "in direct POC provider mode",
+        (workspaceId: string) => configureDirectPoc(workspaceId),
+      ],
+    ])("should return early if connector already exists %s", async (_mode, configurePoc) => {
       // First, create a connector
       const mockProjectId = Math.floor(Math.random() * 1000000);
       const mockDataSourceId = "test-data-source-id-" + Math.random();
@@ -448,8 +489,7 @@ describe("createDataSourceAndConnectorForProject", () => {
       // Call again - should verify everything exists and return early without creating anything
       // The operator uses an internal admin without a user. Existing Core
       // components must be repairable even in a configured POC workspace.
-      vi.stubEnv("DUST_POC_MODE", "1");
-      vi.stubEnv("DUST_POC_WORKSPACE_IDS", workspace.sId);
+      configurePoc(workspace.sId);
       const internalAdmin = await Authenticator.internalAdminForWorkspace(
         workspace.sId
       );
@@ -1623,6 +1663,153 @@ describe("createDataSourceAndConnectorForProject", () => {
       expect(finalDataSources.length).toBe(1);
 
       upsertFolderSpy.mockRestore();
+    });
+  });
+
+  describe("direct POC provider mode", () => {
+    async function mockPodCreation() {
+      const mockDataSourceId = "test-data-source-id-" + Math.random();
+      const vertex = EMBEDDING_CONFIGS.vertex_ai;
+      const mockSystemKey = await KeyFactory.system(globalGroup);
+      const spies = {
+        systemKey: vi
+          .spyOn(await import("@app/lib/auth"), "getOrCreateSystemApiKey")
+          .mockResolvedValue(new Ok(mockSystemKey)),
+        llmCredentials: vi.spyOn(
+          await import("@app/lib/api/provider_credentials"),
+          "getLlmCredentials"
+        ),
+        createProject: vi
+          .spyOn(CoreAPI.prototype, "createProject")
+          .mockResolvedValue(new Ok({ project: { project_id: 1 } })),
+        createDataSource: vi
+          .spyOn(CoreAPI.prototype, "createDataSource")
+          .mockResolvedValue(
+            new Ok({
+              data_source: {
+                created: Date.now(),
+                data_source_id: mockDataSourceId,
+                data_source_internal_id: `internal-${mockDataSourceId}`,
+                name: getProjectConversationsDatasourceName(projectSpace),
+                config: {
+                  embedder_config: {
+                    embedder: {
+                      provider_id: vertex.provider_id,
+                      model_id: vertex.model_id,
+                      splitter_id: vertex.splitter_id,
+                      max_chunk_size: vertex.max_chunk_size,
+                    },
+                  },
+                  qdrant_config: {
+                    cluster: DEFAULT_QDRANT_CLUSTER,
+                    shadow_write_cluster: null,
+                  },
+                },
+              },
+            })
+          ),
+        upsertFolder: vi
+          .spyOn(CoreAPI.prototype, "upsertDataSourceFolder")
+          .mockResolvedValue(
+            new Ok({
+              folder: {
+                data_source_id: mockDataSourceId,
+                folder_id: "project-context-folder-id",
+                timestamp: Date.now(),
+                title: "Project Context",
+                parent_id: null,
+                parents: [],
+              },
+            })
+          ),
+        createConnector: vi
+          .spyOn(ConnectorsAPI.prototype, "createConnector")
+          .mockResolvedValue(
+            new Ok({
+              id: "test-connector-id-" + Math.random(),
+              type: "dust_project",
+              workspaceId: workspace.sId,
+              dataSourceId: mockDataSourceId,
+              connectionId: projectSpace.sId,
+              useProxy: false,
+              configuration: null,
+              updatedAt: Date.now(),
+            })
+          ),
+        syncConnector: vi
+          .spyOn(ConnectorsAPI.prototype, "syncConnector")
+          .mockResolvedValue(new Ok({ workflowId: "test-workflow-id" })),
+      };
+      spiesToRestore.push(...Object.values(spies));
+      return spies;
+    }
+
+    it("creates the direct workspace's Pod data source with the Vertex embedder", async () => {
+      configureDirectPoc(workspace.sId);
+      const spies = await mockPodCreation();
+
+      const result = await createDataSourceAndConnectorForProject(
+        adminAuth,
+        projectSpace
+      );
+
+      expect(result.isOk()).toBe(true);
+      expect(spies.createDataSource).toHaveBeenCalledTimes(1);
+      const vertex = EMBEDDING_CONFIGS.vertex_ai;
+      expect(
+        spies.createDataSource.mock.calls[0][0].config.embedder_config.embedder
+      ).toEqual({
+        max_chunk_size: vertex.max_chunk_size,
+        model_id: vertex.model_id,
+        provider_id: "vertex_ai",
+        splitter_id: vertex.splitter_id,
+      });
+      expect(spies.llmCredentials).toHaveBeenCalledWith(adminAuth, {
+        skipEmbeddingApiKeyRequirement: true,
+      });
+    });
+
+    it("refuses the Pod before Core project creation when the embedding switch is off", async () => {
+      configureDirectPoc(workspace.sId, { embeddingSelectionEnabled: false });
+      const spies = await mockPodCreation();
+
+      const result = await createDataSourceAndConnectorForProject(
+        adminAuth,
+        projectSpace
+      );
+
+      expect(result.isErr() && result.error.message).toBe(
+        "Dust POC embedding unavailable"
+      );
+      expect(spies.createProject).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "a non-member",
+        async () =>
+          Authenticator.fromUserIdAndWorkspaceId(
+            (await UserFactory.basic()).sId,
+            workspace.sId
+          ),
+      ],
+      [
+        "an internal admin",
+        () => Authenticator.internalAdminForWorkspace(workspace.sId),
+      ],
+    ])("refuses the Pod for %s", async (_caller, makeAuth) => {
+      configureDirectPoc(workspace.sId);
+      const spies = await mockPodCreation();
+
+      const result = await createDataSourceAndConnectorForProject(
+        await makeAuth(),
+        projectSpace
+      );
+
+      expect(result.isErr() && result.error.message).toBe(
+        "Dust POC embedding unavailable"
+      );
+      expect(spies.createProject).not.toHaveBeenCalled();
     });
   });
 });

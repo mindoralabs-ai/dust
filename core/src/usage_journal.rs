@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{SecondsFormat, TimeZone, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -18,6 +18,12 @@ const CLAIM_LEASE_MS: i64 = 60 * 1000;
 const RETRY_DELAY_MS: i64 = 60 * 1000;
 const REVIEW_DEADLINE_MS: i64 = 24 * 60 * 60 * 1000;
 const EMBEDDING_RESULT_RETRY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Upper bound of a direct workspace's configured daily token limit.
+pub const DIRECT_DAILY_TOKEN_LIMIT_MAX: u64 = 1_000_000_000;
+
+/// Reserved for direct provider mode's local journal rows, so no signed tenant
+/// can share them or their exclusion from delivery. Front reserves the same ID.
+pub const DIRECT_POC_TENANT_ID: &str = "poc-direct";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreUsageAttempt {
@@ -47,6 +53,14 @@ impl CreatedPermit {
 pub enum StartOutcome {
     Created(CreatedPermit),
     Duplicate,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DirectStartOutcome {
+    Created(CreatedPermit),
+    Duplicate,
+    /// The daily limit would be exceeded; nothing was written.
+    OverLimit,
 }
 
 #[cfg(test)]
@@ -255,8 +269,88 @@ impl CoreUsageJournal {
         input_hash: Option<&[u8; 32]>,
     ) -> Result<StartOutcome> {
         validate_attempt(attempt)?;
+        if attempt.tenant_id == DIRECT_POC_TENANT_ID {
+            bail!("direct Core usage attempts require the daily limit check");
+        }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::insert_started(tx, attempt, input_hash)
+    }
+
+    /// @cc [owner:jchen0824,label:security;backend] dust-core-direct-start-within-limit
+    /// Only `DIRECT_POC_TENANT_ID` attempts on route `poc-direct:0` are accepted.
+    /// One IMMEDIATE transaction reads the workspace's rows created at or after
+    /// `since_ms` and inserts the attempt (and its input reservation). It returns
+    /// `OverLimit` and writes nothing when the summed exact `input_tokens`, plus
+    /// `reservation_tokens` for each `started`, `unknown` or
+    /// `manual_review_required` row and for this attempt, exceed
+    /// `daily_token_limit`. An unreadable exact total is an error, never zero.
+    pub fn start_direct_within_limit(
+        &self,
+        attempt: &CoreUsageAttempt,
+        input_hash: Option<&[u8; 32]>,
+        since_ms: i64,
+        daily_token_limit: u64,
+        reservation_tokens: u64,
+    ) -> Result<DirectStartOutcome> {
+        validate_attempt(attempt)?;
+        if attempt.tenant_id != DIRECT_POC_TENANT_ID
+            || attempt.route_id != format!("{DIRECT_POC_TENANT_ID}:0")
+        {
+            bail!("Core direct usage attempt route mismatch");
+        }
+        if reservation_tokens == 0
+            || daily_token_limit < reservation_tokens
+            || daily_token_limit > DIRECT_DAILY_TOKEN_LIMIT_MAX
+        {
+            bail!("invalid Core direct usage window");
+        }
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // `build_envelope` stores `input_tokens` as a decimal JSON string.
+        let (exact_tokens, unreadable_exact, unsettled_attempts): (i64, i64, i64) = tx.query_row(
+            "SELECT
+               COALESCE(SUM(CASE WHEN state = 'exact' THEN
+                 CAST(json_extract(event_envelope, '$.input_tokens') AS INTEGER) END), 0),
+               count(CASE WHEN state = 'exact'
+                 AND json_extract(event_envelope, '$.input_tokens') IS NULL THEN 1 END),
+               count(CASE WHEN state <> 'exact' THEN 1 END)
+             FROM dust_usage_attempts
+             WHERE tenant_id = ?1
+               AND state IN ('exact', 'started', 'unknown', 'manual_review_required')
+               AND created_at_ms >= ?3 AND workspace_id = ?2",
+            params![DIRECT_POC_TENANT_ID, attempt.workspace_id, since_ms],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if unreadable_exact != 0 {
+            bail!("Core direct usage total unavailable");
+        }
+        let exact_tokens = u64::try_from(exact_tokens)?;
+        let unsettled_attempts = u64::try_from(unsettled_attempts)?;
+        // Reserve for this attempt as well as every unsettled one.
+        let projected_tokens = unsettled_attempts
+            .checked_add(1)
+            .and_then(|attempts| attempts.checked_mul(reservation_tokens))
+            .and_then(|reserved| reserved.checked_add(exact_tokens))
+            .ok_or_else(|| anyhow!("Core direct usage total unavailable"))?;
+        if projected_tokens > daily_token_limit {
+            // Dropping the transaction leaves the journal unchanged.
+            return Ok(DirectStartOutcome::OverLimit);
+        }
+        Ok(match Self::insert_started(tx, attempt, input_hash)? {
+            StartOutcome::Created(permit) => DirectStartOutcome::Created(permit),
+            StartOutcome::Duplicate => DirectStartOutcome::Duplicate,
+        })
+    }
+
+    /// Insert a `started` attempt, and reserve its embedding input when given,
+    /// inside the caller's IMMEDIATE transaction. A reserved input rolls the
+    /// new attempt back and returns `Duplicate`.
+    fn insert_started(
+        tx: Transaction<'_>,
+        attempt: &CoreUsageAttempt,
+        input_hash: Option<&[u8; 32]>,
+    ) -> Result<StartOutcome> {
         let now = now_ms();
         let inserted = tx.execute(
             "INSERT INTO dust_usage_attempts
@@ -475,8 +569,11 @@ impl CoreUsageJournal {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((json, created_at_ms)) = retained else {
-            return Ok(None);
+        // A `match`, not `let ... else`: cc-check's Rust grammar loses every
+        // declaration after a let-else, including the contracts below.
+        let (json, created_at_ms) = match retained {
+            Some(retained) => retained,
+            None => return Ok(None),
         };
         if created_at_ms < now_ms() - EMBEDDING_RESULT_RETRY_WINDOW_MS {
             return Err(PaidEmbeddingRecoveryRequired.into());
@@ -584,8 +681,9 @@ impl CoreUsageJournal {
         Ok(envelope)
     }
 
-    /// Atomically leases due reconciliation and outbox work. The nonce protects
-    /// against a stale worker completing a newer claim by the same owner.
+    /// @cc [owner:jchen0824,label:security;backend] dust-core-direct-rows-never-claimed
+    /// Rows of `DIRECT_POC_TENANT_ID` are never leased, in any state, so no
+    /// delivery, deferral or manual-review path can act on them.
     pub fn claim_due(&self, lease_owner: &str, limit: usize) -> Result<Vec<ClaimedWork>> {
         validate_identity(lease_owner)?;
         if !(1..=100).contains(&limit) {
@@ -594,6 +692,8 @@ impl CoreUsageJournal {
         let conn = self.connection()?;
         let now = now_ms();
         let nonce = Uuid::new_v4().to_string();
+        // Atomically leases due reconciliation and outbox work. The nonce protects
+        // against a stale worker completing a newer claim by the same owner.
         let mut stmt = conn.prepare(
             "WITH due AS (
                SELECT attempt_id, next_retry_at_ms, created_at_ms,
@@ -603,6 +703,7 @@ impl CoreUsageJournal {
                  AND manual_review_required = 0
                  AND (lease_until_ms IS NULL OR lease_until_ms < ?1)
                  AND state IN ('started', 'unknown', 'exact')
+                 AND tenant_id <> ?6
              ), ranked AS (
                SELECT attempt_id, class, next_retry_at_ms,
                       row_number() OVER (
@@ -628,7 +729,14 @@ impl CoreUsageJournal {
         )?;
         let claims = stmt
             .query_map(
-                params![now, limit as i64, lease_owner, nonce, now + CLAIM_LEASE_MS],
+                params![
+                    now,
+                    limit as i64,
+                    lease_owner,
+                    nonce,
+                    now + CLAIM_LEASE_MS,
+                    DIRECT_POC_TENANT_ID
+                ],
                 |r| {
                     Ok(ClaimedWork {
                         attempt_id: r.get(0)?,
@@ -1389,5 +1497,294 @@ mod tests {
         let dir = tempdir().expect("test operation failed");
         assert!(CoreUsageJournal::open(dir.path()).is_err());
         assert!(CoreUsageJournal::open(":memory:").is_err());
+    }
+
+    const RESERVATION: u64 = 100;
+
+    fn direct_attempt(id: &str) -> CoreUsageAttempt {
+        CoreUsageAttempt {
+            attempt_id: id.into(),
+            provider_request_id: format!("provider_{id}"),
+            tenant_id: DIRECT_POC_TENANT_ID.into(),
+            workspace_id: "workspace_A".into(),
+            conversation_id: "embedding:workspace_A".into(),
+            route_id: format!("{DIRECT_POC_TENANT_ID}:0"),
+            model: "gemini-embedding-2-1536".into(),
+        }
+    }
+
+    fn start_direct(
+        journal: &CoreUsageJournal,
+        attempt: &CoreUsageAttempt,
+        input_hash: Option<&[u8; 32]>,
+        since_ms: i64,
+        daily_token_limit: u64,
+    ) -> DirectStartOutcome {
+        journal
+            .start_direct_within_limit(
+                attempt,
+                input_hash,
+                since_ms,
+                daily_token_limit,
+                RESERVATION,
+            )
+            .expect("direct start")
+    }
+
+    fn row_counts(journal: &CoreUsageJournal) -> (i64, i64) {
+        journal
+            .connection()
+            .expect("journal connection")
+            .query_row(
+                "SELECT (SELECT count(*) FROM dust_usage_attempts),
+                        (SELECT count(*) FROM dust_embedding_results)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row counts")
+    }
+
+    #[test]
+    fn bundled_sqlite_extracts_frozen_string_input_tokens() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let entry = direct_attempt("json-envelope");
+        start_direct(&journal, &entry, None, 0, 1_000);
+        journal
+            .settle_exact(&entry, "client:json", EmbeddingUsage { input_tokens: 23 })
+            .expect("exact settlement");
+        // libsqlite3-sys 0.28 bundles SQLite 3.45 with JSON1 enabled.
+        let (kind, tokens): (String, i64) = journal
+            .connection()
+            .expect("journal connection")
+            .query_row(
+                "SELECT typeof(json_extract(event_envelope, '$.input_tokens')),
+                        CAST(json_extract(event_envelope, '$.input_tokens') AS INTEGER)
+                 FROM dust_usage_attempts WHERE attempt_id = ?1",
+                [&entry.attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("json_extract over the frozen envelope");
+        assert_eq!((kind.as_str(), tokens), ("text", 23));
+    }
+
+    #[test]
+    fn direct_over_limit_start_writes_no_row() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        for index in 0..3 {
+            assert!(matches!(
+                start_direct(
+                    &journal,
+                    &direct_attempt(&format!("within-{index}")),
+                    None,
+                    0,
+                    3 * RESERVATION,
+                ),
+                DirectStartOutcome::Created(_)
+            ));
+        }
+        assert_eq!(row_counts(&journal), (3, 0));
+        assert_eq!(
+            start_direct(
+                &journal,
+                &direct_attempt("over"),
+                Some(&[9_u8; 32]),
+                0,
+                3 * RESERVATION,
+            ),
+            DirectStartOutcome::OverLimit
+        );
+        assert_eq!(row_counts(&journal), (3, 0));
+    }
+
+    #[test]
+    fn direct_unsettled_attempts_hold_their_reservation() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let limit = 2 * RESERVATION;
+        let unknown = direct_attempt("unknown-effect");
+        let review = direct_attempt("review");
+        let next = direct_attempt("next");
+        start_direct(&journal, &unknown, None, 0, limit);
+        start_direct(&journal, &review, None, 0, limit);
+        assert_eq!(
+            start_direct(&journal, &next, None, 0, limit),
+            DirectStartOutcome::OverLimit
+        );
+        journal
+            .mark_unknown(&unknown.attempt_id)
+            .expect("ambiguous effect");
+        journal
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_usage_attempts SET state = 'manual_review_required',
+                 manual_review_required = 1 WHERE attempt_id = ?1",
+                [&review.attempt_id],
+            )
+            .expect("manual review");
+        assert_eq!(
+            start_direct(&journal, &next, None, 0, limit),
+            DirectStartOutcome::OverLimit
+        );
+        journal
+            .settle_no_charge(&unknown.attempt_id, "provider/verified-no-charge")
+            .expect("proven no charge");
+        assert!(matches!(
+            start_direct(&journal, &next, None, 0, limit),
+            DirectStartOutcome::Created(_)
+        ));
+    }
+
+    #[test]
+    fn direct_limit_sums_exact_tokens_from_string_envelopes() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let limit = 1_000;
+        for (id, input_tokens) in [("exact-a", 650), ("exact-b", 200)] {
+            let entry = direct_attempt(id);
+            start_direct(&journal, &entry, None, 0, limit);
+            journal
+                .settle_exact(
+                    &entry,
+                    &format!("client:{id}"),
+                    EmbeddingUsage { input_tokens },
+                )
+                .expect("exact settlement");
+        }
+        // 850 exact + 100 reserved fits; 850 + 2 x 100 does not.
+        assert!(matches!(
+            start_direct(&journal, &direct_attempt("fits"), None, 0, limit),
+            DirectStartOutcome::Created(_)
+        ));
+        assert_eq!(
+            start_direct(&journal, &direct_attempt("exceeds"), None, 0, limit),
+            DirectStartOutcome::OverLimit
+        );
+    }
+
+    #[test]
+    fn direct_limit_ignores_rows_before_the_window_start() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let since_ms = now_ms() - 60_000;
+        let earlier = direct_attempt("earlier");
+        let boundary = direct_attempt("boundary");
+        start_direct(&journal, &earlier, None, since_ms, RESERVATION);
+        journal
+            .settle_exact(
+                &earlier,
+                "client:earlier",
+                EmbeddingUsage { input_tokens: 90 },
+            )
+            .expect("exact settlement");
+        let backdate = |attempt: &CoreUsageAttempt, created_at_ms: i64| {
+            journal
+                .connection()
+                .expect("journal connection")
+                .execute(
+                    "UPDATE dust_usage_attempts SET created_at_ms = ?2 WHERE attempt_id = ?1",
+                    params![attempt.attempt_id, created_at_ms],
+                )
+                .expect("backdate attempt");
+        };
+        backdate(&earlier, since_ms - 1);
+        assert!(matches!(
+            start_direct(&journal, &boundary, None, since_ms, RESERVATION),
+            DirectStartOutcome::Created(_)
+        ));
+        backdate(&boundary, since_ms);
+        assert_eq!(
+            start_direct(
+                &journal,
+                &direct_attempt("late"),
+                None,
+                since_ms,
+                RESERVATION
+            ),
+            DirectStartOutcome::OverLimit
+        );
+    }
+
+    #[test]
+    fn direct_start_keeps_duplicate_input_reservation() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let hash = [5_u8; 32];
+        assert!(matches!(
+            start_direct(&journal, &direct_attempt("first"), Some(&hash), 0, 1_000),
+            DirectStartOutcome::Created(_)
+        ));
+        assert_eq!(
+            start_direct(&journal, &direct_attempt("second"), Some(&hash), 0, 1_000),
+            DirectStartOutcome::Duplicate
+        );
+        assert_eq!(row_counts(&journal), (1, 1));
+    }
+
+    #[test]
+    fn direct_and_signed_starts_cannot_cross_tenants() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let direct = direct_attempt("direct");
+        assert!(journal.start(&direct).is_err());
+        assert!(journal.start_embedding(&direct, &[1_u8; 32]).is_err());
+        let signed = attempt("signed");
+        assert!(journal
+            .start_direct_within_limit(&signed, None, 0, 1_000, RESERVATION)
+            .is_err());
+        let mut other_route = direct_attempt("other-route");
+        other_route.route_id = format!("{DIRECT_POC_TENANT_ID}:1");
+        assert!(journal
+            .start_direct_within_limit(&other_route, None, 0, 1_000, RESERVATION)
+            .is_err());
+        for (limit, reservation) in [
+            (RESERVATION - 1, RESERVATION),
+            (DIRECT_DAILY_TOKEN_LIMIT_MAX + 1, RESERVATION),
+            (1_000, 0),
+        ] {
+            assert!(journal
+                .start_direct_within_limit(&direct, None, 0, limit, reservation)
+                .is_err());
+        }
+        assert_eq!(row_counts(&journal), (0, 0));
+    }
+
+    #[test]
+    fn claim_due_never_leases_direct_rows() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let direct_exact = direct_attempt("direct-exact");
+        let direct_unknown = direct_attempt("direct-unknown");
+        start_direct(&journal, &direct_exact, None, 0, 1_000);
+        journal
+            .settle_exact(
+                &direct_exact,
+                "client:direct-exact",
+                EmbeddingUsage { input_tokens: 3 },
+            )
+            .expect("exact settlement");
+        start_direct(&journal, &direct_unknown, None, 0, 1_000);
+        journal
+            .mark_unknown(&direct_unknown.attempt_id)
+            .expect("ambiguous effect");
+        let signed = attempt("signed-exact");
+        journal.start(&signed).expect("signed start");
+        journal
+            .settle_exact(
+                &signed,
+                "client:signed-exact",
+                EmbeddingUsage { input_tokens: 3 },
+            )
+            .expect("exact settlement");
+        let claims = journal.claim_due("direct-filter", 100).expect("claims");
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.attempt_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![signed.attempt_id.as_str()]
+        );
     }
 }
