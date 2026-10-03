@@ -15,6 +15,7 @@ import type {
 } from "@app/lib/api/tenant_route";
 import { DustTenantRouteResolver } from "@app/lib/api/tenant_route";
 import type { Authenticator } from "@app/lib/auth";
+import { MembershipResource } from "@app/lib/resources/membership_resource";
 
 const POC_GENERATION_MODEL = "gemini-3.7-flash";
 
@@ -217,10 +218,14 @@ export async function selectPocEmbeddingProvider(
 /** Use this boundary for every authenticated Core data-source creation path. */
 /**
  * @cc [owner:jchen0824,label:security;backend] dust-poc-embedding-member-identity
- * Only an authenticator with a workspace role (`auth.isUser()`), a WorkOS user
- * and a WorkOS organization supplies an identity. Internal admins (no user) and
- * non-members (role `none`) supply none, so they never select Vertex for a POC
- * workspace.
+ * Only an authenticator with a workspace role (`auth.isUser()`) supplies an
+ * identity, and only when its user has a WorkOS user ID, the workspace has a
+ * WorkOS organization, and the user holds an active membership in that
+ * workspace (`MembershipResource.getActiveRoleForUserInWorkspace` is not
+ * `none`). Internal admins (no user), non-members (role `none`) and non-member
+ * super-users, whose `admin` role comes from `Authenticator.fromDustSuperUser`
+ * (also after `toJSON`/`fromJSON`), supply none, so they never select Vertex
+ * for a POC workspace.
  */
 export async function selectPocEmbeddingProviderForAuth(
   auth: Authenticator,
@@ -230,9 +235,21 @@ export async function selectPocEmbeddingProviderForAuth(
   if (workspace.sId !== workspaceId) {
     throw new Error("Dust workspace mismatch");
   }
+  // Outside POC mode no workspace selects Vertex: skip the membership lookup.
+  if (!dustPocMode()) {
+    return null;
+  }
   const user = auth.user();
+  // A super-user's role is not a membership, and `fromJSON` drops the
+  // super-user flag, so the membership itself is the gate.
   const identity =
-    auth.isUser() && user?.workOSUserId && workspace.workOSOrganizationId
+    auth.isUser() &&
+    user?.workOSUserId &&
+    workspace.workOSOrganizationId &&
+    (await MembershipResource.getActiveRoleForUserInWorkspace({
+      user,
+      workspace,
+    })) !== "none"
       ? {
           workspaceId: workspace.sId,
           workosOrganizationId: workspace.workOSOrganizationId,

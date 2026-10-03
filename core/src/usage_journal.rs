@@ -20,6 +20,8 @@ const REVIEW_DEADLINE_MS: i64 = 24 * 60 * 60 * 1000;
 const EMBEDDING_RESULT_RETRY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// Upper bound of a direct workspace's configured daily token limit.
 pub const DIRECT_DAILY_TOKEN_LIMIT_MAX: u64 = 1_000_000_000;
+/// Upper bound of a frozen usage envelope's `input_tokens`.
+const ENVELOPE_INPUT_TOKENS_MAX: u32 = 2_147_483_647;
 
 /// Reserved for direct provider mode's local journal rows, so no signed tenant
 /// can share them or their exclusion from delivery. Front reserves the same ID.
@@ -284,7 +286,13 @@ impl CoreUsageJournal {
     /// `OverLimit` and writes nothing when the summed exact `input_tokens`, plus
     /// `reservation_tokens` for each `started`, `unknown` or
     /// `manual_review_required` row and for this attempt, exceed
-    /// `daily_token_limit`. An unreadable exact total is an error, never zero.
+    /// `daily_token_limit`. Each exact row's envelope `input_tokens` must be a
+    /// JSON string of canonical decimal digits (`0`, or digits without a
+    /// leading zero, sign, space or any other character) no greater than
+    /// `ENVELOPE_INPUT_TOKENS_MAX`. Any other value, including a JSON number,
+    /// a missing field or an unparsable envelope, makes the exact total
+    /// unreadable. An unreadable exact total is an error that writes nothing,
+    /// never zero or a partial sum.
     pub fn start_direct_within_limit(
         &self,
         attempt: &CoreUsageAttempt,
@@ -307,19 +315,38 @@ impl CoreUsageJournal {
         }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // `build_envelope` stores `input_tokens` as a decimal JSON string.
+        // `build_envelope` stores `input_tokens` as a canonical decimal JSON
+        // string. SQLite's CAST reads "12oops" as 12 and "oops" as 0, so only
+        // text that equals its own integer rendering, within the envelope
+        // bound, is counted; any other exact row is unreadable.
         let (exact_tokens, unreadable_exact, unsettled_attempts): (i64, i64, i64) = tx.query_row(
-            "SELECT
-               COALESCE(SUM(CASE WHEN state = 'exact' THEN
-                 CAST(json_extract(event_envelope, '$.input_tokens') AS INTEGER) END), 0),
-               count(CASE WHEN state = 'exact'
-                 AND json_extract(event_envelope, '$.input_tokens') IS NULL THEN 1 END),
+            "WITH window_rows AS (
+               SELECT state,
+                 json_type(event_envelope, '$.input_tokens') AS token_type,
+                 json_extract(event_envelope, '$.input_tokens') AS token_text
+               FROM dust_usage_attempts
+               WHERE tenant_id = ?1
+                 AND state IN ('exact', 'started', 'unknown', 'manual_review_required')
+                 AND created_at_ms >= ?3 AND workspace_id = ?2
+             ), checked_rows AS (
+               SELECT state,
+                 CASE WHEN state = 'exact' AND token_type = 'text'
+                   AND CAST(CAST(token_text AS INTEGER) AS TEXT) = token_text
+                   AND CAST(token_text AS INTEGER) BETWEEN 0 AND ?4
+                 THEN CAST(token_text AS INTEGER) END AS exact_tokens
+               FROM window_rows
+             )
+             SELECT
+               COALESCE(SUM(exact_tokens), 0),
+               count(CASE WHEN state = 'exact' AND exact_tokens IS NULL THEN 1 END),
                count(CASE WHEN state <> 'exact' THEN 1 END)
-             FROM dust_usage_attempts
-             WHERE tenant_id = ?1
-               AND state IN ('exact', 'started', 'unknown', 'manual_review_required')
-               AND created_at_ms >= ?3 AND workspace_id = ?2",
-            params![DIRECT_POC_TENANT_ID, attempt.workspace_id, since_ms],
+             FROM checked_rows",
+            params![
+                DIRECT_POC_TENANT_ID,
+                attempt.workspace_id,
+                since_ms,
+                ENVELOPE_INPUT_TOKENS_MAX
+            ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if unreadable_exact != 0 {
@@ -905,7 +932,7 @@ fn build_envelope(
     usage: EmbeddingUsage,
     created_at_ms: i64,
 ) -> Result<String> {
-    if usage.input_tokens > 2_147_483_647 {
+    if usage.input_tokens > ENVELOPE_INPUT_TOKENS_MAX {
         bail!("invalid provider usage metadata");
     }
     let time = Utc
@@ -1654,6 +1681,85 @@ mod tests {
                 .expect("exact settlement");
         }
         // 850 exact + 100 reserved fits; 850 + 2 x 100 does not.
+        assert!(matches!(
+            start_direct(&journal, &direct_attempt("fits"), None, 0, limit),
+            DirectStartOutcome::Created(_)
+        ));
+        assert_eq!(
+            start_direct(&journal, &direct_attempt("exceeds"), None, 0, limit),
+            DirectStartOutcome::OverLimit
+        );
+    }
+
+    #[test]
+    fn direct_limit_fails_closed_on_non_canonical_exact_tokens() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        let limit = 1_000;
+        let mut exact = Vec::new();
+        for (id, input_tokens) in [("valid", 650), ("rewritten", 1)] {
+            let entry = direct_attempt(id);
+            start_direct(&journal, &entry, None, 0, limit);
+            journal
+                .settle_exact(
+                    &entry,
+                    &format!("client:{id}"),
+                    EmbeddingUsage { input_tokens },
+                )
+                .expect("exact settlement");
+            exact.push(entry);
+        }
+        let rewrite_envelope = |envelope: &str| {
+            journal
+                .connection()
+                .expect("journal connection")
+                .execute(
+                    &format!(
+                        "UPDATE dust_usage_attempts SET event_envelope = {envelope}
+                         WHERE attempt_id = ?1"
+                    ),
+                    [&exact[1].attempt_id],
+                )
+                .expect("rewrite envelope");
+        };
+        // `build_envelope` writes a decimal string; anything else fails closed,
+        // including a JSON number.
+        for envelope in [
+            "json_set(event_envelope, '$.input_tokens', 'oops')",
+            "json_set(event_envelope, '$.input_tokens', '12oops')",
+            "json_set(event_envelope, '$.input_tokens', '')",
+            "json_set(event_envelope, '$.input_tokens', ' 12')",
+            "json_set(event_envelope, '$.input_tokens', '-1')",
+            "json_set(event_envelope, '$.input_tokens', '+12')",
+            "json_set(event_envelope, '$.input_tokens', '012')",
+            "json_set(event_envelope, '$.input_tokens', '2147483648')",
+            "json_set(event_envelope, '$.input_tokens', '99999999999999999999')",
+            "json_set(event_envelope, '$.input_tokens', 12)",
+            "json_remove(event_envelope, '$.input_tokens')",
+            "'{\"input_tokens\":'",
+        ] {
+            rewrite_envelope(envelope);
+            assert!(
+                journal
+                    .start_direct_within_limit(
+                        &direct_attempt("next"),
+                        Some(&[7_u8; 32]),
+                        0,
+                        limit,
+                        RESERVATION,
+                    )
+                    .is_err(),
+                "{envelope}"
+            );
+            assert_eq!(row_counts(&journal), (2, 0), "{envelope}");
+        }
+        rewrite_envelope("json_object('input_tokens', '2147483647')");
+        assert_eq!(
+            start_direct(&journal, &direct_attempt("bound"), None, 0, limit),
+            DirectStartOutcome::OverLimit
+        );
+        // 650 + 250 exact + 100 reserved fits; another 100 does not.
+        rewrite_envelope("json_object('input_tokens', '250')");
         assert!(matches!(
             start_direct(&journal, &direct_attempt("fits"), None, 0, limit),
             DirectStartOutcome::Created(_)

@@ -1,6 +1,7 @@
 export type DustErrorCode =
   | "core_api_error"
   | "ambiguous_provider_effect"
+  | "quota_exceeded"
   | "internal_error"
   | "invalid_id"
   | "limit_reached"

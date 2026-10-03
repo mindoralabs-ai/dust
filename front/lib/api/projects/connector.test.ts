@@ -1797,6 +1797,27 @@ describe("createDataSourceAndConnectorForProject", () => {
         "an internal admin",
         () => Authenticator.internalAdminForWorkspace(workspace.sId),
       ],
+      [
+        "a non-member super-user",
+        async () =>
+          Authenticator.fromDustSuperUser({
+            user: await UserFactory.superUser(),
+            wId: workspace.sId,
+          }),
+      ],
+      [
+        // `fromJSON` keeps the `admin` role but drops the super-user flag.
+        "a non-member super-user restored from JSON",
+        async () =>
+          Authenticator.fromJSON(
+            (
+              await Authenticator.fromDustSuperUser({
+                user: await UserFactory.superUser(),
+                wId: workspace.sId,
+              })
+            ).toJSON()
+          ),
+      ],
     ])("refuses the Pod for %s", async (_caller, makeAuth) => {
       configureDirectPoc(workspace.sId);
       const spies = await mockPodCreation();

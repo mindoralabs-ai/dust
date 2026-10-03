@@ -1,4 +1,7 @@
-import { softDeleteDataSourceAndLaunchScrubWorkflow } from "@app/lib/api/data_sources";
+import {
+  softDeleteDataSourceAndLaunchScrubWorkflow,
+  upsertDocument,
+} from "@app/lib/api/data_sources";
 import type { Authenticator } from "@app/lib/auth";
 import type { DataSourceResource } from "@app/lib/resources/data_source_resource";
 import { DataSourceViewResource } from "@app/lib/resources/data_source_view_resource";
@@ -7,7 +10,7 @@ import { DataSourceViewFactory } from "@app/tests/utils/DataSourceViewFactory";
 import { createResourceTest } from "@app/tests/utils/generic_resource_tests";
 import { UserFactory } from "@app/tests/utils/UserFactory";
 import { CoreAPI } from "@app/types/core/core_api";
-import { Ok } from "@app/types/shared/result";
+import { Err, Ok } from "@app/types/shared/result";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock distributed lock to avoid Redis dependency
@@ -204,5 +207,41 @@ describe("softDeleteDataSourceAndLaunchScrubWorkflow", () => {
         folderDataSource
       );
     });
+  });
+});
+
+describe("upsertDocument", () => {
+  it.each([
+    ["quota_exceeded", "quota_exceeded"],
+    ["internal_server_error", "core_api_error"],
+  ])("maps Core's %s upsert error to %s", async (coreCode, dustCode) => {
+    const { authenticator, workspace, globalSpace, user } =
+      await createResourceTest({ role: "admin" });
+    const { dataSource } = await DataSourceViewFactory.folder(
+      workspace,
+      globalSpace,
+      user
+    );
+    const upsertSpy = vi
+      .spyOn(CoreAPI.prototype, "upsertDataSourceDocument")
+      .mockResolvedValue(
+        new Err({ code: coreCode, message: "Core refused the upsert" })
+      );
+
+    try {
+      const result = await upsertDocument({
+        auth: authenticator,
+        dataSource,
+        document_id: "doc-1",
+        title: "Document",
+        mime_type: "text/plain",
+        text: "hello",
+      });
+
+      expect(result.isErr() && result.error.code).toBe(dustCode);
+      expect(upsertSpy).toHaveBeenCalledOnce();
+    } finally {
+      upsertSpy.mockRestore();
+    }
   });
 });
