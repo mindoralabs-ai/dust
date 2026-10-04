@@ -34,6 +34,10 @@ CREATE INDEX IF NOT EXISTS dust_usage_attempts_reconcile_idx
       AND state IN ('started', 'unknown', 'exact', 'manual_review_required');
 CREATE INDEX IF NOT EXISTS dust_usage_attempts_tenant_state_idx
     ON dust_usage_attempts (tenant_id, state, created_at_ms);
+-- Attempt rows are retained, so the direct start's route and daily-window
+-- reads, inside its IMMEDIATE transaction, must search rather than scan them.
+CREATE INDEX IF NOT EXISTS dust_usage_attempts_tenant_route_idx
+    ON dust_usage_attempts (tenant_id, route_id, workspace_id, state, created_at_ms);
 
 -- A settled embedding is retained with its exact usage event. A retried
 -- multi-input upsert can reuse successful inputs without paying twice.

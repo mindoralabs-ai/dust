@@ -2723,15 +2723,20 @@ mod tests {
         let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
         let workspace = verified_workspace(DIRECT_WORKSPACE);
         let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
-        let error = with_back_off(|| {
-            embedder.embed_direct(
-                &runtime,
-                vec!["chunk"],
-                EmbeddingTaskType::RetrievalDocument,
-                extras.clone(),
-                &workspace,
-            )
-        })
+        let waits = Mutex::new(Vec::new());
+        let error = crate::providers::provider::with_retryable_back_off(
+            || {
+                embedder.embed_direct(
+                    &runtime,
+                    vec!["chunk"],
+                    EmbeddingTaskType::RetrievalDocument,
+                    extras.clone(),
+                    &workspace,
+                )
+            },
+            |_, wait, _| waits.lock().expect("test operation failed").push(*wait),
+            |_| {},
+        )
         .await
         .expect_err("throttling persists");
         assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_none());
@@ -2739,8 +2744,13 @@ mod tests {
         assert!(message.starts_with("Too many retries (2): "));
         assert!(message.contains("request_id=req-429"));
         assert!(!message.contains("provider-detail"));
-        // One request, then `VERTEX_RETRY_OPTIONS.retries` (2) retries.
+        // One request, then `VERTEX_RETRY_OPTIONS.retries` (2) retries, after
+        // 1 s and then 2 s; the last throttled request is not followed by a wait.
         assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            waits.into_inner().expect("test operation failed"),
+            vec![Duration::from_secs(1), Duration::from_secs(2)]
+        );
         assert_eq!(attempt_states(&journal_path), vec![throttled_state(); 3]);
         assert_eq!(input_reservations(&journal_path), 0);
         // No reservation is held: a start that needs the whole limit fits.

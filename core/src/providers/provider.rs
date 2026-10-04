@@ -111,6 +111,13 @@ impl fmt::Display for ModelError {
 
 impl std::error::Error for ModelError {}
 
+/// @cc [owner:jchen0824,label:error-handling;performance] back-off-waits-only-before-a-retry
+/// When `f`'s `n`th call fails with a `ModelError` whose `retryable` is
+/// `Some(retry)`, `f` is called again only if `n <= retry.retries`, after a
+/// wait of `retry.sleep` the first time and of `retry.factor` times the
+/// previous wait after that; `log_retry` receives that wait and `n` first.
+/// Otherwise it returns `Too many retries (<retry.retries>): <error>` at once,
+/// with no wait and no `log_retry` call.
 pub async fn with_retryable_back_off<F, O>(
     mut f: impl FnMut() -> F,
     log_retry: impl Fn(&str, &Duration, usize) -> (),
@@ -129,12 +136,6 @@ where
                     match err.retryable.clone() {
                         Some(retry) => {
                             attempts += 1;
-                            sleep = match sleep {
-                                None => Some(retry.sleep),
-                                Some(b) => Some(b * retry.factor),
-                            };
-                            log_retry(&err.message, sleep.as_ref().unwrap(), attempts);
-                            tokio::time::sleep(sleep.unwrap()).await;
                             if attempts > retry.retries {
                                 break Err(anyhow!(
                                     "Too many retries ({}): {}",
@@ -142,6 +143,13 @@ where
                                     err
                                 ));
                             }
+                            let wait = match sleep {
+                                None => retry.sleep,
+                                Some(b) => b * retry.factor,
+                            };
+                            sleep = Some(wait);
+                            log_retry(&err.message, &wait, attempts);
+                            tokio::time::sleep(wait).await;
                         }
                         None => {
                             break Err(anyhow!("{}", err));
@@ -179,5 +187,103 @@ pub fn provider(t: ProviderID) -> Box<dyn Provider + Sync + Send> {
         ProviderID::Fireworks => Box::new(FireworksProvider::new()),
         ProviderID::Xai => Box::new(XaiProvider::new()),
         ProviderID::Noop => Box::new(NoopProvider::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    // A third wait, after the last call, would last 20 s: far beyond
+    // `BACK_OFF_TIMEOUT`.
+    const RETRY: ModelErrorRetryOptions = ModelErrorRetryOptions {
+        sleep: Duration::from_millis(2),
+        factor: 100,
+        retries: 2,
+    };
+    const BACK_OFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct BackOffRun {
+        result: Result<usize>,
+        calls: Vec<Instant>,
+        retries: Vec<(Duration, usize)>,
+    }
+
+    /// Runs the back-off over calls that fail with a `RETRY` model error,
+    /// except the call numbered `succeeding_call` (from 1), which returns its
+    /// number.
+    async fn back_off_run(succeeding_call: Option<usize>) -> BackOffRun {
+        let calls = Mutex::new(Vec::new());
+        let retries = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            BACK_OFF_TIMEOUT,
+            with_retryable_back_off(
+                || {
+                    let call = {
+                        let mut calls = calls.lock().expect("call log");
+                        calls.push(Instant::now());
+                        calls.len()
+                    };
+                    async move {
+                        if Some(call) == succeeding_call {
+                            Ok(call)
+                        } else {
+                            Err(anyhow!(ModelError {
+                                message: "throttled".into(),
+                                retryable: Some(RETRY),
+                                request_id: None,
+                            }))
+                        }
+                    }
+                },
+                |_, wait, attempts| retries.lock().expect("retry log").push((*wait, attempts)),
+                |_| {},
+            ),
+        )
+        .await
+        .expect("the back-off returns without waiting after its last call");
+        BackOffRun {
+            result,
+            calls: calls.into_inner().expect("call log"),
+            retries: retries.into_inner().expect("retry log"),
+        }
+    }
+
+    /// `retries` waits of the configured delays, each before the next call.
+    fn assert_configured_waits(run: &BackOffRun) {
+        assert_eq!(
+            run.retries,
+            vec![
+                (Duration::from_millis(2), 1),
+                (Duration::from_millis(200), 2)
+            ]
+        );
+        assert_eq!(run.calls.len(), RETRY.retries + 1);
+        for (pair, (wait, _)) in run.calls.windows(2).zip(&run.retries) {
+            assert!(pair[1].duration_since(pair[0]) >= *wait);
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_retryable_failure_stops_without_a_final_wait() {
+        let run = back_off_run(None).await;
+        assert_configured_waits(&run);
+        let error = run.result.expect_err("the retries are exhausted");
+        assert_eq!(
+            error.to_string(),
+            "Too many retries (2): [model_error(retryable=true)] throttled"
+        );
+    }
+
+    #[tokio::test]
+    async fn success_on_the_last_retry_is_returned() {
+        let run = back_off_run(Some(RETRY.retries + 1)).await;
+        assert_configured_waits(&run);
+        assert_eq!(
+            run.result.expect("the last retry succeeds"),
+            RETRY.retries + 1
+        );
     }
 }

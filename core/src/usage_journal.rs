@@ -40,6 +40,39 @@ pub const DIRECT_POC_ROUTE_ID: &str = "poc-direct:direct";
 /// `DUST_CORE_REGISTRY_MIN_REVISION` is 0, writes the same route.
 const LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID: &str = "poc-direct:0";
 
+/// Whether any row has tenant `?1` and route `?2`.
+const DIRECT_ROUTE_ROWS_EXIST_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM dust_usage_attempts WHERE tenant_id = ?1 AND route_id = ?2)";
+
+/// Exact token total, unreadable exact rows and unsettled rows of tenant `?1`,
+/// workspace `?2` and route `?5` created at or after `?3`. `build_envelope`
+/// stores `input_tokens` as a canonical decimal JSON string. SQLite's CAST
+/// reads "12oops" as 12 and "oops" as 0, so only text that equals its own
+/// integer rendering, within the envelope bound `?4`, is counted; any other
+/// exact row is unreadable.
+const DIRECT_WINDOW_TOTALS_SQL: &str = "
+    WITH window_rows AS (
+      SELECT state,
+        json_type(event_envelope, '$.input_tokens') AS token_type,
+        json_extract(event_envelope, '$.input_tokens') AS token_text
+      FROM dust_usage_attempts
+      WHERE tenant_id = ?1 AND route_id = ?5
+        AND state IN ('exact', 'started', 'unknown', 'manual_review_required')
+        AND created_at_ms >= ?3 AND workspace_id = ?2
+    ), checked_rows AS (
+      SELECT state,
+        CASE WHEN state = 'exact' AND token_type = 'text'
+          AND CAST(CAST(token_text AS INTEGER) AS TEXT) = token_text
+          AND CAST(token_text AS INTEGER) BETWEEN 0 AND ?4
+        THEN CAST(token_text AS INTEGER) END AS exact_tokens
+      FROM window_rows
+    )
+    SELECT
+      COALESCE(SUM(exact_tokens), 0),
+      count(CASE WHEN state = 'exact' AND exact_tokens IS NULL THEN 1 END),
+      count(CASE WHEN state <> 'exact' THEN 1 END)
+    FROM checked_rows";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreUsageAttempt {
     pub attempt_id: String,
@@ -320,6 +353,12 @@ impl CoreUsageJournal {
     /// an error and writes nothing. That includes the rows of a signed
     /// `DIRECT_POC_TENANT_ID` tenant at registry revision 0, which Core accepts
     /// when `DUST_CORE_REGISTRY_MIN_REVISION` is 0.
+
+    /// @cc [owner:jchen0824,label:performance;backend] dust-core-direct-start-reads-are-indexed
+    /// The pre-release route check MUST search `dust_usage_attempts_tenant_route_idx`
+    /// by `tenant_id` and `route_id`, and the daily-window read by `tenant_id`,
+    /// `route_id`, `workspace_id`, `state` and `created_at_ms`. Neither may scan
+    /// `dust_usage_attempts`, whose rows are never deleted.
     pub fn start_direct_within_limit(
         &self,
         attempt: &CoreUsageAttempt,
@@ -341,8 +380,7 @@ impl CoreUsageJournal {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let legacy_rows: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM dust_usage_attempts
-                            WHERE tenant_id = ?1 AND route_id = ?2)",
+            DIRECT_ROUTE_ROWS_EXIST_SQL,
             params![DIRECT_POC_TENANT_ID, LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID],
             |row| row.get(0),
         )?;
@@ -350,32 +388,8 @@ impl CoreUsageJournal {
             // Dropping the transaction leaves the journal unchanged.
             bail!("Core direct usage journal holds pre-release direct rows");
         }
-        // `build_envelope` stores `input_tokens` as a canonical decimal JSON
-        // string. SQLite's CAST reads "12oops" as 12 and "oops" as 0, so only
-        // text that equals its own integer rendering, within the envelope
-        // bound, is counted; any other exact row is unreadable.
         let (exact_tokens, unreadable_exact, unsettled_attempts): (i64, i64, i64) = tx.query_row(
-            "WITH window_rows AS (
-               SELECT state,
-                 json_type(event_envelope, '$.input_tokens') AS token_type,
-                 json_extract(event_envelope, '$.input_tokens') AS token_text
-               FROM dust_usage_attempts
-               WHERE tenant_id = ?1 AND route_id = ?5
-                 AND state IN ('exact', 'started', 'unknown', 'manual_review_required')
-                 AND created_at_ms >= ?3 AND workspace_id = ?2
-             ), checked_rows AS (
-               SELECT state,
-                 CASE WHEN state = 'exact' AND token_type = 'text'
-                   AND CAST(CAST(token_text AS INTEGER) AS TEXT) = token_text
-                   AND CAST(token_text AS INTEGER) BETWEEN 0 AND ?4
-                 THEN CAST(token_text AS INTEGER) END AS exact_tokens
-               FROM window_rows
-             )
-             SELECT
-               COALESCE(SUM(exact_tokens), 0),
-               count(CASE WHEN state = 'exact' AND exact_tokens IS NULL THEN 1 END),
-               count(CASE WHEN state <> 'exact' THEN 1 END)
-             FROM checked_rows",
+            DIRECT_WINDOW_TOTALS_SQL,
             params![
                 DIRECT_POC_TENANT_ID,
                 attempt.workspace_id,
@@ -1941,6 +1955,96 @@ mod tests {
             journal.start(&attempt("signed")).expect("signed start"),
             StartOutcome::Created(_)
         ));
+    }
+
+    const ROUTE_INDEX: &str = "dust_usage_attempts_tenant_route_idx";
+
+    fn has_route_index(journal: &CoreUsageJournal) -> bool {
+        journal
+            .connection()
+            .expect("journal connection")
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                                WHERE type = 'index' AND name = ?1
+                                  AND tbl_name = 'dust_usage_attempts')",
+                [ROUTE_INDEX],
+                |row| row.get(0),
+            )
+            .expect("schema lookup")
+    }
+
+    /// The `EXPLAIN QUERY PLAN` details that read `dust_usage_attempts`.
+    fn attempt_reads(
+        journal: &CoreUsageJournal,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Vec<String> {
+        let conn = journal.connection().expect("journal connection");
+        let mut plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("query plan");
+        let details = plan
+            .query_map(params, |row| row.get::<_, String>(3))
+            .expect("query plan rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("query plan rows");
+        details
+            .into_iter()
+            .filter(|detail| detail.contains("dust_usage_attempts"))
+            .collect()
+    }
+
+    #[test]
+    fn direct_start_reads_search_the_route_index() {
+        let dir = tempdir().expect("test directory");
+        let path = dir.path().join("usage.sqlite");
+        let journal = CoreUsageJournal::open(&path).expect("journal");
+        assert!(has_route_index(&journal));
+        // A journal written without the index gains it on its next open.
+        start_direct(&journal, &direct_attempt("existing"), None, 0, 1_000);
+        journal
+            .connection()
+            .expect("journal connection")
+            .execute_batch(&format!("DROP INDEX {ROUTE_INDEX}"))
+            .expect("drop route index");
+        assert!(!has_route_index(&journal));
+        let journal = CoreUsageJournal::open(&path).expect("reopen journal");
+        assert!(has_route_index(&journal));
+        assert_eq!(row_counts(&journal), (1, 0));
+
+        let route_check = attempt_reads(
+            &journal,
+            DIRECT_ROUTE_ROWS_EXIST_SQL,
+            params![DIRECT_POC_TENANT_ID, LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID],
+        );
+        let window_read = attempt_reads(
+            &journal,
+            DIRECT_WINDOW_TOTALS_SQL,
+            params![
+                DIRECT_POC_TENANT_ID,
+                "workspace_A",
+                0,
+                ENVELOPE_INPUT_TOKENS_MAX,
+                DIRECT_POC_ROUTE_ID
+            ],
+        );
+        for (reads, keys) in [
+            (route_check, "tenant_id=? AND route_id=?"),
+            (
+                window_read,
+                "tenant_id=? AND route_id=? AND workspace_id=? AND state=? AND created_at_ms>?",
+            ),
+        ] {
+            assert_eq!(reads.len(), 1, "{reads:?}");
+            assert!(
+                reads[0].starts_with("SEARCH dust_usage_attempts USING "),
+                "{reads:?}"
+            );
+            assert!(
+                reads[0].ends_with(&format!("INDEX {ROUTE_INDEX} ({keys})")),
+                "{reads:?}"
+            );
+        }
     }
 
     #[test]
