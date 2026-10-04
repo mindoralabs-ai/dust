@@ -104,9 +104,12 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  */
 /**
  * @cc [owner:jchen0824,label:product;backend] vertex-data-source-creation-skips-embedding-key
- * A caller that selects `vertex_ai` as a new Core data source's embedder MUST
- * pass `skipEmbeddingApiKeyRequirement: true` for that creation, so that
- * creating a Vertex data source never requires an OpenAI embedding key.
+ * A caller that creates a Core data source whose embedder is `vertex_ai`,
+ * whether it selects that embedder for a new data source or copies it from an
+ * existing Core data source (as region relocation does), MUST pass
+ * `skipEmbeddingApiKeyRequirement: true` for that creation, so that creating a
+ * Vertex data source never requires an OpenAI embedding key. A creation with
+ * any other embedder MUST NOT skip the requirement.
  */
 export async function getLlmCredentials(
   auth: Authenticator,

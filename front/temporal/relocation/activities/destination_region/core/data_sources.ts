@@ -39,7 +39,11 @@ export async function createDataSourceProject({
     throw new Error("Failed to create internal project for the data source.");
   }
 
-  const credentials = await getLlmCredentials(auth);
+  const credentials = await getLlmCredentials(auth, {
+    skipEmbeddingApiKeyRequirement:
+      sourceRegionCoreDataSource.config.embedder_config.embedder.provider_id ===
+      "vertex_ai",
+  });
 
   const dustDataSource = await coreAPI.createDataSource({
     projectId: dustProject.value.project.project_id.toString(),

@@ -407,7 +407,9 @@ fn utc_day_start_ms(now_ms: i64) -> i64 {
 /// This loop may deliver durable accounting while provider I/O is disabled.
 /// A failed delivery never retries an embedding request. In direct provider
 /// mode without `DUST_CORE_REGISTRY_SIGNER_URL` it returns without starting the
-/// delivery or heartbeat loops.
+/// delivery or heartbeat loops. When `DUST_POC_DIRECT_PROVIDER_MODE` is set to
+/// a value other than `0` or `1`, it logs one error without that value and
+/// returns without starting either loop, with or without a signer.
 pub async fn run_core_usage_reconciler() {
     run_core_usage_reconciler_with(|name| std::env::var(name)).await
 }
@@ -416,13 +418,15 @@ async fn run_core_usage_reconciler_with(env: impl Fn(&str) -> Result<String, std
     if env("DUST_POC_MODE").as_deref() != Ok("1") {
         return;
     }
+    let Ok(direct) = direct_provider_mode(env(DIRECT_PROVIDER_MODE_ENV)) else {
+        tracing::error!(
+            "Dust Core usage reconciliation is off: direct provider mode configuration unavailable"
+        );
+        return;
+    };
     // Direct rows are never delivered; without a signer there is no signed
     // route to reconcile or heartbeat against.
-    if matches!(
-        direct_provider_mode(env(DIRECT_PROVIDER_MODE_ENV)),
-        Ok(true)
-    ) && !env("DUST_CORE_REGISTRY_SIGNER_URL").is_ok_and(|url| !url.is_empty())
-    {
+    if direct && !env("DUST_CORE_REGISTRY_SIGNER_URL").is_ok_and(|url| !url.is_empty()) {
         tracing::info!("Dust Core usage reconciliation is off in direct provider mode");
         return;
     }
@@ -2475,6 +2479,44 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_direct_mode_does_not_start_the_reconciler() {
+        use std::env::VarError;
+        let env = |mode: Result<&'static str, VarError>, signer_url: Option<&'static str>| {
+            move |name: &str| match (name, signer_url) {
+                ("DUST_POC_MODE", _) => Ok("1".to_string()),
+                (DIRECT_PROVIDER_MODE_ENV, _) => mode.clone().map(str::to_string),
+                ("DUST_CORE_REGISTRY_SIGNER_URL", Some(url)) => Ok(url.to_string()),
+                _ => Err(VarError::NotPresent),
+            }
+        };
+        let signer_urls = [
+            None,
+            Some("https://registry.internal/internal/dust/registry/bundle"),
+        ];
+        for mode in [Ok("true"), Ok(""), Err(VarError::NotUnicode("1".into()))] {
+            for signer_url in signer_urls {
+                assert!(tokio::time::timeout(
+                    Duration::from_secs(1),
+                    run_core_usage_reconciler_with(env(mode.clone(), signer_url)),
+                )
+                .await
+                .is_ok());
+            }
+        }
+        // Unset or `0` is signed mode, whose loops run with or without a signer.
+        for mode in [Err(VarError::NotPresent), Ok("0")] {
+            for signer_url in signer_urls {
+                assert!(tokio::time::timeout(
+                    Duration::from_millis(50),
+                    run_core_usage_reconciler_with(env(mode.clone(), signer_url)),
+                )
+                .await
+                .is_err());
+            }
+        }
     }
 
     #[test]

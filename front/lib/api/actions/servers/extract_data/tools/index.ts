@@ -23,7 +23,9 @@ import {
 } from "@app/lib/api/actions/servers/extract_data/metadata";
 import { executeFindTags } from "@app/lib/api/actions/tools/find_tags";
 import { processDataSources } from "@app/lib/api/assistant/process_data_sources";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import type { Authenticator } from "@app/lib/auth";
+import { DustError } from "@app/lib/error";
 import {
   isJSONSchemaObject,
   validateJsonSchema,
@@ -186,6 +188,14 @@ export function createExtractDataTools(
     });
 
     if (res.isErr()) {
+      if (
+        res.error instanceof DustError &&
+        res.error.code === "quota_exceeded"
+      ) {
+        return new Err(
+          new MCPError(EMBEDDING_QUOTA_EXCEEDED_MESSAGE, { tracked: false })
+        );
+      }
       return new Err(
         new MCPError(`Error running extract data action: ${res.error.message}`)
       );

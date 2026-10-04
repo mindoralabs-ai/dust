@@ -8,8 +8,10 @@ import {
 import { EXTRACT_DATA_MAIN_TOOL_NAME } from "@app/lib/api/actions/servers/extract_data/metadata";
 import { createExtractDataTools } from "@app/lib/api/actions/servers/extract_data/tools";
 import { processDataSources } from "@app/lib/api/assistant/process_data_sources";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import type { Authenticator } from "@app/lib/auth";
-import { Ok } from "@app/types/shared/result";
+import { DustError } from "@app/lib/error";
+import { Err, Ok } from "@app/types/shared/result";
 import { INTERNAL_MIME_TYPES } from "@dust-tt/client";
 import type { JSONSchema7 as JSONSchema } from "json-schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -202,5 +204,44 @@ describe("createExtractDataTools", () => {
         timeFrame: CONFIGURED_TIME_FRAME,
       })
     );
+  });
+
+  it.each([
+    [
+      "the embedding quota is exhausted",
+      new DustError("quota_exceeded", EMBEDDING_QUOTA_EXCEEDED_MESSAGE),
+      EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+      false,
+    ],
+    [
+      "another error occurs",
+      new Error("Failed to retrieve documents: Core refused the search"),
+      "Error running extract data action: Failed to retrieve documents: Core refused the search",
+      true,
+    ],
+  ])("returns a tool error when %s", async (_case, error, message, tracked) => {
+    vi.mocked(processDataSources).mockResolvedValue(new Err(error));
+    const auth = {} as Authenticator;
+    const toolContext = makeRunContext();
+    const tools = createExtractDataTools(auth, toolContext);
+    const tool = tools.find((t) => t.name === EXTRACT_DATA_MAIN_TOOL_NAME);
+    if (!tool) {
+      throw new Error("Expected extract_data tool to be created.");
+    }
+
+    const result = await tool.handler(
+      {
+        dataSources: [],
+        objective: "Extract people names.",
+        jsonSchema: CONFIGURED_JSON_SCHEMA,
+      },
+      {
+        auth,
+        toolContext,
+      } as unknown as Parameters<typeof tool.handler>[1]
+    );
+
+    expect(result.isErr() && result.error).toMatchObject({ message, tracked });
+    expect(generateProcessToolOutput).not.toHaveBeenCalled();
   });
 });
