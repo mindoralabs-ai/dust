@@ -2,6 +2,7 @@ import { searchProjectConversations } from "@app/lib/api/projects/search";
 import { ConversationResource } from "@app/lib/resources/conversation_resource";
 import logger from "@app/logger/logger";
 import type { SearchConversationsResponseBody } from "@app/types/api/projects/search";
+import { assertNever } from "@app/types/shared/utils/assert_never";
 import { workspaceApp } from "@front-api/middlewares/ctx";
 import type { HandlerResult } from "@front-api/middlewares/utils";
 import { apiError } from "@front-api/middlewares/utils";
@@ -51,13 +52,27 @@ app.get(
         },
         "Failed to search conversations in datasource"
       );
-      return apiError(ctx, {
-        status_code: 500,
-        api_error: {
-          type: "internal_server_error",
-          message: "Failed to search conversations.",
-        },
-      });
+      switch (searchRes.error.code) {
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: searchRes.error.message,
+            },
+          });
+        case "core_api_error":
+        case "invalid_request_error":
+          return apiError(ctx, {
+            status_code: 500,
+            api_error: {
+              type: "internal_server_error",
+              message: "Failed to search conversations.",
+            },
+          });
+        default:
+          assertNever(searchRes.error.code);
+      }
     }
 
     const filteredResults = searchRes.value.filter(

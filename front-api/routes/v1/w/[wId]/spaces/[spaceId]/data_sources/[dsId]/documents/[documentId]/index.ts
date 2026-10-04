@@ -5,6 +5,10 @@ import {
   resolveLegacyDataSourceSpaceId,
 } from "@app/lib/api/data_sources";
 import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
+import {
   getLlmCredentials,
   MISSING_EMBEDDING_API_KEY_ERROR_MESSAGE,
 } from "@app/lib/api/provider_credentials";
@@ -718,13 +722,12 @@ app.post(
             },
           });
         }
-        if (upsertRes.error.code === "quota_exceeded") {
+        if (isCoreQuotaExceededError(upsertRes.error)) {
           return apiError(ctx, {
             status_code: 429,
             api_error: {
               type: "rate_limit_error",
-              message:
-                "The workspace's embedding token quota is exhausted. Try again later.",
+              message: EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
               data_source_error: upsertRes.error,
             },
           });

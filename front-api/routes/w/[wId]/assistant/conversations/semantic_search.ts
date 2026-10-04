@@ -6,6 +6,7 @@ import {
   SearchQuerySchema,
   type SemanticSearchConversationsResponseBody,
 } from "@app/types/api/assistant/conversation/semantic_search";
+import { assertNever } from "@app/types/shared/utils/assert_never";
 import { workspaceApp } from "@front-api/middlewares/ctx";
 import type { HandlerResult } from "@front-api/middlewares/utils";
 import { apiError } from "@front-api/middlewares/utils";
@@ -37,13 +38,27 @@ app.get(
     });
 
     if (searchRes.isErr()) {
-      return apiError(ctx, {
-        status_code: 500,
-        api_error: {
-          type: "internal_server_error",
-          message: "Failed to search conversations.",
-        },
-      });
+      switch (searchRes.error.code) {
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: searchRes.error.message,
+            },
+          });
+        case "core_api_error":
+        case "invalid_request_error":
+          return apiError(ctx, {
+            status_code: 500,
+            api_error: {
+              type: "internal_server_error",
+              message: "Failed to search conversations.",
+            },
+          });
+        default:
+          assertNever(searchRes.error.code);
+      }
     }
 
     const filteredResults = searchRes.value.filter(

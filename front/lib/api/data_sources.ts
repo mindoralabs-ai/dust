@@ -6,6 +6,10 @@ import { createCoreWorkspaceAssertion } from "@app/lib/api/core_workspace_assert
 import { selectPocEmbeddingProviderForAuth } from "@app/lib/api/dust_poc_runtime";
 import { sendGitHubDeletionEmail } from "@app/lib/api/email";
 import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
+import {
   getLlmCredentials,
   MISSING_EMBEDDING_API_KEY_ERROR_MESSAGE,
 } from "@app/lib/api/provider_credentials";
@@ -679,12 +683,9 @@ export async function upsertDocument({
         )
       );
     }
-    if (upsertRes.error.code === "quota_exceeded") {
+    if (isCoreQuotaExceededError(upsertRes.error)) {
       return new Err(
-        new DustError(
-          "quota_exceeded",
-          "The workspace's embedding token quota is exhausted. Try again later."
-        )
+        new DustError("quota_exceeded", EMBEDDING_QUOTA_EXCEEDED_MESSAGE)
       );
     }
     return new Err(
@@ -711,7 +712,7 @@ export async function handleDataSourceSearch({
 }): Promise<
   Result<
     DataSourceSearchResponseType,
-    Omit<DustError, "code"> & { code: "data_source_error" }
+    Omit<DustError, "code"> & { code: "data_source_error" | "quota_exceeded" }
   >
 > {
   let credentials: LLMCredentialsType;
@@ -776,7 +777,9 @@ export async function handleDataSourceSearch({
   if (data.isErr()) {
     return new Err({
       name: "dust_error",
-      code: "data_source_error",
+      code: isCoreQuotaExceededError(data.error)
+        ? "quota_exceeded"
+        : "data_source_error",
       message: data.error.message,
     });
   }

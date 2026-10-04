@@ -1,4 +1,5 @@
 import { handleDataSourceSearch } from "@app/lib/api/data_sources";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import type { DataSourceSearchResponseType } from "@dust-tt/client";
 import { DataSourceSearchQuerySchema } from "@dust-tt/client";
@@ -141,6 +142,8 @@ import { fromError } from "zod-validation-error";
  *                         description: Score of the document
  *       400:
  *         description: Invalid request error
+ *       429:
+ *         description: Rate limit exceeded.
  */
 // Mounted at /api/v1/w/:wId/spaces/:spaceId/data_source_views/:dsvId/search.
 const app = publicApiApp();
@@ -197,6 +200,18 @@ app.get(
             api_error: {
               type: "data_source_error",
               message: s.error.message,
+            },
+          });
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+              data_source_error: {
+                code: s.error.code,
+                message: s.error.message,
+              },
             },
           });
         default:

@@ -1,5 +1,6 @@
 import { USED_MODEL_CONFIGS } from "@app/components/providers/model_configs";
 import { getConversation } from "@app/lib/api/assistant/conversation/fetch";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import { Authenticator } from "@app/lib/auth";
 import { AgentMessageFeedbackResource } from "@app/lib/resources/agent_message_feedback_resource";
 import { AgentSuggestionResource } from "@app/lib/resources/agent_suggestion_resource";
@@ -23,6 +24,8 @@ import type {
   AgentMessageType,
   ConversationType,
 } from "@app/types/assistant/conversation";
+import { CoreAPI } from "@app/types/core/core_api";
+import { Err } from "@app/types/shared/result";
 import type { LightWorkspaceType } from "@app/types/user";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -189,6 +192,41 @@ describe("agent_sidekick_context tools", () => {
           );
           expect(restrictedFound).toBeUndefined();
         }
+      }
+    });
+
+    it.each([
+      ["quota_exceeded", EMBEDDING_QUOTA_EXCEEDED_MESSAGE, false],
+      [
+        "internal_server_error",
+        "Failed to search knowledge: Core refused the search",
+        true,
+      ],
+    ])("returns a tool error when Core answers %s to a query", async (coreCode, message, tracked) => {
+      const { authenticator, globalSpace, workspace } =
+        await createResourceTest({ role: "admin" });
+
+      await DataSourceViewFactory.folder(workspace, globalSpace);
+      const searchSpy = vi
+        .spyOn(CoreAPI.prototype, "bulkSearchDataSources")
+        .mockResolvedValue(
+          new Err({ code: coreCode, message: "Core refused the search" })
+        );
+
+      try {
+        const tool = getToolByName("search_knowledge");
+        const result = await tool.handler(
+          { query: "pricing", topK: 5 },
+          createTestExtra(authenticator)
+        );
+
+        expect(result.isErr() && result.error).toMatchObject({
+          message,
+          tracked,
+        });
+        expect(searchSpy).toHaveBeenCalledOnce();
+      } finally {
+        searchSpy.mockRestore();
       }
     });
   });

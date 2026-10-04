@@ -1,4 +1,5 @@
 import {
+  handleDataSourceSearch,
   softDeleteDataSourceAndLaunchScrubWorkflow,
   upsertDocument,
 } from "@app/lib/api/data_sources";
@@ -242,6 +243,42 @@ describe("upsertDocument", () => {
       expect(upsertSpy).toHaveBeenCalledOnce();
     } finally {
       upsertSpy.mockRestore();
+    }
+  });
+});
+
+describe("handleDataSourceSearch", () => {
+  it.each([
+    ["quota_exceeded", "quota_exceeded"],
+    ["internal_server_error", "data_source_error"],
+  ])("maps Core's %s search error to %s", async (coreCode, dustCode) => {
+    const { authenticator, workspace, globalSpace, user } =
+      await createResourceTest({ role: "admin" });
+    const { dataSource } = await DataSourceViewFactory.folder(
+      workspace,
+      globalSpace,
+      user
+    );
+    const searchSpy = vi
+      .spyOn(CoreAPI.prototype, "searchDataSource")
+      .mockResolvedValue(
+        new Err({ code: coreCode, message: "Core refused the search" })
+      );
+
+    try {
+      const result = await handleDataSourceSearch({
+        auth: authenticator,
+        dataSource,
+        searchQuery: { query: "hello", top_k: 5, full_text: false },
+      });
+
+      expect(result.isErr() && result.error).toMatchObject({
+        code: dustCode,
+        message: "Core refused the search",
+      });
+      expect(searchSpy).toHaveBeenCalledOnce();
+    } finally {
+      searchSpy.mockRestore();
     }
   });
 });
