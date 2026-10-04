@@ -15,7 +15,7 @@ use crate::tenant_route::{
 use crate::usage_delivery::CoreUsageDeliveryClient;
 use crate::usage_journal::{
     CoreUsageAttempt, CoreUsageJournal, DirectStartOutcome, EmbeddingUsage,
-    PaidEmbeddingRecoveryRequired, StartOutcome, DIRECT_DAILY_TOKEN_LIMIT_MAX,
+    PaidEmbeddingRecoveryRequired, StartOutcome, DIRECT_DAILY_TOKEN_LIMIT_MAX, DIRECT_POC_ROUTE_ID,
     DIRECT_POC_TENANT_ID,
 };
 use crate::workspace_assertion::VerifiedWorkspace;
@@ -67,6 +67,37 @@ impl std::fmt::Display for AmbiguousVertexEffect {
 }
 
 impl std::error::Error for AmbiguousVertexEffect {}
+
+/// Vertex answered the request with a complete HTTP 4xx response: it refused
+/// the request, which it does not bill.
+#[derive(Debug)]
+struct VertexRejectedRequest {
+    status: u16,
+    request_id: Option<String>,
+}
+
+impl VertexRejectedRequest {
+    /// `settle_no_charge` evidence: the status, and Vertex's sanitized
+    /// request ID when the response carried one.
+    fn evidence_ref(&self) -> String {
+        match &self.request_id {
+            Some(request_id) => format!("vertex:rejected:{}:{request_id}", self.status),
+            None => format!("vertex:rejected:{}", self.status),
+        }
+    }
+}
+
+impl std::fmt::Display for VertexRejectedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vertex rejected the embedding request with HTTP status {}",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for VertexRejectedRequest {}
 
 impl std::fmt::Display for PreDispatchTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -647,8 +678,20 @@ enum AttemptStart {
 /// `AttemptStart::DirectWithinLimit` the start also applies the UTC-day token
 /// limit; an over-limit start returns `AdmissionError::Denied` with no journal
 /// row and no `admit` or provider call. A response is returned only after exact
-/// provider usage is frozen; ambiguous or incomplete responses remain
-/// unresolved, never no-charge.
+/// provider usage is frozen. A `VertexRejectedRequest` (a complete HTTP 4xx
+/// response) settles the attempt `no_charge` with evidence
+/// `vertex:rejected:<status>[:<request id>]`, which releases its input
+/// reservation, and is returned as that non-ambiguous error. Every other
+/// provider failure, including a transport error, timeout, incomplete
+/// response, 3xx, 5xx or invalid 2xx, and a rejection whose `no_charge`
+/// settlement fails, remains unresolved, never no-charge, and returns
+/// `AmbiguousVertexEffect`.
+
+/// @cc [owner:jchen0824,label:security;backend] vertex-embedding-attempt-route-id
+/// An `AttemptStart::Signed` attempt's `route_id` is
+/// `<route.tenant_id>:<route.revision>` with a decimal revision, as CRM
+/// admission and signed delivery require. An `AttemptStart::DirectWithinLimit`
+/// attempt's `route_id` is `DIRECT_POC_ROUTE_ID`, whatever the route's fields.
 async fn run_guarded_attempt<A, AFut, P, PFut>(
     journal: &CoreUsageJournal,
     route: &CoreTenantRoute,
@@ -668,13 +711,17 @@ where
     if model != MODEL_ID {
         return Err(anyhow!("Vertex embedding route unavailable"));
     }
+    let route_id = match start {
+        AttemptStart::Signed => format!("{}:{}", route.tenant_id, route.revision),
+        AttemptStart::DirectWithinLimit { .. } => DIRECT_POC_ROUTE_ID.to_owned(),
+    };
     let attempt = CoreUsageAttempt {
         attempt_id: uuid::Uuid::new_v4().to_string(),
         provider_request_id: uuid::Uuid::new_v4().to_string(),
         tenant_id: route.tenant_id.clone(),
         workspace_id: route.workspace_id.clone(),
         conversation_id: conversation_id.to_string(),
-        route_id: format!("{}:{}", route.tenant_id, route.revision),
+        route_id,
         model: model.to_string(),
     };
     let started = match start {
@@ -721,9 +768,21 @@ where
             return Err(anyhow!("Vertex ADC unavailable before dispatch"));
         }
         Err(error) => {
+            let rejection = error.downcast_ref::<VertexRejectedRequest>();
+            // Vertex refused the request and did not bill it. Releasing the
+            // attempt and its input reservation lets a later request retry.
+            if let Some(rejection) = rejection {
+                if journal
+                    .settle_no_charge(&attempt.attempt_id, &rejection.evidence_ref())
+                    .is_ok()
+                {
+                    return Err(error);
+                }
+            }
             let operation_id = error
                 .downcast_ref::<ModelError>()
-                .and_then(|provider_error| provider_error.request_id.as_deref());
+                .and_then(|provider_error| provider_error.request_id.as_deref())
+                .or_else(|| rejection.and_then(|rejection| rejection.request_id.as_deref()));
             if journal
                 .mark_unknown_with_operation(&attempt.attempt_id, operation_id)
                 .is_err()
@@ -857,6 +916,11 @@ impl VertexAIEmbedder {
     }
 
     // Kept private until the admission/journal wrapper can persist and settle usage per attempt.
+    /// @cc [owner:jchen0824,label:security;backend] vertex-complete-4xx-is-rejection
+    /// `request_one` returns `VertexRejectedRequest` only for a response whose
+    /// status is 400 to 499 and whose body was received in full. A transport
+    /// error, timeout, body cut short, 3xx, 5xx or invalid 2xx response
+    /// returns another error, never `VertexRejectedRequest`.
     async fn request_one(
         client: &reqwest::Client,
         endpoint: &str,
@@ -889,8 +953,21 @@ impl VertexAIEmbedder {
         } else {
             Some(request_id)
         };
+        if status.is_client_error() {
+            // Only a complete response proves the refusal. A body cut short
+            // leaves the request's outcome unknown.
+            response
+                .bytes()
+                .await
+                .map_err(|_| anyhow!("Vertex embedding transport error"))?;
+            return Err(VertexRejectedRequest {
+                status: status.as_u16(),
+                request_id,
+            }
+            .into());
+        }
         if !status.is_success() {
-            let retryable = if status.as_u16() == 429 || status.is_server_error() {
+            let retryable = if status.is_server_error() {
                 Some(ModelErrorRetryOptions {
                     sleep: Duration::from_secs(1),
                     factor: 2,
@@ -980,7 +1057,10 @@ impl VertexAIEmbedder {
     /// start commit in one transaction before its ADC token request or provider
     /// I/O, and an over-limit input is denied with `AdmissionError::Denied`, no row
     /// and no provider call. Its journal rows use `DIRECT_POC_TENANT_ID` and route
-    /// `poc-direct:0`, and are never claimed for delivery.
+    /// `DIRECT_POC_ROUTE_ID`, and are never claimed for delivery. An input that
+    /// Vertex rejects with a complete HTTP 4xx response settles `no_charge`: its
+    /// row no longer holds the daily-limit reservation, and a later request for
+    /// the same input starts a new attempt.
     async fn embed_direct(
         &self,
         runtime: &CoreDirectVertexRuntime,
@@ -1141,7 +1221,10 @@ impl Embedder for VertexAIEmbedder {
     /// a journal write or provider I/O. Repeated document positions reuse that
     /// vector without another paid call; query positions each have their own
     /// attempt. After an ambiguous effect, no new inputs are pulled and
-    /// already-started attempts settle.
+    /// already-started attempts settle. A Vertex rejection (a complete HTTP 4xx
+    /// response, settled `no_charge`) is not an ambiguous effect: it does not
+    /// stop new inputs from being pulled, and the batch then fails with a
+    /// non-ambiguous error unless another input's effect is ambiguous.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,
@@ -1585,7 +1668,7 @@ mod tests {
         assert!(unresolved[0].event_envelope.is_none());
 
         let provider_calls_before = provider_calls.load(Ordering::SeqCst);
-        let throttled = run_guarded_attempt(
+        let unavailable = run_guarded_attempt(
             &journal,
             &route,
             MODEL_ID,
@@ -1596,7 +1679,7 @@ mod tests {
             |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 Err(anyhow!(ModelError {
-                    message: "Vertex embedding HTTP status 429".into(),
+                    message: "Vertex embedding HTTP status 503".into(),
                     retryable: Some(ModelErrorRetryOptions {
                         sleep: Duration::from_secs(1),
                         factor: 2,
@@ -1607,7 +1690,7 @@ mod tests {
             },
         )
         .await;
-        assert!(throttled
+        assert!(unavailable
             .as_ref()
             .err()
             .and_then(|error| error.downcast_ref::<ModelError>())
@@ -1761,7 +1844,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retryable_status_sanitizes_request_id_and_hides_provider_body() {
+    async fn rejected_status_sanitizes_request_id_and_hides_provider_body() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test operation failed");
@@ -1784,11 +1867,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let model_error = error
-            .downcast_ref::<ModelError>()
-            .expect("test operation failed");
-        assert!(model_error.retryable.is_some());
-        assert_eq!(model_error.request_id.as_deref(), Some("abc-123"));
+        let rejection = error
+            .downcast_ref::<VertexRejectedRequest>()
+            .expect("a complete 429 is a rejection");
+        assert_eq!(rejection.status, 429);
+        assert_eq!(rejection.request_id.as_deref(), Some("abc-123"));
+        assert_eq!(rejection.evidence_ref(), "vertex:rejected:429:abc-123");
         let message = error.to_string();
         assert!(!message.contains("private-payload"));
         assert!(!message.contains("secret-token"));
@@ -1878,10 +1962,19 @@ mod tests {
             )
             .await
             .unwrap_err();
-            let model_error = error
-                .downcast_ref::<ModelError>()
-                .expect("test operation failed");
-            assert_eq!(model_error.retryable.is_some(), status == 500);
+            if status == 500 {
+                let model_error = error
+                    .downcast_ref::<ModelError>()
+                    .expect("test operation failed");
+                assert!(model_error.retryable.is_some());
+            } else {
+                assert_eq!(
+                    error
+                        .downcast_ref::<VertexRejectedRequest>()
+                        .map(|rejection| rejection.status),
+                    Some(status)
+                );
+            }
             assert!(!error.to_string().contains("secret"));
             server.await.expect("test operation failed");
         }
@@ -2113,9 +2206,23 @@ mod tests {
         verify(Some(&token), &[pair]).expect("test workspace assertion failed")
     }
 
-    /// Answers every request with a valid embedding and counts connections.
-    async fn embedding_server(
-        prompt_token_count: u64,
+    /// One loopback response to a Vertex embedding request.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// A valid embedding reporting this many prompt tokens.
+        Embedding(u64),
+        /// A complete response with this status and a small error body.
+        Status(u16),
+        /// This status, with the connection closed before the declared body ends.
+        TruncatedStatus(u16),
+        /// The connection closed without any response.
+        Drop,
+    }
+
+    /// Answers the Nth request with `replies[N]`, the last one repeating, and
+    /// counts requests. Each response closes its connection.
+    async fn scripted_server(
+        replies: Vec<Reply>,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -2126,7 +2233,6 @@ mod tests {
         let server = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.expect("test operation failed");
-                counter.fetch_add(1, Ordering::SeqCst);
                 let mut request = Vec::new();
                 loop {
                     let mut chunk = [0u8; 4096];
@@ -2154,8 +2260,22 @@ mod tests {
                         break;
                     }
                 }
-                let body = json!({"embedding":{"values":vec![0.5;DIMENSIONS]},"usageMetadata":{"promptTokenCount":prompt_token_count}}).to_string();
-                let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}", body.len(), body);
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                let reply = replies[index.min(replies.len() - 1)];
+                let response = match reply {
+                    Reply::Embedding(prompt_token_count) => {
+                        let body = json!({"embedding":{"values":vec![0.5;DIMENSIONS]},"usageMetadata":{"promptTokenCount":prompt_token_count}}).to_string();
+                        format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}", body.len(), body)
+                    }
+                    Reply::Status(status) => {
+                        let body = r#"{"error":{"status":"provider-detail"}}"#;
+                        format!("HTTP/1.1 {status} Error\r\nx-goog-request-id: req-{status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}", body.len())
+                    }
+                    Reply::TruncatedStatus(status) => format!(
+                        "HTTP/1.1 {status} Error\r\nconnection: close\r\ncontent-length: 100\r\n\r\n{{\"error\""
+                    ),
+                    Reply::Drop => String::new(),
+                };
                 socket
                     .write_all(response.as_bytes())
                     .await
@@ -2163,6 +2283,268 @@ mod tests {
             }
         });
         (format!("http://{address}/embed"), requests, server)
+    }
+
+    /// Answers every request with a valid embedding and counts requests.
+    async fn embedding_server(
+        prompt_token_count: u64,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        scripted_server(vec![Reply::Embedding(prompt_token_count)]).await
+    }
+
+    /// `(state, no_charge_evidence_ref, route_id)` of each attempt, oldest first.
+    fn attempt_states(path: &std::path::Path) -> Vec<(String, Option<String>, String)> {
+        let conn = rusqlite::Connection::open(path).expect("test journal connection failed");
+        let mut statement = conn
+            .prepare(
+                "SELECT state, no_charge_evidence_ref, route_id FROM dust_usage_attempts
+                 ORDER BY created_at_ms, rowid",
+            )
+            .expect("test query failed");
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("test query failed")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("test rows failed");
+        rows
+    }
+
+    fn input_reservations(path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(path)
+            .expect("test journal connection failed")
+            .query_row("SELECT count(*) FROM dust_embedding_results", [], |row| {
+                row.get(0)
+            })
+            .expect("test count failed")
+    }
+
+    #[tokio::test]
+    async fn direct_rejection_settles_no_charge_and_a_retry_starts_a_new_attempt() {
+        for status in [400, 429] {
+            let dir = tempfile::tempdir().expect("test operation failed");
+            let journal_path = dir.path().join("direct.sqlite");
+            // One unsettled attempt would hold the whole daily limit.
+            let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+            let (endpoint, provider_requests, server) =
+                scripted_server(vec![Reply::Status(status), Reply::Embedding(11)]).await;
+            let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+            let workspace = verified_workspace(DIRECT_WORKSPACE);
+            let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+            let embed = || {
+                embedder.embed_direct(
+                    &runtime,
+                    vec!["chunk over Gemini's token limit"],
+                    EmbeddingTaskType::RetrievalDocument,
+                    extras.clone(),
+                    &workspace,
+                )
+            };
+            let error = embed().await.expect_err("Vertex rejected the input");
+            assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_none());
+            assert_eq!(
+                error
+                    .downcast_ref::<VertexRejectedRequest>()
+                    .map(|rejection| rejection.status),
+                Some(status)
+            );
+            assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                attempt_states(&journal_path),
+                vec![(
+                    "no_charge".to_string(),
+                    Some(format!("vertex:rejected:{status}:req-{status}")),
+                    DIRECT_POC_ROUTE_ID.to_string()
+                )]
+            );
+            assert_eq!(input_reservations(&journal_path), 0);
+
+            let retried = embed().await.expect("a retry starts a new attempt");
+            assert_eq!(retried[0].vector, vec![0.5; DIMENSIONS]);
+            assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+            let states = attempt_states(&journal_path);
+            assert_eq!(
+                states
+                    .iter()
+                    .map(|(state, _, _)| state.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["no_charge", "exact"]
+            );
+            assert_eq!(input_reservations(&journal_path), 1);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_ambiguous_failures_keep_the_reservation_without_another_call() {
+        for reply in [
+            Reply::Status(500),
+            Reply::Status(503),
+            Reply::Status(307),
+            Reply::TruncatedStatus(400),
+            Reply::Drop,
+        ] {
+            let dir = tempfile::tempdir().expect("test operation failed");
+            let journal_path = dir.path().join("direct.sqlite");
+            let runtime = direct_runtime(dir.path(), 500_000);
+            let (endpoint, provider_requests, server) =
+                scripted_server(vec![reply, Reply::Embedding(11)]).await;
+            let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+            let workspace = verified_workspace(DIRECT_WORKSPACE);
+            let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+            for _ in 0..2 {
+                let error = embedder
+                    .embed_direct(
+                        &runtime,
+                        vec!["chunk"],
+                        EmbeddingTaskType::RetrievalDocument,
+                        extras.clone(),
+                        &workspace,
+                    )
+                    .await
+                    .expect_err("an unproven outcome stays ambiguous");
+                assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_some());
+                // The retry finds the reservation and never calls Vertex.
+                assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(
+                attempt_states(&journal_path),
+                vec![("unknown".to_string(), None, DIRECT_POC_ROUTE_ID.to_string())]
+            );
+            assert_eq!(input_reservations(&journal_path), 1);
+            server.abort();
+        }
+    }
+
+    fn signed_route(tenant_id: &str) -> CoreTenantRoute {
+        CoreTenantRoute {
+            tenant_id: tenant_id.into(),
+            workspace_id: "workspace-a".into(),
+            private_route: "https://crm-a.internal".into(),
+            admission_url: "https://crm-a.internal/internal/usage/dust/admission".into(),
+            usage_ingest_url: "https://crm-a.internal/internal/usage/events".into(),
+            core_credential_ref: format!(
+                "/var/run/secrets/dust/tenants/{tenant_id}/dust-core-usage-key"
+            ),
+            journal_target: format!("tenant:{tenant_id}:dust-usage"),
+            revision: 7,
+            key_id: "pin-a".into(),
+        }
+    }
+
+    /// One signed attempt for `input_hash` that sends a document chunk to
+    /// `endpoint` with the production client, which follows no redirect.
+    async fn signed_loopback_attempt(
+        journal: &CoreUsageJournal,
+        route: &CoreTenantRoute,
+        endpoint: &str,
+        input_hash: [u8; 32],
+    ) -> Result<VertexEmbeddingResponse> {
+        run_guarded_attempt(
+            journal,
+            route,
+            MODEL_ID,
+            "embedding:workspace-a",
+            Some(input_hash),
+            AttemptStart::Signed,
+            |_, _, _| async { Ok(()) },
+            |_| async move {
+                VertexAIEmbedder::request_one(
+                    &VertexAIEmbedder::new(MODEL_ID.to_owned()).client,
+                    endpoint,
+                    "test-token",
+                    "chunk",
+                    EmbeddingTaskType::RetrievalDocument,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn signed_rejection_settles_no_charge_but_a_server_error_stays_unresolved() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        let route = signed_route("tenant-a");
+        let (endpoint, provider_requests, server) = scripted_server(vec![
+            Reply::Status(400),
+            Reply::Embedding(7),
+            Reply::Status(500),
+        ])
+        .await;
+        let rejected = signed_loopback_attempt(&journal, &route, &endpoint, [1; 32])
+            .await
+            .expect_err("Vertex rejected the input");
+        assert!(rejected.downcast_ref::<VertexRejectedRequest>().is_some());
+        // A no-charge row owes CRM no delivery, review or unresolved count.
+        assert!(journal
+            .claim_due("signed-rejection", 100)
+            .expect("test claim failed")
+            .is_empty());
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            0
+        );
+        assert_eq!(input_reservations(&journal_path), 0);
+
+        let retried = signed_loopback_attempt(&journal, &route, &endpoint, [1; 32])
+            .await
+            .expect("a retry starts a new attempt");
+        assert_eq!(retried.vector, vec![0.5; DIMENSIONS]);
+        let failed = signed_loopback_attempt(&journal, &route, &endpoint, [2; 32])
+            .await
+            .expect_err("a server error is ambiguous");
+        assert!(failed.downcast_ref::<AmbiguousVertexEffect>().is_some());
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            attempt_states(&journal_path)
+                .into_iter()
+                .map(|(state, evidence, _)| (state, evidence))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "no_charge".to_string(),
+                    Some("vertex:rejected:400:req-400".to_string())
+                ),
+                ("exact".to_string(), None),
+                ("unknown".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn signed_attempt_route_stays_numeric_for_the_direct_tenant_id() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        // An existing signed registry may name a tenant `poc-direct`.
+        let route = signed_route(DIRECT_POC_TENANT_ID);
+        let (endpoint, _, server) = embedding_server(7).await;
+        signed_loopback_attempt(&journal, &route, &endpoint, [3; 32])
+            .await
+            .expect("signed attempt of the poc-direct tenant");
+        let claims = journal
+            .claim_due("signed-direct-tenant", 100)
+            .expect("test claim failed");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(
+            (claims[0].state.as_str(), claims[0].route_id.as_str()),
+            ("exact", "poc-direct:7")
+        );
+        assert_ne!(claims[0].route_id, DIRECT_POC_ROUTE_ID);
+        server.abort();
     }
 
     #[test]
@@ -2356,7 +2738,7 @@ mod tests {
             tenant_id: route.tenant_id.clone(),
             workspace_id: route.workspace_id.clone(),
             conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
-            route_id: format!("{}:{}", route.tenant_id, route.revision),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
             model: MODEL_ID.into(),
         };
         assert!(matches!(
@@ -2432,7 +2814,7 @@ mod tests {
             settled,
             (
                 DIRECT_POC_TENANT_ID.to_string(),
-                format!("{DIRECT_POC_TENANT_ID}:0"),
+                DIRECT_POC_ROUTE_ID.to_string(),
                 "exact".to_string(),
                 "11".to_string()
             )

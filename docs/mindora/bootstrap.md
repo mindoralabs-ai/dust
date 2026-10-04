@@ -147,12 +147,15 @@ with it, and Core refuses Vertex embedding without a valid assertion.
 token limit for the workspace, per UTC day: plain digits, from 8,192 to
 1,000,000,000. Core counts the input tokens Vertex reports for settled requests,
 plus 8,192 tokens for each request not yet settled, which is
-`gemini-embedding-2`'s input limit. A request that would exceed the limit is
-refused with `429 quota_exceeded` before any token or Vertex request. It is a
-separate budget from Front's generation limit. `DUST_CORE_USAGE_JOURNAL_PATH`
-is an absolute path on a volume retained across restarts and rollouts: Core
-journals each embedding request there and counts the daily limit from that
-journal, so run one Core replica on that volume. Leave
+`gemini-embedding-2`'s input limit. A request that Vertex refuses with an HTTP
+4xx status, such as text that Gemini counts as over that limit, settles with no
+tokens, and a retry sends a new request. One whose outcome Core cannot tell,
+such as a timeout or a 5xx status, stays unsettled. A request that would exceed
+the limit is refused with `429 quota_exceeded` before any token or Vertex
+request. It is a separate budget from Front's generation limit.
+`DUST_CORE_USAGE_JOURNAL_PATH` is an absolute path on a volume retained across
+restarts and rollouts: Core journals each embedding request there and counts the
+daily limit from that journal, so run one Core replica on that volume. Leave
 `DUST_CORE_REGISTRY_SIGNER_URL` unset: Core's signed usage reconciler then stays
 off. `VERTEX_AI_PROJECT_ID` is the project Core calls Vertex in, with
 credentials from the pod's Workload Identity.

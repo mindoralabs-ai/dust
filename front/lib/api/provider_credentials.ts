@@ -114,13 +114,13 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  */
 /**
  * @cc [owner:jchen0824,label:product;backend] vertex-data-source-relocation-skips-embedding-key
- * A caller that copies documents or tables from one Core data source into
- * another, as region relocation does, MUST pass
- * `skipEmbeddingApiKeyRequirement: true` for those writes when the target
- * data source's embedder is `vertex_ai`, so that relocating a Vertex data
- * source never requires an OpenAI embedding key. It MUST NOT skip the
- * requirement for a target with any other embedder, nor for writes made
- * without knowing the target's embedder.
+ * A caller that copies documents from one Core data source into another, as
+ * region relocation does, MUST pass `skipEmbeddingApiKeyRequirement: true` for
+ * those document writes when the target data source's embedder is
+ * `vertex_ai`, so that relocating a Vertex data source's documents never
+ * requires an OpenAI embedding key. It MUST NOT skip the requirement for a
+ * target with any other embedder, nor for writes made without knowing the
+ * target's embedder.
  */
 export async function getLlmCredentials(
   auth: Authenticator,
