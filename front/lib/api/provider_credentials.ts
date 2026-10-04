@@ -89,10 +89,11 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  * By default, BYOK workspaces must have `OPENAI_EMBEDDING_API_KEY` configured
  * (used by search, upsert, data source creation). Document upserts and searches
  * need it even on a data source that embeds with Vertex: Front does not record
- * an existing data source's embedder.
+ * an existing data source's embedder. Region relocation is the exception, as it
+ * reads the embedder from Core.
  * Pass `skipEmbeddingApiKeyRequirement: true` for call sites that only need LLM
- * keys (agent loop, token counting, image generation, etc.), or that create a
- * data source whose embedder is `vertex_ai`.
+ * keys (agent loop, token counting, image generation, etc.), or that create or
+ * relocate a data source whose embedder is `vertex_ai`.
  */
 /**
  * @cc [owner:jchen0824,label:product;backend] byok-embedding-key-required
@@ -110,6 +111,16 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  * `skipEmbeddingApiKeyRequirement: true` for that creation, so that creating a
  * Vertex data source never requires an OpenAI embedding key. A creation with
  * any other embedder MUST NOT skip the requirement.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] vertex-data-source-relocation-skips-embedding-key
+ * A caller that copies documents or tables from one Core data source into
+ * another, as region relocation does, MUST pass
+ * `skipEmbeddingApiKeyRequirement: true` for those writes when the target
+ * data source's embedder is `vertex_ai`, so that relocating a Vertex data
+ * source never requires an OpenAI embedding key. It MUST NOT skip the
+ * requirement for a target with any other embedder, nor for writes made
+ * without knowing the target's embedder.
  */
 export async function getLlmCredentials(
   auth: Authenticator,

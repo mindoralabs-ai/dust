@@ -47,7 +47,27 @@ export async function processDataSourceDocuments({
   const auth = await Authenticator.internalAdminForWorkspace(workspaceId);
   const coreAPI = new CoreAPI(config.getCoreAPIConfig(), localLogger);
 
-  const credentials = await getLlmCredentials(auth);
+  // Core embeds these documents with the destination data source's embedder.
+  // Read it from Core: a relaunch from `relocate_core_data_source.ts` passes
+  // only the data source's ids.
+  const destDataSource = await coreAPI.getDataSource({
+    projectId: destIds.dustAPIProjectId,
+    dataSourceId: destIds.dustAPIDataSourceId,
+  });
+  if (destDataSource.isErr()) {
+    localLogger.error(
+      { error: destDataSource.error },
+      "[Core] Failed to retrieve the destination data source."
+    );
+
+    throw new Error("Failed to retrieve the destination data source.");
+  }
+
+  const credentials = await getLlmCredentials(auth, {
+    skipEmbeddingApiKeyRequirement:
+      destDataSource.value.data_source.config.embedder_config.embedder
+        .provider_id === "vertex_ai",
+  });
   const destRegionApiBaseUrl = config.getApiBaseUrl();
   const workspaceAssertion = await prepareCoreWorkspaceAssertion(auth, [
     {

@@ -132,12 +132,12 @@ admin or a non-member, creating one in that workspace fails before Core creates
 a project. An operator can still repair a Pod whose Core data source exists.
 Other workspaces keep their embedding provider.
 
-Creating a Vertex Pod or data source needs no OpenAI embedding key. On a strict
-BYOK plan, one that is not `FREE_BYOK_TRANSITIONING` and lacks the
-`use_dust_keys` flag, upserting or searching documents does need one, even in a
-Vertex data source: the workspace must have an OpenAI key in its provider
-settings, which Front sends as `OPENAI_EMBEDDING_API_KEY`. Non-BYOK plans never
-need one.
+Creating a Vertex Pod or data source, or relocating a Vertex data source and its
+documents to another region, needs no OpenAI embedding key. On a strict BYOK
+plan, one that is not `FREE_BYOK_TRANSITIONING` and lacks the `use_dust_keys`
+flag, any other document upsert or search does need one, even in a Vertex data
+source: the workspace must have an OpenAI key in its provider settings, which
+Front sends as `OPENAI_EMBEDDING_API_KEY`. Non-BYOK plans never need one.
 
 `DUST_CORE_WORKSPACE_ASSERTION_SECRET` must have the same value, at least 32
 characters, on Front and Core. Front signs its Core search and upsert requests
