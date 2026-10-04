@@ -2,6 +2,7 @@ import {
   handleDataSourceSearch,
   resolveLegacyDataSourceSpaceId,
 } from "@app/lib/api/data_sources";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import { DataSourceResource } from "@app/lib/resources/data_source_resource";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 import type { DataSourceSearchResponseType } from "@dust-tt/client";
@@ -150,6 +151,8 @@ const ParamsSchema = z.object({
  *                         description: Score of the document
  *       400:
  *         description: Invalid request error
+ *       429:
+ *         description: Rate limit exceeded.
  */
 const app = publicApiApp();
 
@@ -236,6 +239,18 @@ app.get(
             api_error: {
               type: "data_source_error",
               message: s.error.message,
+            },
+          });
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+              data_source_error: {
+                code: s.error.code,
+                message: s.error.message,
+              },
             },
           });
         default:

@@ -91,6 +91,14 @@ app.patch(
               message: upsertResult.error.message,
             },
           });
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: upsertResult.error.message,
+            },
+          });
         case "data_source_quota_error":
           return apiError(ctx, {
             status_code: 401,

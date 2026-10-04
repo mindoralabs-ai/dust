@@ -2,6 +2,7 @@
 // Disabling because POKE but should probably be refactored to use internal types.
 
 import { handleDataSourceSearch } from "@app/lib/api/data_sources";
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import { DataSourceResource } from "@app/lib/resources/data_source_resource";
 import { assertNever } from "@app/types/shared/utils/assert_never";
 // biome-ignore lint/plugin/enforceClientTypesInPublicApi: existing usage
@@ -73,6 +74,18 @@ app.get(
             api_error: {
               type: "data_source_error",
               message: s.error.message,
+            },
+          });
+        case "quota_exceeded":
+          return apiError(ctx, {
+            status_code: 429,
+            api_error: {
+              type: "rate_limit_error",
+              message: EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+              data_source_error: {
+                code: s.error.code,
+                message: s.error.message,
+              },
             },
           });
         default:

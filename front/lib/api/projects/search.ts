@@ -1,6 +1,10 @@
 import { default as config } from "@app/lib/api/config";
 import { prepareCoreWorkspaceAssertionsForBatches } from "@app/lib/api/core_workspace_assertion";
 import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
+import {
   getLlmCredentials,
   MISSING_EMBEDDING_API_KEY_ERROR_MESSAGE,
 } from "@app/lib/api/provider_credentials";
@@ -36,7 +40,7 @@ export async function searchProjectConversations(
 ): Promise<
   Result<
     ConversationSearchResult[],
-    DustError<"core_api_error" | "invalid_request_error">
+    DustError<"core_api_error" | "invalid_request_error" | "quota_exceeded">
   >
 > {
   const { query, spaceIds, topK } = options;
@@ -105,6 +109,11 @@ export async function searchProjectConversations(
   );
 
   if (searchResult.isErr()) {
+    if (isCoreQuotaExceededError(searchResult.error)) {
+      return new Err(
+        new DustError("quota_exceeded", EMBEDDING_QUOTA_EXCEEDED_MESSAGE)
+      );
+    }
     return new Err(new DustError("core_api_error", searchResult.error.message));
   }
 

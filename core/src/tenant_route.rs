@@ -753,6 +753,52 @@ mod tests {
     }
 
     #[test]
+    fn signed_tenant_may_use_the_direct_tenant_id_but_not_the_direct_route() {
+        use crate::usage_journal::{DIRECT_POC_ROUTE_ID, DIRECT_POC_TENANT_ID};
+        let direct_tenant_payload = |now: i64, revision: u64| {
+            let mut value = payload(now, revision);
+            let root = format!("/var/run/secrets/dust/tenants/{DIRECT_POC_TENANT_ID}");
+            value["tenants"][0]["tenant_id"] = Value::String(DIRECT_POC_TENANT_ID.into());
+            value["tenants"][0]["journal_target"] =
+                Value::String(format!("tenant:{DIRECT_POC_TENANT_ID}:dust-usage"));
+            value["tenants"][0]["front_credential_ref"] =
+                Value::String(format!("{root}/dust-front-usage-key"));
+            value["tenants"][0]["core_credential_ref"] =
+                Value::String(format!("{root}/dust-core-usage-key"));
+            value["memberships"][0]["tenant_id"] = Value::String(DIRECT_POC_TENANT_ID.into());
+            value
+        };
+        let parsed: Payload =
+            serde_json::from_value(direct_tenant_payload(1_000, 1)).expect("test payload failed");
+        validate_payload(&parsed).expect("a signed tenant may be named poc-direct");
+
+        let key = keypair();
+        let now = chrono::Utc::now().timestamp();
+        let raw = signed(direct_tenant_payload(now, 7), &key);
+        let (resolver, _, _) = resolver(raw.clone(), &key, 7);
+        let route = resolver
+            .resolve_bundle(&raw, "workspace_A", now)
+            .expect("signed route of the poc-direct tenant");
+        assert_eq!(route.tenant_id, DIRECT_POC_TENANT_ID);
+        let mut claim = settled_claim();
+        claim.tenant_id = DIRECT_POC_TENANT_ID.into();
+        claim.route_id = format!("{DIRECT_POC_TENANT_ID}:7");
+        let delivery = resolver
+            .resolve_delivery_bundle(&raw, &claim, now)
+            .expect("its exact rows have a signed delivery route");
+        assert_eq!(delivery.tenant_id, DIRECT_POC_TENANT_ID);
+
+        claim.route_id = DIRECT_POC_ROUTE_ID.into();
+        let error = resolver
+            .resolve_delivery_bundle(&raw, &claim, now)
+            .expect_err("direct rows have no signed delivery route");
+        assert_eq!(
+            error.to_string(),
+            "invalid persisted Core usage route revision"
+        );
+    }
+
+    #[test]
     fn rejects_noncanonical_private_origins_and_unsafe_revisions() {
         let mut uppercase = payload(1_000, 1);
         uppercase["tenants"][0]["private_route"] = Value::String("https://CRM.internal".into());

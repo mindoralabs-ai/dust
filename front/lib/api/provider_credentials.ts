@@ -1,5 +1,4 @@
 import config from "@app/lib/api/config";
-import { isConfiguredPocVertexEmbeddingWorkspace } from "@app/lib/api/dust_poc_mode";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
 import { isByokTransitioningPlan } from "@app/lib/plans/plan_codes";
@@ -88,11 +87,40 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  * don't accidentally use the customer's LLM key for embeddings.
  *
  * By default, BYOK workspaces must have `OPENAI_EMBEDDING_API_KEY` configured
- * (used by search, upsert, data source creation).
- * Configured Vertex POC workspaces omit this OpenAI-only requirement; Core's
- * signed workspace assertion and route gate still authorize provider I/O.
+ * (used by search, upsert, data source creation). Document upserts and searches
+ * need it even on a data source that embeds with Vertex: Front does not record
+ * an existing data source's embedder. Region relocation is the exception, as it
+ * reads the embedder from Core.
  * Pass `skipEmbeddingApiKeyRequirement: true` for call sites that only need LLM
- * keys (agent loop, token counting, image generation, etc.).
+ * keys (agent loop, token counting, image generation, etc.), or that create or
+ * relocate a data source whose embedder is `vertex_ai`.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] byok-embedding-key-required
+ * For a BYOK plan other than BYOK_TRANSITIONING, without the `use_dust_keys`
+ * flag, `getLlmCredentials` MUST throw when the workspace has no
+ * `OPENAI_EMBEDDING_API_KEY` and `skipEmbeddingApiKeyRequirement` is not
+ * `true`. No workspace is exempt by its identity, including a configured POC
+ * workspace. A non-BYOK plan never requires the key.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] vertex-data-source-creation-skips-embedding-key
+ * A caller that creates a Core data source whose embedder is `vertex_ai`,
+ * whether it selects that embedder for a new data source or copies it from an
+ * existing Core data source (as region relocation does), MUST pass
+ * `skipEmbeddingApiKeyRequirement: true` for that creation, so that creating a
+ * Vertex data source never requires an OpenAI embedding key. A creation with
+ * any other embedder MUST NOT skip the requirement.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] vertex-data-source-relocation-skips-embedding-key
+ * A caller that copies documents from one Core data source into another, as
+ * region relocation does, MUST pass `skipEmbeddingApiKeyRequirement: true` for
+ * those document writes when the target data source's embedder is
+ * `vertex_ai`, so that relocating a Vertex data source's documents never
+ * requires an OpenAI embedding key. It MUST NOT skip the requirement for a
+ * target with any other embedder, nor for writes made without knowing the
+ * target's embedder.
  */
 export async function getLlmCredentials(
   auth: Authenticator,
@@ -150,10 +178,7 @@ export async function getLlmCredentials(
     }))
   );
 
-  if (
-    !skipEmbeddingApiKeyRequirement &&
-    !isConfiguredPocVertexEmbeddingWorkspace(auth.getNonNullableWorkspace().sId)
-  ) {
+  if (!skipEmbeddingApiKeyRequirement) {
     assert(
       credentials.OPENAI_EMBEDDING_API_KEY,
       "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."

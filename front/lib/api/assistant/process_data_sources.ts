@@ -2,8 +2,13 @@ import type { AgentActionSpecification } from "@app/lib/actions/types/agent";
 import { runMultiActionsAgent } from "@app/lib/api/assistant/call_llm";
 import config from "@app/lib/api/config";
 import { createCoreWorkspaceAssertionsForSingles } from "@app/lib/api/core_workspace_assertion";
+import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
+import { DustError } from "@app/lib/error";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
 import logger from "@app/logger/logger";
 import type { StreamModelInfo } from "@app/types/assistant/agent_run";
@@ -55,7 +60,9 @@ export async function processDataSources({
   objective,
   jsonSchema,
   topK,
-}: ProcessDataSourcesParams): Promise<Result<ProcessDataSourcesResult, Error>> {
+}: ProcessDataSourcesParams): Promise<
+  Result<ProcessDataSourcesResult, Error | DustError<"quota_exceeded">>
+> {
   // Step 1: Retrieve documents from data sources
   const coreAPI = new CoreAPI(config.getCoreAPIConfig(), logger);
   const credentials = await getLlmCredentials(auth);
@@ -71,6 +78,11 @@ export async function processDataSources({
   );
 
   if (searchResults.isErr()) {
+    if (isCoreQuotaExceededError(searchResults.error)) {
+      return new Err(
+        new DustError("quota_exceeded", EMBEDDING_QUOTA_EXCEEDED_MESSAGE)
+      );
+    }
     return new Err(
       new Error(`Failed to retrieve documents: ${searchResults.error.message}`)
     );

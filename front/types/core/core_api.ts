@@ -1,3 +1,4 @@
+import { isCoreQuotaExceededError } from "@app/lib/api/embedding_quota";
 import { internalFetch } from "@app/lib/api/internal_fetch";
 import { concurrentExecutor } from "@app/lib/utils/async_utils";
 import type { ProviderVisibility } from "@app/types/connectors/connectors_api";
@@ -1029,9 +1030,13 @@ export class CoreAPI {
     );
 
     // Check if all search results are successful, if not return the first error
+    // (a quota denial first, so callers can still tell it apart).
     const errors = searchResults.filter((result) => result.isErr());
     if (errors.length > 0) {
-      return errors[0];
+      return (
+        errors.find((r) => r.isErr() && isCoreQuotaExceededError(r.error)) ??
+        errors[0]
+      );
     }
 
     // Combine all documents from search results
@@ -1112,8 +1117,12 @@ export class CoreAPI {
 
     const errors = results.filter((result) => result.isErr());
     if (errors.length > 0) {
-      // If any of the bulk search requests failed, return the first error.
-      return errors[0];
+      // If any of the bulk search requests failed, return the first error (a
+      // quota denial first, so callers can still tell it apart).
+      return (
+        errors.find((r) => r.isErr() && isCoreQuotaExceededError(r.error)) ??
+        errors[0]
+      );
     }
 
     const sortedDocuments = topKSortedDocuments(

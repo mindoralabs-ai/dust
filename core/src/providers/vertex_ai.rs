@@ -7,14 +7,16 @@ use crate::providers::provider::{ModelError, ModelErrorRetryOptions, Provider, P
 use crate::providers::tiktoken::tiktoken::{
     batch_tokenize_async, cl100k_base_singleton, decode_async, encode_async,
 };
-use crate::quota_admission::CoreAdmissionClient;
+use crate::quota_admission::{AdmissionError, CoreAdmissionClient};
 use crate::run::Credentials;
 use crate::tenant_route::{
     CoreTenantRoute, CoreTenantRouteResolver, HttpBundleFetcher, PinnedVerifier,
 };
 use crate::usage_delivery::CoreUsageDeliveryClient;
 use crate::usage_journal::{
-    CoreUsageAttempt, CoreUsageJournal, EmbeddingUsage, PaidEmbeddingRecoveryRequired, StartOutcome,
+    CoreUsageAttempt, CoreUsageJournal, DirectStartOutcome, EmbeddingUsage,
+    PaidEmbeddingRecoveryRequired, StartOutcome, DIRECT_DAILY_TOKEN_LIMIT_MAX, DIRECT_POC_ROUTE_ID,
+    DIRECT_POC_TENANT_ID,
 };
 use crate::workspace_assertion::VerifiedWorkspace;
 use anyhow::{anyhow, Result};
@@ -34,6 +36,23 @@ const API_MODEL_ID: &str = "gemini-embedding-2";
 const DIMENSIONS: usize = 1536;
 const CLOUD_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const MAX_CONCURRENT_REQUESTS: usize = 8;
+const CONTEXT_SIZE: usize = 8_192;
+const DIRECT_PROVIDER_MODE_ENV: &str = "DUST_POC_DIRECT_PROVIDER_MODE";
+/// Each unsettled direct attempt holds this many tokens of the daily limit
+/// until its exact usage replaces it. It is `context_size`, the model input
+/// limit: requests send `autoTruncate: false`, so Vertex rejects longer input
+/// instead of truncating and billing it. The embedder's cl100k counts are not
+/// an upper bound on Gemini's `promptTokenCount` (a different tokenizer, plus
+/// the task prefix), so they cannot size this reservation.
+const DIRECT_EMBEDDING_RESERVATION_TOKENS: u64 = CONTEXT_SIZE as u64;
+const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+/// `with_retryable_back_off` makes at most `retries` further calls, the first
+/// after `sleep`, each later one after `factor` times the previous wait.
+const VERTEX_RETRY_OPTIONS: ModelErrorRetryOptions = ModelErrorRetryOptions {
+    sleep: Duration::from_secs(1),
+    factor: 2,
+    retries: 2,
+};
 
 #[async_trait]
 trait VertexTokenSource: Send + Sync {
@@ -55,6 +74,37 @@ impl std::fmt::Display for AmbiguousVertexEffect {
 }
 
 impl std::error::Error for AmbiguousVertexEffect {}
+
+/// Vertex answered the request with a complete HTTP 4xx response: it refused
+/// the request, which it does not bill.
+#[derive(Debug)]
+struct VertexRejectedRequest {
+    status: u16,
+    request_id: Option<String>,
+}
+
+impl VertexRejectedRequest {
+    /// `settle_no_charge` evidence: the status, and Vertex's sanitized
+    /// request ID when the response carried one.
+    fn evidence_ref(&self) -> String {
+        match &self.request_id {
+            Some(request_id) => format!("vertex:rejected:{}:{request_id}", self.status),
+            None => format!("vertex:rejected:{}", self.status),
+        }
+    }
+}
+
+impl std::fmt::Display for VertexRejectedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vertex rejected the embedding request with HTTP status {}",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for VertexRejectedRequest {}
 
 impl std::fmt::Display for PreDispatchTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -193,6 +243,14 @@ struct VertexEmbeddingResponse {
     usage_metadata: Value,
 }
 
+/// Inputs of one guarded batch after the shared request checks.
+struct GuardedBatch {
+    endpoint: String,
+    inputs: Vec<String>,
+    positions: Vec<usize>,
+    upsert_key: Option<String>,
+}
+
 struct CoreVertexRuntime {
     resolver: CoreTenantRouteResolver<HttpBundleFetcher>,
     journal: CoreUsageJournal,
@@ -282,11 +340,132 @@ fn core_vertex_runtime() -> Result<&'static CoreVertexRuntime> {
         .ok_or_else(|| anyhow!("Core Vertex runtime initialization unavailable"))
 }
 
+/// `DUST_POC_DIRECT_PROVIDER_MODE`: unset or `0` is off and `1` is on. Any
+/// other value is a configuration error, never a fallback to either mode.
+fn direct_provider_mode(value: Result<String, std::env::VarError>) -> Result<bool> {
+    match value.as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
+        Ok("1") => Ok(true),
+        _ => Err(anyhow!(
+            "Core Vertex direct provider mode configuration unavailable"
+        )),
+    }
+}
+
+struct CoreDirectVertexRuntime {
+    journal: CoreUsageJournal,
+    workspace_id: String,
+    daily_token_limit: u64,
+}
+
+static CORE_DIRECT_VERTEX_RUNTIME: OnceLock<CoreDirectVertexRuntime> = OnceLock::new();
+static CORE_DIRECT_VERTEX_RUNTIME_INIT: Mutex<()> = Mutex::new(());
+
+impl CoreDirectVertexRuntime {
+    /// @cc [owner:jchen0824,label:security;backend] dust-core-direct-config-fails-closed
+    /// Direct mode reads only `DUST_POC_DIRECT_WORKSPACE_ID` (1-128 of
+    /// `[A-Za-z0-9_-]`), `DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT` (decimal
+    /// digits from the per-attempt reservation to `DIRECT_DAILY_TOKEN_LIMIT_MAX`)
+    /// and an absolute `DUST_CORE_USAGE_JOURNAL_PATH`. A missing or malformed value
+    /// is an error before the journal is opened; signed registry variables and
+    /// `DUST_POC_WORKSPACE_IDS` are neither required nor read.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let unavailable = || anyhow!("Core Vertex direct runtime configuration unavailable");
+        let required = |name: &str| {
+            lookup(name)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(unavailable)
+        };
+        let workspace_id = required("DUST_POC_DIRECT_WORKSPACE_ID")?;
+        let daily_token_limit = required("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT")?;
+        let journal_path = PathBuf::from(required("DUST_CORE_USAGE_JOURNAL_PATH")?);
+        if workspace_id.len() > 128
+            || !workspace_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || !daily_token_limit.bytes().all(|b| b.is_ascii_digit())
+            || !journal_path.is_absolute()
+        {
+            return Err(unavailable());
+        }
+        let daily_token_limit = daily_token_limit
+            .parse::<u64>()
+            .map_err(|_| unavailable())?;
+        if !(DIRECT_EMBEDDING_RESERVATION_TOKENS..=DIRECT_DAILY_TOKEN_LIMIT_MAX)
+            .contains(&daily_token_limit)
+        {
+            return Err(unavailable());
+        }
+        Ok(Self {
+            journal: CoreUsageJournal::open(journal_path)?,
+            workspace_id,
+            daily_token_limit,
+        })
+    }
+}
+
+fn core_direct_vertex_runtime() -> Result<&'static CoreDirectVertexRuntime> {
+    if let Some(runtime) = CORE_DIRECT_VERTEX_RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let _guard = CORE_DIRECT_VERTEX_RUNTIME_INIT
+        .lock()
+        .map_err(|_| anyhow!("Core Vertex direct runtime initialization unavailable"))?;
+    if CORE_DIRECT_VERTEX_RUNTIME.get().is_none() {
+        let runtime = CoreDirectVertexRuntime::from_lookup(|name| std::env::var(name).ok())
+            .map_err(|_| anyhow!("Core Vertex direct runtime configuration unavailable"))?;
+        let _ = CORE_DIRECT_VERTEX_RUNTIME.set(runtime);
+    }
+    CORE_DIRECT_VERTEX_RUNTIME
+        .get()
+        .ok_or_else(|| anyhow!("Core Vertex direct runtime initialization unavailable"))
+}
+
+/// Direct mode never admits or delivers remotely, so the route has no network
+/// destination. Fixed fields keep the journal's route binding stable.
+fn direct_poc_route(workspace_id: &str) -> CoreTenantRoute {
+    CoreTenantRoute {
+        tenant_id: DIRECT_POC_TENANT_ID.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        private_route: "direct:none".to_owned(),
+        admission_url: "direct:none".to_owned(),
+        usage_ingest_url: "direct:none".to_owned(),
+        core_credential_ref: "direct:none".to_owned(),
+        journal_target: format!("tenant:{DIRECT_POC_TENANT_ID}:dust-usage"),
+        revision: 0,
+        key_id: "direct".to_owned(),
+    }
+}
+
+fn utc_day_start_ms(now_ms: i64) -> i64 {
+    now_ms - now_ms.rem_euclid(MS_PER_DAY)
+}
+
 /// @cc [label:security;backend] dust-core-reconciler-no-model-effect
 /// This loop may deliver durable accounting while provider I/O is disabled.
-/// A failed delivery never retries an embedding request.
+/// A failed delivery never retries an embedding request. In direct provider
+/// mode without `DUST_CORE_REGISTRY_SIGNER_URL` it returns without starting the
+/// delivery or heartbeat loops. When `DUST_POC_DIRECT_PROVIDER_MODE` is set to
+/// a value other than `0` or `1`, it logs one error without that value and
+/// returns without starting either loop, with or without a signer.
 pub async fn run_core_usage_reconciler() {
-    if std::env::var("DUST_POC_MODE").as_deref() != Ok("1") {
+    run_core_usage_reconciler_with(|name| std::env::var(name)).await
+}
+
+async fn run_core_usage_reconciler_with(env: impl Fn(&str) -> Result<String, std::env::VarError>) {
+    if env("DUST_POC_MODE").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(direct) = direct_provider_mode(env(DIRECT_PROVIDER_MODE_ENV)) else {
+        tracing::error!(
+            "Dust Core usage reconciliation is off: direct provider mode configuration unavailable"
+        );
+        return;
+    };
+    // Direct rows are never delivered; without a signer there is no signed
+    // route to reconcile or heartbeat against.
+    if direct && !env("DUST_CORE_REGISTRY_SIGNER_URL").is_ok_and(|url| !url.is_empty()) {
+        tracing::info!("Dust Core usage reconciliation is off in direct provider mode");
         return;
     }
     tokio::join!(run_core_delivery_loop(), run_core_heartbeat_loop());
@@ -403,17 +582,32 @@ fn finish_embedding_batch(
     }) {
         return Err(AmbiguousVertexEffect.into());
     }
-    results
-        .into_iter()
-        .map(|result| {
-            result.map(|vector| EmbedderVector {
+    // A retryable error makes the back-off embed the whole batch again, so it
+    // is returned only when every failed input is retryable.
+    let mut vectors = Vec::with_capacity(results.len());
+    let mut retryable_error = None;
+    for result in results {
+        match result {
+            Ok(vector) => vectors.push(EmbedderVector {
                 created: crate::utils::now(),
                 provider: ProviderID::VertexAI.to_string(),
                 model: model.to_owned(),
                 vector,
-            })
-        })
-        .collect()
+            }),
+            Err(error)
+                if error
+                    .downcast_ref::<ModelError>()
+                    .is_some_and(|model_error| model_error.retryable.is_some()) =>
+            {
+                retryable_error.get_or_insert(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    match retryable_error {
+        Some(error) => Err(error),
+        None => Ok(vectors),
+    }
 }
 
 /// Stop pulling new inputs after an ambiguous paid effect, while allowing
@@ -454,16 +648,83 @@ where
     completed.into_iter().map(|(_, result)| result).collect()
 }
 
+fn positioned_vectors(
+    positions: Vec<usize>,
+    unique_vectors: Vec<EmbedderVector>,
+) -> Vec<EmbedderVector> {
+    positions
+        .into_iter()
+        .map(|index| unique_vectors[index].clone())
+        .collect()
+}
+
+/// A paid result that can no longer be served is an ambiguous effect, never
+/// a reason to dispatch the same input again.
+fn retained_embedding(
+    journal: &CoreUsageJournal,
+    input_hash: &[u8; 32],
+) -> Result<Option<Vec<f64>>> {
+    journal.cached_embedding(input_hash).map_err(|error| {
+        if error
+            .downcast_ref::<PaidEmbeddingRecoveryRequired>()
+            .is_some()
+        {
+            anyhow!(AmbiguousVertexEffect)
+        } else {
+            error
+        }
+    })
+}
+
+/// ADC is requested only by a journaled, admitted attempt. A failed or
+/// stalled token request is proven to precede dispatch.
+async fn predispatch_token(token_source: &dyn VertexTokenSource) -> Result<String> {
+    tokio::time::timeout(Duration::from_secs(30), token_source.token())
+        .await
+        .map_err(|_| anyhow!(PreDispatchTokenError))?
+        .map_err(|_| anyhow!(PreDispatchTokenError))
+}
+
+/// How `run_guarded_attempt` commits its durable start.
+#[derive(Clone, Copy, Debug)]
+enum AttemptStart {
+    /// Signed tenant route: the caller's `admit` performs CRM admission.
+    Signed,
+    /// Direct POC route: the start also applies the UTC-day token limit.
+    DirectWithinLimit { daily_token_limit: u64 },
+}
+
 /// @cc [label:security;backend] vertex-embedding-attempt-accounting
-/// A unique, durable attempt and tenant-bound admission precede each provider
-/// request. A response is returned only after exact provider usage is frozen;
-/// ambiguous or incomplete responses remain unresolved, never no-charge.
+/// A unique, durable attempt precedes each provider request, and `admit`
+/// must succeed between that start and the request. With
+/// `AttemptStart::DirectWithinLimit` the start also applies the UTC-day token
+/// limit; an over-limit start returns `AdmissionError::Denied` with no journal
+/// row and no `admit` or provider call. A response is returned only after exact
+/// provider usage is frozen. One call makes at most one provider request:
+/// a retry is a new call, with a new attempt, start and `admit`. A
+/// `VertexRejectedRequest` (a complete HTTP 4xx response) settles the attempt
+/// `no_charge` with evidence `vertex:rejected:<status>[:<request id>]`, which
+/// releases its input reservation. Only then is a 429 returned as a
+/// `ModelError` whose `retryable` is `VERTEX_RETRY_OPTIONS`, carrying the
+/// rejection's request ID, and any other 4xx as that non-retryable
+/// `VertexRejectedRequest`. Every other provider failure, including a
+/// transport error, timeout, incomplete response, 3xx, 5xx or invalid 2xx,
+/// and any rejection, 429 or not, whose `no_charge` settlement fails, remains
+/// unresolved, never no-charge, and returns `AmbiguousVertexEffect`, never a
+/// retryable error.
+
+/// @cc [owner:jchen0824,label:security;backend] vertex-embedding-attempt-route-id
+/// An `AttemptStart::Signed` attempt's `route_id` is
+/// `<route.tenant_id>:<route.revision>` with a decimal revision, as CRM
+/// admission and signed delivery require. An `AttemptStart::DirectWithinLimit`
+/// attempt's `route_id` is `DIRECT_POC_ROUTE_ID`, whatever the route's fields.
 async fn run_guarded_attempt<A, AFut, P, PFut>(
     journal: &CoreUsageJournal,
     route: &CoreTenantRoute,
     model: &str,
     conversation_id: &str,
     input_hash: Option<[u8; 32]>,
+    start: AttemptStart,
     admit: A,
     provider: P,
 ) -> Result<VertexEmbeddingResponse>
@@ -476,18 +737,38 @@ where
     if model != MODEL_ID {
         return Err(anyhow!("Vertex embedding route unavailable"));
     }
+    let route_id = match start {
+        AttemptStart::Signed => format!("{}:{}", route.tenant_id, route.revision),
+        AttemptStart::DirectWithinLimit { .. } => DIRECT_POC_ROUTE_ID.to_owned(),
+    };
     let attempt = CoreUsageAttempt {
         attempt_id: uuid::Uuid::new_v4().to_string(),
         provider_request_id: uuid::Uuid::new_v4().to_string(),
         tenant_id: route.tenant_id.clone(),
         workspace_id: route.workspace_id.clone(),
         conversation_id: conversation_id.to_string(),
-        route_id: format!("{}:{}", route.tenant_id, route.revision),
+        route_id,
         model: model.to_string(),
     };
-    let started = match input_hash.as_ref() {
-        Some(hash) => journal.start_embedding(&attempt, hash)?,
-        None => journal.start(&attempt)?,
+    let started = match start {
+        AttemptStart::Signed => match input_hash.as_ref() {
+            Some(hash) => journal.start_embedding(&attempt, hash)?,
+            None => journal.start(&attempt)?,
+        },
+        AttemptStart::DirectWithinLimit { daily_token_limit } => {
+            match journal.start_direct_within_limit(
+                &attempt,
+                input_hash.as_ref(),
+                utc_day_start_ms(chrono::Utc::now().timestamp_millis()),
+                daily_token_limit,
+                DIRECT_EMBEDDING_RESERVATION_TOKENS,
+            )? {
+                DirectStartOutcome::Created(permit) => StartOutcome::Created(permit),
+                DirectStartOutcome::Duplicate => StartOutcome::Duplicate,
+                // Nothing was written, so no settlement is owed.
+                DirectStartOutcome::OverLimit => return Err(AdmissionError::Denied.into()),
+            }
+        }
     };
     if !matches!(&started, StartOutcome::Created(_)) {
         return if input_hash.is_some() {
@@ -513,9 +794,33 @@ where
             return Err(anyhow!("Vertex ADC unavailable before dispatch"));
         }
         Err(error) => {
+            let rejection = error.downcast_ref::<VertexRejectedRequest>();
+            // Vertex refused the request and did not bill it. Releasing the
+            // attempt and its input reservation lets a later request retry.
+            if let Some(rejection) = rejection {
+                if journal
+                    .settle_no_charge(&attempt.attempt_id, &rejection.evidence_ref())
+                    .is_ok()
+                {
+                    if rejection.status != 429 {
+                        return Err(error);
+                    }
+                    // Vertex asks for throttled requests to be retried with
+                    // exponential backoff. The back-off calls the embedder
+                    // again, which starts a new attempt; this settled one is
+                    // never dispatched again.
+                    return Err(ModelError {
+                        message: rejection.to_string(),
+                        retryable: Some(VERTEX_RETRY_OPTIONS),
+                        request_id: rejection.request_id.clone(),
+                    }
+                    .into());
+                }
+            }
             let operation_id = error
                 .downcast_ref::<ModelError>()
-                .and_then(|provider_error| provider_error.request_id.as_deref());
+                .and_then(|provider_error| provider_error.request_id.as_deref())
+                .or_else(|| rejection.and_then(|rejection| rejection.request_id.as_deref()));
             if journal
                 .mark_unknown_with_operation(&attempt.attempt_id, operation_id)
                 .is_err()
@@ -564,9 +869,10 @@ where
 }
 
 /// @cc [label:security;backend] vertex-embedding-admission-boundary
-/// Public embedding, including the typed workspace path, must fail before obtaining ADC or
-/// sending a provider request until a trusted workspace route, fresh CRM admission and durable
-/// attempt journal are integrated.
+/// Public embedding must fail before obtaining ADC or sending a provider request. The typed
+/// workspace path may do either only for an attempt that is durably journaled and admitted:
+/// by fresh CRM admission on a signed workspace route, or, in direct provider mode, by the
+/// journal's daily-limit start for the one configured workspace.
 impl VertexAIEmbedder {
     pub fn new(id: String) -> Self {
         Self {
@@ -648,6 +954,12 @@ impl VertexAIEmbedder {
     }
 
     // Kept private until the admission/journal wrapper can persist and settle usage per attempt.
+    /// @cc [owner:jchen0824,label:security;backend] vertex-complete-4xx-is-rejection
+    /// `request_one` returns `VertexRejectedRequest`, never a retryable
+    /// `ModelError`, for a response whose status is 400 to 499, 429 included,
+    /// and whose body was received in full, and only for such a response. A
+    /// transport error, timeout, body cut short, 3xx, 5xx or invalid 2xx
+    /// response returns another error, never `VertexRejectedRequest`.
     async fn request_one(
         client: &reqwest::Client,
         endpoint: &str,
@@ -680,13 +992,22 @@ impl VertexAIEmbedder {
         } else {
             Some(request_id)
         };
+        if status.is_client_error() {
+            // Only a complete response proves the refusal. A body cut short
+            // leaves the request's outcome unknown.
+            response
+                .bytes()
+                .await
+                .map_err(|_| anyhow!("Vertex embedding transport error"))?;
+            return Err(VertexRejectedRequest {
+                status: status.as_u16(),
+                request_id,
+            }
+            .into());
+        }
         if !status.is_success() {
-            let retryable = if status.as_u16() == 429 || status.is_server_error() {
-                Some(ModelErrorRetryOptions {
-                    sleep: Duration::from_secs(1),
-                    factor: 2,
-                    retries: 2,
-                })
+            let retryable = if status.is_server_error() {
+                Some(VERTEX_RETRY_OPTIONS)
             } else {
                 None
             };
@@ -710,6 +1031,140 @@ impl VertexAIEmbedder {
             }
             .into()
         })
+    }
+
+    /// Shared request checks for one guarded batch: initialized project,
+    /// non-empty inputs, coalesced document inputs and their upsert identity.
+    fn guarded_batch(
+        &self,
+        text: Vec<&str>,
+        task_type: EmbeddingTaskType,
+        extras: Option<Value>,
+    ) -> Result<GuardedBatch> {
+        let project = self
+            .project
+            .as_deref()
+            .ok_or_else(|| anyhow!("Vertex embedder is not initialized"))?;
+        let endpoint = format!(
+            "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{API_MODEL_ID}:embedContent"
+        );
+        #[cfg(test)]
+        let endpoint = self
+            .test_endpoint
+            .as_deref()
+            .unwrap_or(&endpoint)
+            .to_string();
+        let owned_inputs = text.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        if owned_inputs.iter().any(|input| input.trim().is_empty()) {
+            return Err(anyhow!("Vertex embedding input is empty"));
+        }
+        let (inputs, positions) = if task_type == EmbeddingTaskType::RetrievalDocument {
+            coalesce_document_inputs(owned_inputs)
+        } else {
+            let positions = (0..owned_inputs.len()).collect();
+            (owned_inputs, positions)
+        };
+        let upsert_key = if task_type == EmbeddingTaskType::RetrievalDocument {
+            Some(
+                extras
+                    .as_ref()
+                    .and_then(|value| value.get("dust_poc_upsert_key"))
+                    .and_then(Value::as_str)
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| anyhow!("Vertex document embedding requires upsert identity"))?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        Ok(GuardedBatch {
+            endpoint,
+            inputs,
+            positions,
+            upsert_key,
+        })
+    }
+
+    /// @cc [owner:jchen0824,label:security;backend] dust-core-direct-embedding
+    /// Direct provider mode embeds only for the one configured workspace, without
+    /// the signed registry, CRM admission or usage delivery; any other workspace is
+    /// refused before a journal write. Each input's daily-limit check and journal
+    /// start commit in one transaction before its ADC token request or provider
+    /// I/O, and an over-limit input is denied with `AdmissionError::Denied`, no row
+    /// and no provider call. Its journal rows use `DIRECT_POC_TENANT_ID` and route
+    /// `DIRECT_POC_ROUTE_ID`, and are never claimed for delivery. An input that
+    /// Vertex rejects with a complete HTTP 4xx response settles `no_charge`: its
+    /// row no longer holds the daily-limit reservation, and a later request for
+    /// the same input, including the back-off's retry after a 429, starts a new
+    /// attempt under a new daily-limit check.
+    async fn embed_direct(
+        &self,
+        runtime: &CoreDirectVertexRuntime,
+        text: Vec<&str>,
+        task_type: EmbeddingTaskType,
+        extras: Option<Value>,
+        workspace: &VerifiedWorkspace,
+    ) -> Result<Vec<EmbedderVector>> {
+        if workspace.sid() != runtime.workspace_id {
+            return Err(anyhow!("Vertex embedding workspace is not enabled"));
+        }
+        let GuardedBatch {
+            endpoint,
+            inputs,
+            positions,
+            upsert_key,
+        } = self.guarded_batch(text, task_type, extras)?;
+        let route = direct_poc_route(&runtime.workspace_id);
+        let results = collect_guarded_embeddings(inputs, |input| {
+            let token_source = self.token_source.clone();
+            let endpoint = endpoint.clone();
+            let client = self.client.clone();
+            let upsert_key = upsert_key.clone();
+            let route = &route;
+            async move {
+                let input_hash = (task_type == EmbeddingTaskType::RetrievalDocument).then(|| {
+                    embedding_input_hash(
+                        route,
+                        &self.id,
+                        task_type,
+                        upsert_key.as_deref().unwrap_or_default(),
+                        &input,
+                    )
+                });
+                if let Some(hash) = input_hash {
+                    if let Some(vector) = retained_embedding(&runtime.journal, &hash)? {
+                        return Ok(vector);
+                    }
+                }
+                run_guarded_attempt(
+                    &runtime.journal,
+                    route,
+                    &self.id,
+                    &format!("embedding:{}", workspace.sid()),
+                    input_hash,
+                    AttemptStart::DirectWithinLimit {
+                        daily_token_limit: runtime.daily_token_limit,
+                    },
+                    // The daily-limit start is the admission in direct mode.
+                    |_, _, _| async { Ok(()) },
+                    |attempt| async move {
+                        let token = predispatch_token(token_source.as_ref()).await?;
+                        runtime
+                            .journal
+                            .heartbeat_started(&attempt.attempt_id)
+                            .map_err(|_| anyhow!(PreDispatchTokenError))?;
+                        Self::request_one(&client, &endpoint, &token, &input, task_type).await
+                    },
+                )
+                .await
+                .map(|response| response.vector)
+            }
+        })
+        .await;
+        Ok(positioned_vectors(
+            positions,
+            finish_embedding_batch(results, &self.id)?,
+        ))
     }
 
     #[allow(dead_code)]
@@ -766,7 +1221,7 @@ impl Embedder for VertexAIEmbedder {
     }
 
     fn context_size(&self) -> usize {
-        8192
+        CONTEXT_SIZE
     }
     fn embedding_size(&self) -> usize {
         DIMENSIONS
@@ -795,10 +1250,22 @@ impl Embedder for VertexAIEmbedder {
 
     /// @cc [label:security;backend] vertex-embedding-provider-dispatch-gate
     /// Each input pulled before an ambiguous completion is resolved from a
-    /// verified workspace, durably journaled, and admitted before dispatch.
-    /// Repeated document positions reuse that vector without another paid call;
-    /// query positions each have their own attempt. After an ambiguous effect,
-    /// no new inputs are pulled and already-started attempts settle.
+    /// verified workspace, durably journaled, and admitted before dispatch:
+    /// through the signed route and CRM, or, when `DUST_POC_DIRECT_PROVIDER_MODE`
+    /// is `1`, through the direct daily-limit start. A mode value other than unset,
+    /// `0` or `1`, or an incomplete direct configuration, refuses the batch before
+    /// a journal write or provider I/O. Repeated document positions reuse that
+    /// vector without another paid call; query positions each have their own
+    /// attempt. After an ambiguous effect, no new inputs are pulled and
+    /// already-started attempts settle. A Vertex rejection (a complete HTTP 4xx
+    /// response, settled `no_charge`) is not an ambiguous effect: it does not
+    /// stop new inputs from being pulled, and the batch then fails with a
+    /// non-ambiguous error unless another input's effect is ambiguous. That
+    /// error is retryable (a settled 429) only when every failed input's error
+    /// is retryable; any other failure is returned instead. When
+    /// `EmbedderRequest`'s back-off embeds the batch again, a document input
+    /// whose paid vector is retained is not dispatched again, and every other
+    /// input starts a new attempt.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,
@@ -814,47 +1281,23 @@ impl Embedder for VertexAIEmbedder {
         {
             return Err(anyhow!("Vertex embedding provider I/O is disabled"));
         }
+        if direct_provider_mode(std::env::var(DIRECT_PROVIDER_MODE_ENV))? {
+            let runtime = core_direct_vertex_runtime()?;
+            return self
+                .embed_direct(runtime, text, task_type, extras, workspace)
+                .await;
+        }
         let runtime = core_vertex_runtime()?;
         if !runtime.workspaces.iter().any(|id| id == workspace.sid()) {
             return Err(anyhow!("Vertex embedding workspace is not enabled"));
         }
-        let project = self
-            .project
-            .as_deref()
-            .ok_or_else(|| anyhow!("Vertex embedder is not initialized"))?;
-        let endpoint = format!(
-            "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{API_MODEL_ID}:embedContent"
-        );
-        #[cfg(test)]
-        let endpoint = self
-            .test_endpoint
-            .as_deref()
-            .unwrap_or(&endpoint)
-            .to_string();
-        let owned_inputs = text.into_iter().map(str::to_owned).collect::<Vec<_>>();
-        if owned_inputs.iter().any(|input| input.trim().is_empty()) {
-            return Err(anyhow!("Vertex embedding input is empty"));
-        }
-        let (owned_inputs, positions) = if task_type == EmbeddingTaskType::RetrievalDocument {
-            coalesce_document_inputs(owned_inputs)
-        } else {
-            let positions = (0..owned_inputs.len()).collect();
-            (owned_inputs, positions)
-        };
-        let upsert_key = if task_type == EmbeddingTaskType::RetrievalDocument {
-            Some(
-                extras
-                    .as_ref()
-                    .and_then(|value| value.get("dust_poc_upsert_key"))
-                    .and_then(Value::as_str)
-                    .filter(|key| !key.is_empty())
-                    .ok_or_else(|| anyhow!("Vertex document embedding requires upsert identity"))?
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
-        let results = collect_guarded_embeddings(owned_inputs, |input| {
+        let GuardedBatch {
+            endpoint,
+            inputs,
+            positions,
+            upsert_key,
+        } = self.guarded_batch(text, task_type, extras)?;
+        let results = collect_guarded_embeddings(inputs, |input| {
             let token_source = self.token_source.clone();
             let endpoint = endpoint.clone();
             let client = self.client.clone();
@@ -871,18 +1314,7 @@ impl Embedder for VertexAIEmbedder {
                     )
                 });
                 if let Some(hash) = input_hash {
-                    if let Some(vector) =
-                        runtime.journal.cached_embedding(&hash).map_err(|error| {
-                            if error
-                                .downcast_ref::<PaidEmbeddingRecoveryRequired>()
-                                .is_some()
-                            {
-                                anyhow!(AmbiguousVertexEffect)
-                            } else {
-                                error
-                            }
-                        })?
-                    {
+                    if let Some(vector) = retained_embedding(&runtime.journal, &hash)? {
                         return Ok(vector);
                     }
                 }
@@ -893,6 +1325,7 @@ impl Embedder for VertexAIEmbedder {
                     &self.id,
                     &format!("embedding:{}", workspace.sid()),
                     input_hash,
+                    AttemptStart::Signed,
                     |route, attempt, started| async move {
                         runtime
                             .admission
@@ -909,11 +1342,7 @@ impl Embedder for VertexAIEmbedder {
                     |attempt| async move {
                         // ADC is downstream of the per-attempt journal and CRM
                         // admission. A denied tenant must not request a token.
-                        let token =
-                            tokio::time::timeout(Duration::from_secs(30), token_source.token())
-                                .await
-                                .map_err(|_| anyhow!(PreDispatchTokenError))?
-                                .map_err(|_| anyhow!(PreDispatchTokenError))?;
+                        let token = predispatch_token(token_source.as_ref()).await?;
                         runtime
                             .journal
                             .heartbeat_started(&attempt.attempt_id)
@@ -934,11 +1363,10 @@ impl Embedder for VertexAIEmbedder {
             }
         })
         .await;
-        let unique_vectors = finish_embedding_batch(results, &self.id)?;
-        Ok(positions
-            .into_iter()
-            .map(|index| unique_vectors[index].clone())
-            .collect())
+        Ok(positioned_vectors(
+            positions,
+            finish_embedding_batch(results, &self.id)?,
+        ))
     }
 }
 
@@ -1184,6 +1612,7 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, _| async { Err(crate::quota_admission::AdmissionError::Denied.into()) },
             |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
@@ -1206,6 +1635,7 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, started| async move {
                 assert!(matches!(
                     started,
@@ -1242,6 +1672,7 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, _| async { Ok(()) },
             |_| async { Err(anyhow!(PreDispatchTokenError)) },
         )
@@ -1264,6 +1695,7 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, _| async { Ok(()) },
             |_| async { Err(anyhow!("transport timeout")) },
         )
@@ -1277,17 +1709,18 @@ mod tests {
         assert!(unresolved[0].event_envelope.is_none());
 
         let provider_calls_before = provider_calls.load(Ordering::SeqCst);
-        let throttled = run_guarded_attempt(
+        let unavailable = run_guarded_attempt(
             &journal,
             &route,
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, _| async { Ok(()) },
             |_| async {
                 provider_calls.fetch_add(1, Ordering::SeqCst);
                 Err(anyhow!(ModelError {
-                    message: "Vertex embedding HTTP status 429".into(),
+                    message: "Vertex embedding HTTP status 503".into(),
                     retryable: Some(ModelErrorRetryOptions {
                         sleep: Duration::from_secs(1),
                         factor: 2,
@@ -1298,7 +1731,7 @@ mod tests {
             },
         )
         .await;
-        assert!(throttled
+        assert!(unavailable
             .as_ref()
             .err()
             .and_then(|error| error.downcast_ref::<ModelError>())
@@ -1321,6 +1754,7 @@ mod tests {
             MODEL_ID,
             "embedding-test",
             None,
+            AttemptStart::Signed,
             |_, _, _| async { Ok(()) },
             |_| async move {
                 std::fs::remove_dir_all(journal_dir).expect("test operation failed");
@@ -1451,7 +1885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retryable_status_sanitizes_request_id_and_hides_provider_body() {
+    async fn rejected_status_sanitizes_request_id_and_hides_provider_body() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test operation failed");
@@ -1474,11 +1908,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let model_error = error
-            .downcast_ref::<ModelError>()
-            .expect("test operation failed");
-        assert!(model_error.retryable.is_some());
-        assert_eq!(model_error.request_id.as_deref(), Some("abc-123"));
+        let rejection = error
+            .downcast_ref::<VertexRejectedRequest>()
+            .expect("a complete 429 is a rejection");
+        assert_eq!(rejection.status, 429);
+        assert_eq!(rejection.request_id.as_deref(), Some("abc-123"));
+        assert_eq!(rejection.evidence_ref(), "vertex:rejected:429:abc-123");
         let message = error.to_string();
         assert!(!message.contains("private-payload"));
         assert!(!message.contains("secret-token"));
@@ -1568,10 +2003,19 @@ mod tests {
             )
             .await
             .unwrap_err();
-            let model_error = error
-                .downcast_ref::<ModelError>()
-                .expect("test operation failed");
-            assert_eq!(model_error.retryable.is_some(), status == 500);
+            if status == 500 {
+                let model_error = error
+                    .downcast_ref::<ModelError>()
+                    .expect("test operation failed");
+                assert!(model_error.retryable.is_some());
+            } else {
+                assert_eq!(
+                    error
+                        .downcast_ref::<VertexRejectedRequest>()
+                        .map(|rejection| rejection.status),
+                    Some(status)
+                );
+            }
             assert!(!error.to_string().contains("secret"));
             server.await.expect("test operation failed");
         }
@@ -1741,5 +2185,1130 @@ mod tests {
         assert!(maximum.load(Ordering::SeqCst) <= MAX_CONCURRENT_REQUESTS);
         assert!(maximum.load(Ordering::SeqCst) > 1);
         server.await.expect("test operation failed");
+    }
+
+    const DIRECT_WORKSPACE: &str = "workspace-direct";
+
+    struct CountingTokenSource(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl VertexTokenSource for CountingTokenSource {
+        async fn token(&self) -> Result<String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("test-token".to_string())
+        }
+    }
+
+    fn direct_embedder(endpoint: String, token_requests: Arc<AtomicUsize>) -> VertexAIEmbedder {
+        let mut embedder = test_embedder(endpoint, Ok("unused".to_string()));
+        embedder.token_source = Arc::new(CountingTokenSource(token_requests));
+        embedder
+    }
+
+    fn direct_runtime(dir: &std::path::Path, daily_token_limit: u64) -> CoreDirectVertexRuntime {
+        CoreDirectVertexRuntime {
+            journal: CoreUsageJournal::open(dir.join("direct.sqlite"))
+                .expect("test journal failed"),
+            workspace_id: DIRECT_WORKSPACE.to_string(),
+            daily_token_limit,
+        }
+    }
+
+    fn attempt_rows(dir: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(dir.join("direct.sqlite"))
+            .expect("test journal connection failed")
+            .query_row("SELECT count(*) FROM dust_usage_attempts", [], |row| {
+                row.get(0)
+            })
+            .expect("test count failed")
+    }
+
+    fn verified_workspace(sid: &str) -> VerifiedWorkspace {
+        use crate::workspace_assertion::{verify, DataSourcePair, TEST_SECRET_LOCK};
+        let secret = "isolated-dust-core-direct-test-secret-long-enough";
+        let pair = DataSourcePair {
+            project_id: 1,
+            data_source_id: "data-source-1".into(),
+        };
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "aud": "dust-core-vertex-embedding", "iat": now,
+            "exp": now + 60, "workspace_sid": sid,
+            "data_sources": [pair.clone()]
+        });
+        let _guard = TEST_SECRET_LOCK.lock().expect("test assertion secret lock");
+        std::env::set_var("DUST_CORE_WORKSPACE_ASSERTION_SECRET", secret);
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("test token failed");
+        verify(Some(&token), &[pair]).expect("test workspace assertion failed")
+    }
+
+    /// One loopback response to a Vertex embedding request.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// A valid embedding reporting this many prompt tokens.
+        Embedding(u64),
+        /// A complete response with this status and a small error body.
+        Status(u16),
+        /// This status, with the connection closed before the declared body ends.
+        TruncatedStatus(u16),
+        /// The connection closed without any response.
+        Drop,
+    }
+
+    /// Answers the Nth request with `replies[N]`, the last one repeating, and
+    /// counts requests. Each response closes its connection.
+    async fn scripted_server(
+        replies: Vec<Reply>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test operation failed");
+        let address = listener.local_addr().expect("test operation failed");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("test operation failed");
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = socket
+                        .read(&mut chunk)
+                        .await
+                        .expect("test operation failed");
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .expect("test operation failed");
+                    if request.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                let reply = replies[index.min(replies.len() - 1)];
+                let response = match reply {
+                    Reply::Embedding(prompt_token_count) => {
+                        let body = json!({"embedding":{"values":vec![0.5;DIMENSIONS]},"usageMetadata":{"promptTokenCount":prompt_token_count}}).to_string();
+                        format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}", body.len(), body)
+                    }
+                    Reply::Status(status) => {
+                        let body = r#"{"error":{"status":"provider-detail"}}"#;
+                        format!("HTTP/1.1 {status} Error\r\nx-goog-request-id: req-{status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}", body.len())
+                    }
+                    Reply::TruncatedStatus(status) => format!(
+                        "HTTP/1.1 {status} Error\r\nconnection: close\r\ncontent-length: 100\r\n\r\n{{\"error\""
+                    ),
+                    Reply::Drop => String::new(),
+                };
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("test operation failed");
+            }
+        });
+        (format!("http://{address}/embed"), requests, server)
+    }
+
+    /// Answers every request with a valid embedding and counts requests.
+    async fn embedding_server(
+        prompt_token_count: u64,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        scripted_server(vec![Reply::Embedding(prompt_token_count)]).await
+    }
+
+    /// `(state, no_charge_evidence_ref, route_id)` of each attempt, oldest first.
+    fn attempt_states(path: &std::path::Path) -> Vec<(String, Option<String>, String)> {
+        let conn = rusqlite::Connection::open(path).expect("test journal connection failed");
+        let mut statement = conn
+            .prepare(
+                "SELECT state, no_charge_evidence_ref, route_id FROM dust_usage_attempts
+                 ORDER BY created_at_ms, rowid",
+            )
+            .expect("test query failed");
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("test query failed")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("test rows failed");
+        rows
+    }
+
+    fn input_reservations(path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(path)
+            .expect("test journal connection failed")
+            .query_row("SELECT count(*) FROM dust_embedding_results", [], |row| {
+                row.get(0)
+            })
+            .expect("test count failed")
+    }
+
+    #[tokio::test]
+    async fn direct_rejection_settles_no_charge_and_a_retry_starts_a_new_attempt() {
+        for status in [400, 403] {
+            let dir = tempfile::tempdir().expect("test operation failed");
+            let journal_path = dir.path().join("direct.sqlite");
+            // One unsettled attempt would hold the whole daily limit.
+            let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+            let (endpoint, provider_requests, server) =
+                scripted_server(vec![Reply::Status(status), Reply::Embedding(11)]).await;
+            let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+            let workspace = verified_workspace(DIRECT_WORKSPACE);
+            let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+            let embed = || {
+                embedder.embed_direct(
+                    &runtime,
+                    vec!["chunk over Gemini's token limit"],
+                    EmbeddingTaskType::RetrievalDocument,
+                    extras.clone(),
+                    &workspace,
+                )
+            };
+            let error = embed().await.expect_err("Vertex rejected the input");
+            assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_none());
+            assert_eq!(
+                error
+                    .downcast_ref::<VertexRejectedRequest>()
+                    .map(|rejection| rejection.status),
+                Some(status)
+            );
+            assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                attempt_states(&journal_path),
+                vec![(
+                    "no_charge".to_string(),
+                    Some(format!("vertex:rejected:{status}:req-{status}")),
+                    DIRECT_POC_ROUTE_ID.to_string()
+                )]
+            );
+            assert_eq!(input_reservations(&journal_path), 0);
+
+            let retried = embed().await.expect("a retry starts a new attempt");
+            assert_eq!(retried[0].vector, vec![0.5; DIMENSIONS]);
+            assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+            let states = attempt_states(&journal_path);
+            assert_eq!(
+                states
+                    .iter()
+                    .map(|(state, _, _)| state.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["no_charge", "exact"]
+            );
+            assert_eq!(input_reservations(&journal_path), 1);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_ambiguous_failures_keep_the_reservation_without_another_call() {
+        for reply in [
+            Reply::Status(500),
+            Reply::Status(503),
+            Reply::Status(307),
+            Reply::TruncatedStatus(400),
+            Reply::Drop,
+        ] {
+            let dir = tempfile::tempdir().expect("test operation failed");
+            let journal_path = dir.path().join("direct.sqlite");
+            let runtime = direct_runtime(dir.path(), 500_000);
+            let (endpoint, provider_requests, server) =
+                scripted_server(vec![reply, Reply::Embedding(11)]).await;
+            let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+            let workspace = verified_workspace(DIRECT_WORKSPACE);
+            let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+            for _ in 0..2 {
+                let error = embedder
+                    .embed_direct(
+                        &runtime,
+                        vec!["chunk"],
+                        EmbeddingTaskType::RetrievalDocument,
+                        extras.clone(),
+                        &workspace,
+                    )
+                    .await
+                    .expect_err("an unproven outcome stays ambiguous");
+                assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_some());
+                // The retry finds the reservation and never calls Vertex.
+                assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(
+                attempt_states(&journal_path),
+                vec![("unknown".to_string(), None, DIRECT_POC_ROUTE_ID.to_string())]
+            );
+            assert_eq!(input_reservations(&journal_path), 1);
+            server.abort();
+        }
+    }
+
+    fn signed_route(tenant_id: &str) -> CoreTenantRoute {
+        CoreTenantRoute {
+            tenant_id: tenant_id.into(),
+            workspace_id: "workspace-a".into(),
+            private_route: "https://crm-a.internal".into(),
+            admission_url: "https://crm-a.internal/internal/usage/dust/admission".into(),
+            usage_ingest_url: "https://crm-a.internal/internal/usage/events".into(),
+            core_credential_ref: format!(
+                "/var/run/secrets/dust/tenants/{tenant_id}/dust-core-usage-key"
+            ),
+            journal_target: format!("tenant:{tenant_id}:dust-usage"),
+            revision: 7,
+            key_id: "pin-a".into(),
+        }
+    }
+
+    /// One signed attempt for `input_hash` that sends a document chunk to
+    /// `endpoint` with the production client, which follows no redirect.
+    async fn signed_loopback_attempt(
+        journal: &CoreUsageJournal,
+        route: &CoreTenantRoute,
+        endpoint: &str,
+        input_hash: [u8; 32],
+    ) -> Result<VertexEmbeddingResponse> {
+        run_guarded_attempt(
+            journal,
+            route,
+            MODEL_ID,
+            "embedding:workspace-a",
+            Some(input_hash),
+            AttemptStart::Signed,
+            |_, _, _| async { Ok(()) },
+            |_| async move {
+                VertexAIEmbedder::request_one(
+                    &VertexAIEmbedder::new(MODEL_ID.to_owned()).client,
+                    endpoint,
+                    "test-token",
+                    "chunk",
+                    EmbeddingTaskType::RetrievalDocument,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn signed_rejection_settles_no_charge_but_a_server_error_stays_unresolved() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        let route = signed_route("tenant-a");
+        let (endpoint, provider_requests, server) = scripted_server(vec![
+            Reply::Status(400),
+            Reply::Embedding(7),
+            Reply::Status(500),
+        ])
+        .await;
+        let rejected = signed_loopback_attempt(&journal, &route, &endpoint, [1; 32])
+            .await
+            .expect_err("Vertex rejected the input");
+        assert!(rejected.downcast_ref::<VertexRejectedRequest>().is_some());
+        // A no-charge row owes CRM no delivery, review or unresolved count.
+        assert!(journal
+            .claim_due("signed-rejection", 100)
+            .expect("test claim failed")
+            .is_empty());
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            0
+        );
+        assert_eq!(input_reservations(&journal_path), 0);
+
+        let retried = signed_loopback_attempt(&journal, &route, &endpoint, [1; 32])
+            .await
+            .expect("a retry starts a new attempt");
+        assert_eq!(retried.vector, vec![0.5; DIMENSIONS]);
+        let failed = signed_loopback_attempt(&journal, &route, &endpoint, [2; 32])
+            .await
+            .expect_err("a server error is ambiguous");
+        assert!(failed.downcast_ref::<AmbiguousVertexEffect>().is_some());
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            attempt_states(&journal_path)
+                .into_iter()
+                .map(|(state, evidence, _)| (state, evidence))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "no_charge".to_string(),
+                    Some("vertex:rejected:400:req-400".to_string())
+                ),
+                ("exact".to_string(), None),
+                ("unknown".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            1
+        );
+        server.abort();
+    }
+
+    /// `EmbedderRequest::execute`'s retry loop, without its logging.
+    async fn with_back_off<F, O>(call: impl FnMut() -> F) -> Result<O>
+    where
+        F: Future<Output = Result<O>>,
+    {
+        crate::providers::provider::with_retryable_back_off(call, |_, _, _| {}, |_| {}).await
+    }
+
+    fn throttled_state() -> (String, Option<String>, String) {
+        (
+            "no_charge".to_string(),
+            Some("vertex:rejected:429:req-429".to_string()),
+            DIRECT_POC_ROUTE_ID.to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn throttled_input_is_retried_by_the_back_off_as_a_new_attempt() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        // One unsettled attempt would hold the whole daily limit, so the retry
+        // starts only because the throttled attempt released its reservation.
+        let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(429), Reply::Embedding(11)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let vectors = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect("the retry succeeds");
+        assert_eq!(vectors[0].vector, vec![0.5; DIMENSIONS]);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            attempt_states(&journal_path),
+            vec![
+                throttled_state(),
+                ("exact".to_string(), None, DIRECT_POC_ROUTE_ID.to_string())
+            ]
+        );
+        assert_eq!(input_reservations(&journal_path), 1);
+        server.abort();
+
+        // A signed retry is admitted again as a new attempt.
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        let route = signed_route("tenant-a");
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(429), Reply::Embedding(7)]).await;
+        let admissions = AtomicUsize::new(0);
+        let (admissions, endpoint) = (&admissions, endpoint.as_str());
+        with_back_off(|| {
+            run_guarded_attempt(
+                &journal,
+                &route,
+                MODEL_ID,
+                "embedding:workspace-a",
+                Some([1; 32]),
+                AttemptStart::Signed,
+                move |_, _, _| async move {
+                    admissions.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                move |_| async move {
+                    VertexAIEmbedder::request_one(
+                        &VertexAIEmbedder::new(MODEL_ID.to_owned()).client,
+                        endpoint,
+                        "test-token",
+                        "chunk",
+                        EmbeddingTaskType::RetrievalDocument,
+                    )
+                    .await
+                },
+            )
+        })
+        .await
+        .expect("the signed retry succeeds");
+        assert_eq!(admissions.load(Ordering::SeqCst), 2);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            attempt_states(&journal_path)
+                .into_iter()
+                .map(|(state, evidence, _)| (state, evidence))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "no_charge".to_string(),
+                    Some("vertex:rejected:429:req-429".to_string())
+                ),
+                ("exact".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn throttled_batch_retry_reuses_paid_inputs() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        // Whichever input arrives second is throttled once.
+        let (endpoint, provider_requests, server) = scripted_server(vec![
+            Reply::Embedding(11),
+            Reply::Status(429),
+            Reply::Embedding(11),
+        ])
+        .await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let vectors = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk a", "chunk b"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect("the retry succeeds");
+        assert_eq!(vectors.len(), 2);
+        // The paid input is served from the journal, not dispatched again.
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        let mut states = attempt_states(&journal_path)
+            .into_iter()
+            .map(|(state, _, _)| state)
+            .collect::<Vec<_>>();
+        states.sort();
+        assert_eq!(states, vec!["exact", "exact", "no_charge"]);
+        assert_eq!(input_reservations(&journal_path), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_fails_after_the_bounded_retries_holding_nothing() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let (endpoint, provider_requests, server) = scripted_server(vec![Reply::Status(429)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let waits = Mutex::new(Vec::new());
+        let error = crate::providers::provider::with_retryable_back_off(
+            || {
+                embedder.embed_direct(
+                    &runtime,
+                    vec!["chunk"],
+                    EmbeddingTaskType::RetrievalDocument,
+                    extras.clone(),
+                    &workspace,
+                )
+            },
+            |_, wait, _| waits.lock().expect("test operation failed").push(*wait),
+            |_| {},
+        )
+        .await
+        .expect_err("throttling persists");
+        assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_none());
+        let message = error.to_string();
+        assert!(message.starts_with("Too many retries (2): "));
+        assert!(message.contains("request_id=req-429"));
+        assert!(!message.contains("provider-detail"));
+        // One request, then `VERTEX_RETRY_OPTIONS.retries` (2) retries, after
+        // 1 s and then 2 s; the last throttled request is not followed by a wait.
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            waits.into_inner().expect("test operation failed"),
+            vec![Duration::from_secs(1), Duration::from_secs(2)]
+        );
+        assert_eq!(attempt_states(&journal_path), vec![throttled_state(); 3]);
+        assert_eq!(input_reservations(&journal_path), 0);
+        // No reservation is held: a start that needs the whole limit fits.
+        let route = direct_poc_route(DIRECT_WORKSPACE);
+        let next = CoreUsageAttempt {
+            attempt_id: "next-attempt".into(),
+            provider_request_id: "next-request".into(),
+            tenant_id: route.tenant_id.clone(),
+            workspace_id: route.workspace_id.clone(),
+            conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
+            model: MODEL_ID.into(),
+        };
+        assert!(matches!(
+            runtime
+                .journal
+                .start_direct_within_limit(
+                    &next,
+                    None,
+                    utc_day_start_ms(chrono::Utc::now().timestamp_millis()),
+                    runtime.daily_token_limit,
+                    DIRECT_EMBEDDING_RESERVATION_TOKENS,
+                )
+                .expect("test start failed"),
+            DirectStartOutcome::Created(_)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejection_other_than_throttling_is_not_retried() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(400), Reply::Embedding(11)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let error = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect_err("Vertex rejected the input");
+        assert_eq!(
+            error
+                .downcast_ref::<VertexRejectedRequest>()
+                .map(|rejection| rejection.status),
+            Some(400)
+        );
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt_states(&journal_path).len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn throttled_retry_checks_the_daily_limit_again() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let runtime = direct_runtime(dir.path(), 2 * DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let route = direct_poc_route(DIRECT_WORKSPACE);
+        let since_ms = utc_day_start_ms(chrono::Utc::now().timestamp_millis());
+        let held = CoreUsageAttempt {
+            attempt_id: "held-attempt".into(),
+            provider_request_id: "held-request".into(),
+            tenant_id: route.tenant_id.clone(),
+            workspace_id: route.workspace_id.clone(),
+            conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
+            model: MODEL_ID.into(),
+        };
+        let provider_calls = AtomicUsize::new(0);
+        let (runtime, route, held, provider_calls) = (&runtime, &route, &held, &provider_calls);
+        let error = with_back_off(|| {
+            run_guarded_attempt(
+                &runtime.journal,
+                route,
+                MODEL_ID,
+                "embedding:workspace-direct",
+                None,
+                AttemptStart::DirectWithinLimit {
+                    daily_token_limit: runtime.daily_token_limit,
+                },
+                |_, _, _| async { Ok(()) },
+                move |_| async move {
+                    provider_calls.fetch_add(1, Ordering::SeqCst);
+                    // While this request is in flight, another one settles
+                    // more than the rest of the day's limit.
+                    assert!(matches!(
+                        runtime
+                            .journal
+                            .start_direct_within_limit(
+                                held,
+                                None,
+                                since_ms,
+                                runtime.daily_token_limit,
+                                DIRECT_EMBEDDING_RESERVATION_TOKENS,
+                            )
+                            .expect("test start failed"),
+                        DirectStartOutcome::Created(_)
+                    ));
+                    runtime
+                        .journal
+                        .settle_exact(
+                            held,
+                            "client:held-request",
+                            EmbeddingUsage {
+                                input_tokens: CONTEXT_SIZE as u32 + 1,
+                            },
+                        )
+                        .expect("test settlement failed");
+                    Err(VertexRejectedRequest {
+                        status: 429,
+                        request_id: None,
+                    }
+                    .into())
+                },
+            )
+        })
+        .await
+        .expect_err("the retry is over the limit");
+        assert_eq!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(&AdmissionError::Denied)
+        );
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt_rows(dir.path()), 2);
+    }
+
+    #[test]
+    fn batch_error_is_retryable_only_when_every_failure_is() {
+        let throttled = || -> anyhow::Error {
+            ModelError {
+                message: "throttled".into(),
+                retryable: Some(VERTEX_RETRY_OPTIONS),
+                request_id: None,
+            }
+            .into()
+        };
+        let rejected = || -> anyhow::Error {
+            VertexRejectedRequest {
+                status: 400,
+                request_id: None,
+            }
+            .into()
+        };
+        for results in [
+            vec![Err(throttled()), Err(rejected())],
+            vec![Err(rejected()), Err(throttled())],
+        ] {
+            let error = finish_embedding_batch(results, MODEL_ID).expect_err("failed batch");
+            assert_eq!(
+                error
+                    .downcast_ref::<VertexRejectedRequest>()
+                    .map(|rejection| rejection.status),
+                Some(400)
+            );
+        }
+        let error =
+            finish_embedding_batch(vec![Ok(vec![0.0; DIMENSIONS]), Err(throttled())], MODEL_ID)
+                .expect_err("throttled batch");
+        assert!(error
+            .downcast_ref::<ModelError>()
+            .is_some_and(|model_error| model_error.retryable.is_some()));
+    }
+
+    #[tokio::test]
+    async fn signed_attempt_route_stays_numeric_for_the_direct_tenant_id() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        // An existing signed registry may name a tenant `poc-direct`.
+        let route = signed_route(DIRECT_POC_TENANT_ID);
+        let (endpoint, _, server) = embedding_server(7).await;
+        signed_loopback_attempt(&journal, &route, &endpoint, [3; 32])
+            .await
+            .expect("signed attempt of the poc-direct tenant");
+        let claims = journal
+            .claim_due("signed-direct-tenant", 100)
+            .expect("test claim failed");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(
+            (claims[0].state.as_str(), claims[0].route_id.as_str()),
+            ("exact", "poc-direct:7")
+        );
+        assert_ne!(claims[0].route_id, DIRECT_POC_ROUTE_ID);
+        server.abort();
+    }
+
+    #[test]
+    fn direct_provider_mode_accepts_only_unset_zero_or_one() {
+        use std::env::VarError;
+        assert!(!direct_provider_mode(Err(VarError::NotPresent)).expect("unset mode"));
+        assert!(!direct_provider_mode(Ok("0".into())).expect("disabled mode"));
+        assert!(direct_provider_mode(Ok("1".into())).expect("enabled mode"));
+        for value in ["", "true", "on", "2", "01", " 1", "1 "] {
+            assert!(direct_provider_mode(Ok(value.into())).is_err());
+        }
+        assert!(direct_provider_mode(Err(VarError::NotUnicode("1".into()))).is_err());
+    }
+
+    #[test]
+    fn direct_runtime_configuration_fails_closed_before_opening_the_journal() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let build = |overrides: &[(&str, Option<&str>)], journal: String| {
+            let mut env = HashMap::from([
+                ("DUST_POC_DIRECT_WORKSPACE_ID", DIRECT_WORKSPACE.to_string()),
+                (
+                    "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                    "500000".to_string(),
+                ),
+                ("DUST_CORE_USAGE_JOURNAL_PATH", journal),
+            ]);
+            for (name, value) in overrides {
+                match value {
+                    Some(value) => env.insert(name, value.to_string()),
+                    None => env.remove(name),
+                };
+            }
+            CoreDirectVertexRuntime::from_lookup(|name| env.get(name).cloned())
+        };
+        // No signed registry variable or DUST_POC_WORKSPACE_IDS is supplied.
+        let runtime = build(&[], path("valid.sqlite")).expect("valid direct configuration");
+        assert_eq!(
+            (runtime.workspace_id.as_str(), runtime.daily_token_limit),
+            (DIRECT_WORKSPACE, 500_000)
+        );
+        let longest = "w".repeat(128);
+        for valid in [
+            ("DUST_POC_DIRECT_WORKSPACE_ID", longest.as_str()),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", "8192"),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", "1000000000"),
+        ] {
+            assert!(build(&[(valid.0, Some(valid.1))], path("valid.sqlite")).is_ok());
+        }
+
+        let too_long = "w".repeat(129);
+        let refused = dir.path().join("refused.sqlite");
+        for invalid in [
+            ("DUST_POC_DIRECT_WORKSPACE_ID", None),
+            ("DUST_POC_DIRECT_WORKSPACE_ID", Some("")),
+            ("DUST_POC_DIRECT_WORKSPACE_ID", Some("workspace a")),
+            ("DUST_POC_DIRECT_WORKSPACE_ID", Some("workspace/a")),
+            ("DUST_POC_DIRECT_WORKSPACE_ID", Some("wörkspace")),
+            ("DUST_POC_DIRECT_WORKSPACE_ID", Some(too_long.as_str())),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", None),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", Some("")),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", Some("8191")),
+            (
+                "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                Some("1000000001"),
+            ),
+            (
+                "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                Some("+500000"),
+            ),
+            (
+                "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                Some(" 500000"),
+            ),
+            (
+                "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                Some("500000.0"),
+            ),
+            ("DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT", Some("-1")),
+            (
+                "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+                Some("99999999999999999999999"),
+            ),
+            ("DUST_CORE_USAGE_JOURNAL_PATH", None),
+            ("DUST_CORE_USAGE_JOURNAL_PATH", Some("")),
+            (
+                "DUST_CORE_USAGE_JOURNAL_PATH",
+                Some("direct-relative.sqlite"),
+            ),
+        ] {
+            assert!(
+                build(&[invalid], refused.display().to_string()).is_err(),
+                "{invalid:?} must fail closed"
+            );
+            assert!(!refused.exists(), "{invalid:?} opened the journal");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_mode_configuration_errors_refuse_embedding_before_any_io() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for name in [
+                    "DUST_POC_MODE",
+                    "DUST_CORE_VERTEX_PROVIDER_IO_ENABLED",
+                    DIRECT_PROVIDER_MODE_ENV,
+                ] {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let token_requests = Arc::new(AtomicUsize::new(0));
+        let embedder = direct_embedder(
+            "http://127.0.0.1:1/unreachable".to_string(),
+            token_requests.clone(),
+        );
+        let _env = EnvGuard;
+        for name in [
+            "DUST_POC_DIRECT_WORKSPACE_ID",
+            "DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT",
+            "DUST_CORE_USAGE_JOURNAL_PATH",
+        ] {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("DUST_POC_MODE", "1");
+        std::env::set_var("DUST_CORE_VERTEX_PROVIDER_IO_ENABLED", "1");
+        for (mode, expected) in [
+            (
+                "true",
+                "Core Vertex direct provider mode configuration unavailable",
+            ),
+            (
+                "",
+                "Core Vertex direct provider mode configuration unavailable",
+            ),
+            ("1", "Core Vertex direct runtime configuration unavailable"),
+        ] {
+            std::env::set_var(DIRECT_PROVIDER_MODE_ENV, mode);
+            let error = embedder
+                .embed_with_workspace(
+                    vec!["sensitive"],
+                    EmbeddingTaskType::RetrievalQuery,
+                    None,
+                    Some(&workspace),
+                )
+                .await
+                .expect_err("misconfigured direct mode must fail closed");
+            assert_eq!(error.to_string(), expected);
+        }
+        assert_eq!(token_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_mode_refuses_other_workspace_before_journal_write() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        let token_requests = Arc::new(AtomicUsize::new(0));
+        let embedder = direct_embedder(
+            "http://127.0.0.1:1/unreachable".to_string(),
+            token_requests.clone(),
+        );
+        let error = embedder
+            .embed_direct(
+                &runtime,
+                vec!["sensitive"],
+                EmbeddingTaskType::RetrievalQuery,
+                None,
+                &verified_workspace("workspace-other"),
+            )
+            .await
+            .expect_err("other workspace must be refused");
+        assert_eq!(
+            error.to_string(),
+            "Vertex embedding workspace is not enabled"
+        );
+        assert_eq!(attempt_rows(dir.path()), 0);
+        assert_eq!(token_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_over_limit_is_denied_without_a_row_or_provider_io() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        // An unsettled attempt already holds the whole daily limit.
+        let route = direct_poc_route(DIRECT_WORKSPACE);
+        let held = CoreUsageAttempt {
+            attempt_id: "held-attempt".into(),
+            provider_request_id: "held-request".into(),
+            tenant_id: route.tenant_id.clone(),
+            workspace_id: route.workspace_id.clone(),
+            conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
+            model: MODEL_ID.into(),
+        };
+        assert!(matches!(
+            runtime
+                .journal
+                .start_direct_within_limit(
+                    &held,
+                    None,
+                    utc_day_start_ms(chrono::Utc::now().timestamp_millis()),
+                    runtime.daily_token_limit,
+                    DIRECT_EMBEDDING_RESERVATION_TOKENS,
+                )
+                .expect("test start failed"),
+            DirectStartOutcome::Created(_)
+        ));
+        let token_requests = Arc::new(AtomicUsize::new(0));
+        let embedder = direct_embedder(
+            "http://127.0.0.1:1/unreachable".to_string(),
+            token_requests.clone(),
+        );
+        let error = embedder
+            .embed_direct(
+                &runtime,
+                vec!["query"],
+                EmbeddingTaskType::RetrievalQuery,
+                None,
+                &verified_workspace(DIRECT_WORKSPACE),
+            )
+            .await
+            .expect_err("over-limit input must be denied");
+        assert_eq!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(&AdmissionError::Denied)
+        );
+        assert_eq!(attempt_rows(dir.path()), 1);
+        assert_eq!(token_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_success_settles_exact_tokens_and_reuses_the_paid_vector() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        let (endpoint, provider_requests, server) = embedding_server(11).await;
+        let token_requests = Arc::new(AtomicUsize::new(0));
+        let embedder = direct_embedder(endpoint, token_requests.clone());
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let first = embedder
+            .embed_direct(
+                &runtime,
+                vec!["repeated chunk", "repeated chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+            .await
+            .expect("direct embedding failed");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].vector, vec![0.5; DIMENSIONS]);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+        let settled: (String, String, String, String) =
+            rusqlite::Connection::open(dir.path().join("direct.sqlite"))
+                .expect("test journal connection failed")
+                .query_row(
+                    "SELECT tenant_id, route_id, state,
+                            json_extract(event_envelope, '$.input_tokens')
+                     FROM dust_usage_attempts",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("test settled row failed");
+        assert_eq!(
+            settled,
+            (
+                DIRECT_POC_TENANT_ID.to_string(),
+                DIRECT_POC_ROUTE_ID.to_string(),
+                "exact".to_string(),
+                "11".to_string()
+            )
+        );
+
+        let second = embedder
+            .embed_direct(
+                &runtime,
+                vec!["repeated chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras,
+                &workspace,
+            )
+            .await
+            .expect("retained direct embedding failed");
+        assert_eq!(second[0].vector, first[0].vector);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(token_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt_rows(dir.path()), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn direct_mode_without_signer_does_not_start_the_reconciler() {
+        let env = |signer_url: Option<&'static str>| {
+            move |name: &str| match (name, signer_url) {
+                ("DUST_POC_MODE", _) | (DIRECT_PROVIDER_MODE_ENV, _) => Ok("1".to_string()),
+                ("DUST_CORE_REGISTRY_SIGNER_URL", Some(url)) => Ok(url.to_string()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        };
+        assert!(tokio::time::timeout(
+            Duration::from_secs(1),
+            run_core_usage_reconciler_with(env(None))
+        )
+        .await
+        .is_ok());
+        // With a signer, signed rows still owe delivery, so the loops run.
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            run_core_usage_reconciler_with(env(Some(
+                "https://registry.internal/internal/dust/registry/bundle"
+            ))),
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_direct_mode_does_not_start_the_reconciler() {
+        use std::env::VarError;
+        let env = |mode: Result<&'static str, VarError>, signer_url: Option<&'static str>| {
+            move |name: &str| match (name, signer_url) {
+                ("DUST_POC_MODE", _) => Ok("1".to_string()),
+                (DIRECT_PROVIDER_MODE_ENV, _) => mode.clone().map(str::to_string),
+                ("DUST_CORE_REGISTRY_SIGNER_URL", Some(url)) => Ok(url.to_string()),
+                _ => Err(VarError::NotPresent),
+            }
+        };
+        let signer_urls = [
+            None,
+            Some("https://registry.internal/internal/dust/registry/bundle"),
+        ];
+        for mode in [Ok("true"), Ok(""), Err(VarError::NotUnicode("1".into()))] {
+            for signer_url in signer_urls {
+                assert!(tokio::time::timeout(
+                    Duration::from_secs(1),
+                    run_core_usage_reconciler_with(env(mode.clone(), signer_url)),
+                )
+                .await
+                .is_ok());
+            }
+        }
+        // Unset or `0` is signed mode, whose loops run with or without a signer.
+        for mode in [Err(VarError::NotPresent), Ok("0")] {
+            for signer_url in signer_urls {
+                assert!(tokio::time::timeout(
+                    Duration::from_millis(50),
+                    run_core_usage_reconciler_with(env(mode.clone(), signer_url)),
+                )
+                .await
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn direct_limit_window_starts_at_utc_midnight() {
+        use chrono::TimeZone;
+        let midnight_ms = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 4, 0, 0, 0)
+            .single()
+            .expect("test time failed")
+            .timestamp_millis();
+        assert_eq!(utc_day_start_ms(midnight_ms), midnight_ms);
+        assert_eq!(utc_day_start_ms(midnight_ms + MS_PER_DAY - 1), midnight_ms);
+        assert_eq!(utc_day_start_ms(midnight_ms - 1), midnight_ms - MS_PER_DAY);
     }
 }

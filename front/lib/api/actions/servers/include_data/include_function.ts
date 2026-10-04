@@ -16,6 +16,10 @@ import {
 import { getRefs } from "@app/lib/api/assistant/citations";
 import config from "@app/lib/api/config";
 import { createCoreWorkspaceAssertionsForSingles } from "@app/lib/api/core_workspace_assertion";
+import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import logger from "@app/logger/logger";
@@ -119,6 +123,11 @@ export async function runIncludeDataRetrieval(
   );
 
   if (searchResults.isErr()) {
+    if (isCoreQuotaExceededError(searchResults.error)) {
+      return new Err(
+        new MCPError(EMBEDDING_QUOTA_EXCEEDED_MESSAGE, { tracked: false })
+      );
+    }
     return new Err(new MCPError(searchResults.error.message));
   }
 

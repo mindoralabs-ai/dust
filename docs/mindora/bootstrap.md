@@ -29,8 +29,8 @@ Core API and SQLite worker intentionally share one image and select different
 commands at deployment. The connectors API and the connectors workers also share
 one image. Frame sandbox state is persistent state mounted into a
 sandbox, not another Dust-built service image. E2B and the Temporal, Redis,
-Qdrant, and Elasticsearch images are separate qualification inputs and are not
-silently substituted by this build.
+Qdrant, Elasticsearch, and Apache Tika images are separate qualification inputs
+and are not silently substituted by this build.
 
 ### Initialize a fresh Core database
 
@@ -104,6 +104,73 @@ MCP opt-out in the runtime PR does not disable employee login.
 This packaging PR creates images; it does not prove the selected WorkOS environment,
 worker queues, session revocation or full runtime have been configured or tested.
 
+### Configure direct provider mode
+
+The POC serves one Dust workspace in direct provider mode: Front and Core call
+Vertex AI for that workspace without the signed tenant registry or CRM
+admission. Provide secrets through the deployment's secret-aware mechanism,
+never on the command line.
+
+| Role | Required environment |
+|---|---|
+| `front_api`, `front_workers` | `DUST_POC_MODE=1`, `DUST_POC_DIRECT_PROVIDER_MODE=1`, `DUST_POC_DIRECT_WORKSPACE_ID`, `DUST_POC_DIRECT_DAILY_TOKEN_LIMIT`, `DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED=1`, `DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED=1`, `DUST_CORE_WORKSPACE_ASSERTION_SECRET`, `TEXT_EXTRACTION_URL` |
+| `core_api` | `DUST_POC_MODE=1`, `DUST_CORE_VERTEX_PROVIDER_IO_ENABLED=1`, `DUST_POC_DIRECT_PROVIDER_MODE=1`, `DUST_POC_DIRECT_WORKSPACE_ID`, `DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT`, `DUST_CORE_USAGE_JOURNAL_PATH`, `DUST_CORE_WORKSPACE_ASSERTION_SECRET`, `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION=global` |
+
+`DUST_POC_DIRECT_WORKSPACE_ID` is the served workspace's sId: 1 to 128 letters,
+digits, `-` or `_`. Front and Core need the same value. While it is malformed,
+Front refuses every generation and every Pod or data source creation.
+
+`DUST_FRONT_VERTEX_PROVIDER_IO_ENABLED=1` arms Front's generation provider
+switch. `DUST_POC_DIRECT_DAILY_TOKEN_LIMIT` caps the workspace's generation
+input and output tokens per UTC day. Each unsettled attempt reserves 64,000
+tokens, so Front refuses every generation when the limit is below 64,000.
+
+`DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED=1` makes the workspace's new Pods
+and data sources embed with Vertex. Only a workspace member's own request
+selects Vertex. If the switch is unset or `0`, or the caller is an internal
+admin or a non-member, creating one in that workspace fails before Core creates
+a project. An operator can still repair a Pod whose Core data source exists.
+Other workspaces keep their embedding provider.
+
+Creating a Vertex Pod or data source, or relocating a Vertex data source and its
+documents to another region, needs no OpenAI embedding key. On a strict BYOK
+plan, one that is not `FREE_BYOK_TRANSITIONING` and lacks the `use_dust_keys`
+flag, any other document upsert or search does need one, even in a Vertex data
+source: the workspace must have an OpenAI key in its provider settings, which
+Front sends as `OPENAI_EMBEDDING_API_KEY`. Non-BYOK plans never need one.
+
+`DUST_CORE_WORKSPACE_ASSERTION_SECRET` must have the same value, at least 32
+characters, on Front and Core. Front signs its Core search and upsert requests
+with it, and Core refuses Vertex embedding without a valid assertion.
+
+`DUST_CORE_DIRECT_EMBEDDING_DAILY_TOKEN_LIMIT` is Core's daily Vertex embedding
+token limit for the workspace, per UTC day: plain digits, from 8,192 to
+1,000,000,000. Core counts the input tokens Vertex reports for settled requests,
+plus 8,192 tokens for each request not yet settled, which is
+`gemini-embedding-2`'s input limit. A request that Vertex refuses with an HTTP
+4xx status, such as text that Gemini counts as over that limit, settles with no
+tokens, and a retry sends a new request. When Vertex answers `429` (throttling),
+Core itself retries up to twice, after 1 and then 2 seconds, each time as a new
+request checked against the limit. One whose outcome Core cannot tell,
+such as a timeout or a 5xx status, stays unsettled. A request that would exceed
+the limit is refused with `429 quota_exceeded` before any token or Vertex
+request. It is a separate budget from Front's generation limit.
+`DUST_CORE_USAGE_JOURNAL_PATH` is an absolute path on a volume retained across
+restarts and rollouts: Core journals each embedding request there and counts the
+daily limit from that journal, so run one Core replica on that volume. Leave
+`DUST_CORE_REGISTRY_SIGNER_URL` unset: Core's signed usage reconciler then stays
+off. `VERTEX_AI_PROJECT_ID` is the project Core calls Vertex in, with
+credentials from the pod's Workload Identity.
+
+Front's direct mode reads neither `DUST_POC_WORKSPACE_IDS` nor the
+`DUST_FRONT_REGISTRY_*` signer settings. Leave `DUST_FRONT_REGISTRY_SIGNER_URL`
+unset: when it is set, the Front workers also reconcile signed usage, which
+needs the complete signed registry configuration.
+
+`TEXT_EXTRACTION_URL` is the base URL of the POC's Tika server, described with
+the connectors workers below. Front sends uploaded documents to it to extract
+their text, with OCR.
+
 ### Run the connectors API and workers
 
 Both connectors roles run from `/app/connectors` in the connectors image with
@@ -129,8 +196,10 @@ value.
 `TEXT_EXTRACTION_URL` is the base URL of an Apache Tika server. The worker sends
 the PDF, Word and PowerPoint files of a project mount to its `/tika` endpoints to
 extract their text; it skips spreadsheets. The connectors image does not include
-Tika, and Tika is outside the POC's scope, so the POC runs no Tika server. Set the
-variable anyway:
+Tika. The POC runs an internal Apache Tika 3.2.3 server from the `-full` image,
+`apache/tika:3.2.3.0-full`, with the repository's `tika-config.xml`, as
+upstream's local stack in `docker-compose.yml` does on port 9998. Set the
+variable to that server's base URL:
 
 - When it is unset, the worker still starts and `/readyz` returns 200, but the
   first such file makes the mount-file sync activity throw. Temporal retries that
@@ -138,10 +207,6 @@ variable anyway:
 - When no Tika server answers at its URL, the worker skips each such file with a
   warning after three attempts. Those files are not indexed, and the rest of the
   project syncs.
-
-To index those files, run a Tika server and set the variable to its URL. Upstream's
-local stack in `docker-compose.yml` runs `apache/tika:3.2.3.0-full` with the
-repository's `tika-config.xml` on port 9998.
 
 `slack` and `slack_bot` share the `slack` worker, its workflows and activities, and
 much other code, so `CONNECTORS_ENABLED_PROVIDERS` must enable both or neither.

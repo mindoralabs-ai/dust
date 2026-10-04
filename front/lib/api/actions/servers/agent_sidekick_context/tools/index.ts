@@ -40,6 +40,10 @@ import {
 } from "@app/lib/api/assistant/workspace_capabilities";
 import config from "@app/lib/api/config";
 import { prepareCoreWorkspaceAssertionsForBatches } from "@app/lib/api/core_workspace_assertion";
+import {
+  EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+  isCoreQuotaExceededError,
+} from "@app/lib/api/embedding_quota";
 import { getLlmCredentials } from "@app/lib/api/provider_credentials";
 import type { Authenticator } from "@app/lib/auth";
 import { getDisplayNameForDataSource } from "@app/lib/data_sources";
@@ -1321,6 +1325,11 @@ const handlers: ToolHandlers<typeof AGENT_SIDEKICK_CONTEXT_TOOLS_METADATA> = {
     );
 
     if (searchResults.isErr()) {
+      if (isCoreQuotaExceededError(searchResults.error)) {
+        return new Err(
+          new MCPError(EMBEDDING_QUOTA_EXCEEDED_MESSAGE, { tracked: false })
+        );
+      }
       return new Err(
         new MCPError(
           `Failed to search knowledge: ${searchResults.error.message}`

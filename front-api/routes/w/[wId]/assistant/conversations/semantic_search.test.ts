@@ -6,6 +6,7 @@ vi.mock("@app/lib/lock", () => ({
   }),
 }));
 
+import { EMBEDDING_QUOTA_EXCEEDED_MESSAGE } from "@app/lib/api/embedding_quota";
 import { createDataSourceAndConnectorForProject } from "@app/lib/api/projects/connector";
 import { Authenticator, getOrCreateSystemApiKey } from "@app/lib/auth";
 import { ConversationFactory } from "@app/tests/utils/ConversationFactory";
@@ -566,6 +567,43 @@ describe("GET /api/w/:wId/assistant/conversations/semantic_search", () => {
 
       expect(response.status).toBe(500);
       expect((await response.json()).error.type).toBe("internal_server_error");
+    });
+
+    it("returns 429 when Core refuses the search for the embedding quota", async () => {
+      const { workspace, user, auth, globalGroup } =
+        await createPrivateApiMockRequest({ method: "GET", role: "admin" });
+
+      const projectSpace = await SpaceFactory.project(workspace);
+
+      const adminAuth = await Authenticator.internalAdminForWorkspace(
+        workspace.sId
+      );
+      const addMembersRes = await projectSpace.addMembers(adminAuth, {
+        userIds: [user.sId],
+      });
+      if (!addMembersRes.isOk()) {
+        throw new Error("Failed to add user to space");
+      }
+
+      await auth.refresh();
+
+      await setupDataSourceMocks(workspace, globalGroup);
+      await createDataSourceAndConnectorForProject(auth, projectSpace);
+
+      vi.spyOn(CoreAPI.prototype, "bulkSearchDataSources").mockResolvedValue(
+        new Err({
+          code: "quota_exceeded",
+          message: "Dust token quota exceeded",
+        })
+      );
+
+      const response = await get(workspace, { query: "test query" });
+
+      expect(response.status).toBe(429);
+      expect((await response.json()).error).toEqual({
+        type: "rate_limit_error",
+        message: EMBEDDING_QUOTA_EXCEEDED_MESSAGE,
+      });
     });
 
     it("filters out conversations that cannot be fetched", async () => {

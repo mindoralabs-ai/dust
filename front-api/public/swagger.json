@@ -4400,6 +4400,9 @@
           },
           "400": {
             "description": "Invalid request error"
+          },
+          "429": {
+            "description": "Rate limit exceeded."
           }
         }
       }
@@ -5236,6 +5239,9 @@
           },
           "400": {
             "description": "Invalid request error"
+          },
+          "429": {
+            "description": "Rate limit exceeded."
           }
         }
       }
