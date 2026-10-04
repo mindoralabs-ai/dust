@@ -35,27 +35,3 @@ export function configuredDirectPocWorkspaceId(): string {
   }
   return workspaceId;
 }
-
-/**
- * Only the isolated Vertex POC workspaces, or the one direct provider mode
- * workspace, may omit an OpenAI embedding key.
- */
-export function isConfiguredPocVertexEmbeddingWorkspace(
-  workspaceId: string
-): boolean {
-  if (!dustPocMode()) {
-    return false;
-  }
-  if (dustPocDirectProviderMode()) {
-    return workspaceId === configuredDirectPocWorkspaceId();
-  }
-  const workspaces = config.getDustPocWorkspaceIds().split(",");
-  if (
-    workspaces.length !== 2 ||
-    workspaces.some((id) => !id || id.trim() !== id) ||
-    workspaces[0] === workspaces[1]
-  ) {
-    throw new Error("Dust POC runtime configuration unavailable");
-  }
-  return workspaces.includes(workspaceId);
-}

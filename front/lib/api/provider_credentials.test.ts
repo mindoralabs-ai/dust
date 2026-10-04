@@ -166,55 +166,71 @@ describe("getLlmCredentials", () => {
       expect(result).toEqual(BASE_VARIABLES);
     });
 
-    it("allows only configured Vertex POC workspaces to omit an OpenAI embedding key", async () => {
+    // EnvironmentConfig caches values for the whole file, so each case sets
+    // its POC workspace through config rather than the environment.
+    const POC_MODES: [
+      string,
+      (workspaceId: string) => { mockRestore(): void }[],
+    ][] = [
+      [
+        "in signed POC mode",
+        (workspaceId) => [
+          vi.spyOn(config, "getDustPocMode").mockReturnValue("1"),
+          vi
+            .spyOn(config, "getDustPocDirectProviderMode")
+            .mockReturnValue(undefined),
+          vi
+            .spyOn(config, "getDustPocWorkspaceIds")
+            .mockReturnValue(`${workspaceId},other-workspace`),
+        ],
+      ],
+      [
+        "in direct POC provider mode",
+        (workspaceId) => [
+          vi.spyOn(config, "getDustPocMode").mockReturnValue("1"),
+          vi.spyOn(config, "getDustPocDirectProviderMode").mockReturnValue("1"),
+          vi
+            .spyOn(config, "getDustPocDirectWorkspaceId")
+            .mockReturnValue(workspaceId),
+          vi.spyOn(config, "getDustPocWorkspaceIds").mockImplementation(() => {
+            throw new Error("DUST_POC_WORKSPACE_IDS is required but not set");
+          }),
+        ],
+      ],
+    ];
+
+    it.each(
+      POC_MODES
+    )("requires an OpenAI embedding key from a BYOK POC workspace %s unless the caller skips it", async (_mode, configurePoc) => {
       const { authenticator } = await createResourceTest({
         role: "admin",
         isByok: true,
       });
-      const workspaceId = authenticator.getNonNullableWorkspace().sId;
-      vi.stubEnv("DUST_POC_MODE", "1");
-      vi.stubEnv("DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED", "0");
-      vi.stubEnv("DUST_POC_WORKSPACE_IDS", `${workspaceId},other-workspace`);
+      const spies = configurePoc(authenticator.getNonNullableWorkspace().sId);
       try {
-        expect(await getLlmCredentials(authenticator)).toEqual(BASE_VARIABLES);
-        const { authenticator: unrelated } = await createResourceTest({
-          role: "admin",
-          isByok: true,
-        });
-        await expect(getLlmCredentials(unrelated)).rejects.toThrow(
-          "OPENAI_EMBEDDING_API_KEY"
+        await expect(getLlmCredentials(authenticator)).rejects.toThrow(
+          "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."
         );
+        expect(
+          await getLlmCredentials(authenticator, {
+            skipEmbeddingApiKeyRequirement: true,
+          })
+        ).toEqual(BASE_VARIABLES);
       } finally {
-        vi.unstubAllEnvs();
+        for (const spy of spies) {
+          spy.mockRestore();
+        }
       }
     });
 
-    it("lets the direct POC workspace omit an OpenAI embedding key without DUST_POC_WORKSPACE_IDS", async () => {
-      const { authenticator } = await createResourceTest({
-        role: "admin",
-        isByok: true,
-      });
-      const { authenticator: unrelated } = await createResourceTest({
-        role: "admin",
-        isByok: true,
-      });
-      // EnvironmentConfig caches values for the whole file, so set the direct
-      // workspace through config rather than the environment.
-      const spies = [
-        vi.spyOn(config, "getDustPocMode").mockReturnValue("1"),
-        vi.spyOn(config, "getDustPocDirectProviderMode").mockReturnValue("1"),
-        vi
-          .spyOn(config, "getDustPocDirectWorkspaceId")
-          .mockReturnValue(authenticator.getNonNullableWorkspace().sId),
-        vi.spyOn(config, "getDustPocWorkspaceIds").mockImplementation(() => {
-          throw new Error("DUST_POC_WORKSPACE_IDS is required but not set");
-        }),
-      ];
+    it.each(
+      POC_MODES
+    )("never requires an OpenAI embedding key from a non-BYOK POC workspace %s", async (_mode, configurePoc) => {
+      const { authenticator } = await createResourceTest({ role: "admin" });
+      const spies = configurePoc(authenticator.getNonNullableWorkspace().sId);
       try {
-        expect(await getLlmCredentials(authenticator)).toEqual(BASE_VARIABLES);
-        await expect(getLlmCredentials(unrelated)).rejects.toThrow(
-          "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."
-        );
+        const result = await getLlmCredentials(authenticator);
+        expect(result.OPENAI_EMBEDDING_API_KEY).toBeUndefined();
       } finally {
         for (const spy of spies) {
           spy.mockRestore();

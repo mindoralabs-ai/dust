@@ -1,5 +1,4 @@
 import config from "@app/lib/api/config";
-import { isConfiguredPocVertexEmbeddingWorkspace } from "@app/lib/api/dust_poc_mode";
 import type { Authenticator } from "@app/lib/auth";
 import { getFeatureFlags } from "@app/lib/auth";
 import { isByokTransitioningPlan } from "@app/lib/plans/plan_codes";
@@ -88,12 +87,26 @@ export function dangerouslyGetDustManagedLlmCredentials(): LLMCredentialsType {
  * don't accidentally use the customer's LLM key for embeddings.
  *
  * By default, BYOK workspaces must have `OPENAI_EMBEDDING_API_KEY` configured
- * (used by search, upsert, data source creation).
- * Configured Vertex POC workspaces, or in direct provider mode the one direct
- * workspace, omit this OpenAI-only requirement; Core's signed workspace
- * assertion and its own workspace gate still authorize provider I/O.
+ * (used by search, upsert, data source creation). Document upserts and searches
+ * need it even on a data source that embeds with Vertex: Front does not record
+ * an existing data source's embedder.
  * Pass `skipEmbeddingApiKeyRequirement: true` for call sites that only need LLM
- * keys (agent loop, token counting, image generation, etc.).
+ * keys (agent loop, token counting, image generation, etc.), or that create a
+ * data source whose embedder is `vertex_ai`.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] byok-embedding-key-required
+ * For a BYOK plan other than BYOK_TRANSITIONING, without the `use_dust_keys`
+ * flag, `getLlmCredentials` MUST throw when the workspace has no
+ * `OPENAI_EMBEDDING_API_KEY` and `skipEmbeddingApiKeyRequirement` is not
+ * `true`. No workspace is exempt by its identity, including a configured POC
+ * workspace. A non-BYOK plan never requires the key.
+ */
+/**
+ * @cc [owner:jchen0824,label:product;backend] vertex-data-source-creation-skips-embedding-key
+ * A caller that selects `vertex_ai` as a new Core data source's embedder MUST
+ * pass `skipEmbeddingApiKeyRequirement: true` for that creation, so that
+ * creating a Vertex data source never requires an OpenAI embedding key.
  */
 export async function getLlmCredentials(
   auth: Authenticator,
@@ -151,10 +164,7 @@ export async function getLlmCredentials(
     }))
   );
 
-  if (
-    !skipEmbeddingApiKeyRequirement &&
-    !isConfiguredPocVertexEmbeddingWorkspace(auth.getNonNullableWorkspace().sId)
-  ) {
+  if (!skipEmbeddingApiKeyRequirement) {
     assert(
       credentials.OPENAI_EMBEDDING_API_KEY,
       "[BYOK] This action requires OPENAI_EMBEDDING_API_KEY to be configured."

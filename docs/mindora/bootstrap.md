@@ -126,12 +126,18 @@ input and output tokens per UTC day. Each unsettled attempt reserves 64,000
 tokens, so Front refuses every generation when the limit is below 64,000.
 
 `DUST_FRONT_VERTEX_EMBEDDING_SELECTION_ENABLED=1` makes the workspace's new Pods
-and data sources embed with Vertex, without requiring an OpenAI embedding key.
-Only a workspace member's own request selects Vertex. If the switch is unset or
-`0`, or the caller is an internal admin or a non-member, creating one in that
-workspace fails before Core creates a project. An operator can still repair a
-Pod whose Core data source exists. Other workspaces keep their embedding
-provider.
+and data sources embed with Vertex. Only a workspace member's own request
+selects Vertex. If the switch is unset or `0`, or the caller is an internal
+admin or a non-member, creating one in that workspace fails before Core creates
+a project. An operator can still repair a Pod whose Core data source exists.
+Other workspaces keep their embedding provider.
+
+Creating a Vertex Pod or data source needs no OpenAI embedding key. On a strict
+BYOK plan, one that is not `FREE_BYOK_TRANSITIONING` and lacks the
+`use_dust_keys` flag, upserting or searching documents does need one, even in a
+Vertex data source: the workspace must have an OpenAI key in its provider
+settings, which Front sends as `OPENAI_EMBEDDING_API_KEY`. Non-BYOK plans never
+need one.
 
 `DUST_CORE_WORKSPACE_ASSERTION_SECRET` must have the same value, at least 32
 characters, on Front and Core. Front signs its Core search and upsert requests

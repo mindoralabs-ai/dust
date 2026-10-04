@@ -299,14 +299,6 @@ describe("isolated Dust POC direct provider mode", () => {
     expect(Resolver).not.toHaveBeenCalled();
   });
 
-  it("lets only the direct workspace omit an OpenAI embedding key", async () => {
-    const { isConfiguredPocVertexEmbeddingWorkspace } = await import(
-      "@app/lib/api/dust_poc_mode"
-    );
-    expect(isConfiguredPocVertexEmbeddingWorkspace("workspace-a")).toBe(true);
-    expect(isConfiguredPocVertexEmbeddingWorkspace("workspace-c")).toBe(false);
-  });
-
   it.each([
     ["the embedding switch is off", "0", identity],
     ["there is no member identity", "1", null],
@@ -334,15 +326,9 @@ describe("isolated Dust POC direct provider mode", () => {
     const { selectPocEmbeddingProvider } = await import(
       "@app/lib/api/dust_poc_runtime"
     );
-    const { isConfiguredPocVertexEmbeddingWorkspace } = await import(
-      "@app/lib/api/dust_poc_mode"
-    );
     await expect(
       selectPocEmbeddingProvider(identity, "workspace-a")
     ).rejects.toThrow("configuration unavailable");
-    expect(() =>
-      isConfiguredPocVertexEmbeddingWorkspace("workspace-a")
-    ).toThrow("configuration unavailable");
     expect(Resolver).not.toHaveBeenCalled();
   });
 });

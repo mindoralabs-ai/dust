@@ -68,8 +68,10 @@ describe("createDataSourceAndConnectorForProject", () => {
   let globalGroup: GroupResource;
   let projectSpace: SpaceResource;
 
-  beforeEach(async () => {
-    workspace = await WorkspaceFactory.basic();
+  async function setUpProjectWorkspace(
+    createWorkspace = () => WorkspaceFactory.basic()
+  ) {
+    workspace = await createWorkspace();
     const adminUser = await UserFactory.basic();
 
     // Set up default groups and spaces FIRST (before creating authenticators)
@@ -106,6 +108,10 @@ describe("createDataSourceAndConnectorForProject", () => {
       },
       { members: [globalGroup] }
     );
+  }
+
+  beforeEach(async () => {
+    await setUpProjectWorkspace();
   });
 
   describe("successful creation", () => {
@@ -1767,6 +1773,27 @@ describe("createDataSourceAndConnectorForProject", () => {
       expect(spies.llmCredentials).toHaveBeenCalledWith(adminAuth, {
         skipEmbeddingApiKeyRequirement: true,
       });
+    });
+
+    it("creates a BYOK direct workspace's Pod without an OpenAI embedding key", async () => {
+      await setUpProjectWorkspace(() => WorkspaceFactory.byok());
+      configureDirectPoc(workspace.sId);
+      const spies = await mockPodCreation();
+
+      const result = await createDataSourceAndConnectorForProject(
+        adminAuth,
+        projectSpace
+      );
+
+      expect(adminAuth.getNonNullablePlan().isByok).toBe(true);
+      expect(result.isOk()).toBe(true);
+      expect(spies.createDataSource).toHaveBeenCalledTimes(1);
+      const { config: dataSourceConfig, credentials } =
+        spies.createDataSource.mock.calls[0][0];
+      expect(dataSourceConfig.embedder_config.embedder.provider_id).toBe(
+        "vertex_ai"
+      );
+      expect(credentials).not.toHaveProperty("OPENAI_EMBEDDING_API_KEY");
     });
 
     it("refuses the Pod before Core project creation when the embedding switch is off", async () => {
