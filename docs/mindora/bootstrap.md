@@ -149,7 +149,9 @@ token limit for the workspace, per UTC day: plain digits, from 8,192 to
 plus 8,192 tokens for each request not yet settled, which is
 `gemini-embedding-2`'s input limit. A request that Vertex refuses with an HTTP
 4xx status, such as text that Gemini counts as over that limit, settles with no
-tokens, and a retry sends a new request. One whose outcome Core cannot tell,
+tokens, and a retry sends a new request. When Vertex answers `429` (throttling),
+Core itself retries up to twice, after 1 and then 2 seconds, each time as a new
+request checked against the limit. One whose outcome Core cannot tell,
 such as a timeout or a 5xx status, stays unsettled. A request that would exceed
 the limit is refused with `429 quota_exceeded` before any token or Vertex
 request. It is a separate budget from Front's generation limit.

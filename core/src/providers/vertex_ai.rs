@@ -46,6 +46,13 @@ const DIRECT_PROVIDER_MODE_ENV: &str = "DUST_POC_DIRECT_PROVIDER_MODE";
 /// the task prefix), so they cannot size this reservation.
 const DIRECT_EMBEDDING_RESERVATION_TOKENS: u64 = CONTEXT_SIZE as u64;
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+/// `with_retryable_back_off` makes at most `retries` further calls, the first
+/// after `sleep`, each later one after `factor` times the previous wait.
+const VERTEX_RETRY_OPTIONS: ModelErrorRetryOptions = ModelErrorRetryOptions {
+    sleep: Duration::from_secs(1),
+    factor: 2,
+    retries: 2,
+};
 
 #[async_trait]
 trait VertexTokenSource: Send + Sync {
@@ -575,17 +582,32 @@ fn finish_embedding_batch(
     }) {
         return Err(AmbiguousVertexEffect.into());
     }
-    results
-        .into_iter()
-        .map(|result| {
-            result.map(|vector| EmbedderVector {
+    // A retryable error makes the back-off embed the whole batch again, so it
+    // is returned only when every failed input is retryable.
+    let mut vectors = Vec::with_capacity(results.len());
+    let mut retryable_error = None;
+    for result in results {
+        match result {
+            Ok(vector) => vectors.push(EmbedderVector {
                 created: crate::utils::now(),
                 provider: ProviderID::VertexAI.to_string(),
                 model: model.to_owned(),
                 vector,
-            })
-        })
-        .collect()
+            }),
+            Err(error)
+                if error
+                    .downcast_ref::<ModelError>()
+                    .is_some_and(|model_error| model_error.retryable.is_some()) =>
+            {
+                retryable_error.get_or_insert(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    match retryable_error {
+        Some(error) => Err(error),
+        None => Ok(vectors),
+    }
 }
 
 /// Stop pulling new inputs after an ambiguous paid effect, while allowing
@@ -678,14 +700,18 @@ enum AttemptStart {
 /// `AttemptStart::DirectWithinLimit` the start also applies the UTC-day token
 /// limit; an over-limit start returns `AdmissionError::Denied` with no journal
 /// row and no `admit` or provider call. A response is returned only after exact
-/// provider usage is frozen. A `VertexRejectedRequest` (a complete HTTP 4xx
-/// response) settles the attempt `no_charge` with evidence
-/// `vertex:rejected:<status>[:<request id>]`, which releases its input
-/// reservation, and is returned as that non-ambiguous error. Every other
-/// provider failure, including a transport error, timeout, incomplete
-/// response, 3xx, 5xx or invalid 2xx, and a rejection whose `no_charge`
-/// settlement fails, remains unresolved, never no-charge, and returns
-/// `AmbiguousVertexEffect`.
+/// provider usage is frozen. One call makes at most one provider request:
+/// a retry is a new call, with a new attempt, start and `admit`. A
+/// `VertexRejectedRequest` (a complete HTTP 4xx response) settles the attempt
+/// `no_charge` with evidence `vertex:rejected:<status>[:<request id>]`, which
+/// releases its input reservation. Only then is a 429 returned as a
+/// `ModelError` whose `retryable` is `VERTEX_RETRY_OPTIONS`, carrying the
+/// rejection's request ID, and any other 4xx as that non-retryable
+/// `VertexRejectedRequest`. Every other provider failure, including a
+/// transport error, timeout, incomplete response, 3xx, 5xx or invalid 2xx,
+/// and any rejection, 429 or not, whose `no_charge` settlement fails, remains
+/// unresolved, never no-charge, and returns `AmbiguousVertexEffect`, never a
+/// retryable error.
 
 /// @cc [owner:jchen0824,label:security;backend] vertex-embedding-attempt-route-id
 /// An `AttemptStart::Signed` attempt's `route_id` is
@@ -776,7 +802,19 @@ where
                     .settle_no_charge(&attempt.attempt_id, &rejection.evidence_ref())
                     .is_ok()
                 {
-                    return Err(error);
+                    if rejection.status != 429 {
+                        return Err(error);
+                    }
+                    // Vertex asks for throttled requests to be retried with
+                    // exponential backoff. The back-off calls the embedder
+                    // again, which starts a new attempt; this settled one is
+                    // never dispatched again.
+                    return Err(ModelError {
+                        message: rejection.to_string(),
+                        retryable: Some(VERTEX_RETRY_OPTIONS),
+                        request_id: rejection.request_id.clone(),
+                    }
+                    .into());
                 }
             }
             let operation_id = error
@@ -917,10 +955,11 @@ impl VertexAIEmbedder {
 
     // Kept private until the admission/journal wrapper can persist and settle usage per attempt.
     /// @cc [owner:jchen0824,label:security;backend] vertex-complete-4xx-is-rejection
-    /// `request_one` returns `VertexRejectedRequest` only for a response whose
-    /// status is 400 to 499 and whose body was received in full. A transport
-    /// error, timeout, body cut short, 3xx, 5xx or invalid 2xx response
-    /// returns another error, never `VertexRejectedRequest`.
+    /// `request_one` returns `VertexRejectedRequest`, never a retryable
+    /// `ModelError`, for a response whose status is 400 to 499, 429 included,
+    /// and whose body was received in full, and only for such a response. A
+    /// transport error, timeout, body cut short, 3xx, 5xx or invalid 2xx
+    /// response returns another error, never `VertexRejectedRequest`.
     async fn request_one(
         client: &reqwest::Client,
         endpoint: &str,
@@ -968,11 +1007,7 @@ impl VertexAIEmbedder {
         }
         if !status.is_success() {
             let retryable = if status.is_server_error() {
-                Some(ModelErrorRetryOptions {
-                    sleep: Duration::from_secs(1),
-                    factor: 2,
-                    retries: 2,
-                })
+                Some(VERTEX_RETRY_OPTIONS)
             } else {
                 None
             };
@@ -1060,7 +1095,8 @@ impl VertexAIEmbedder {
     /// `DIRECT_POC_ROUTE_ID`, and are never claimed for delivery. An input that
     /// Vertex rejects with a complete HTTP 4xx response settles `no_charge`: its
     /// row no longer holds the daily-limit reservation, and a later request for
-    /// the same input starts a new attempt.
+    /// the same input, including the back-off's retry after a 429, starts a new
+    /// attempt under a new daily-limit check.
     async fn embed_direct(
         &self,
         runtime: &CoreDirectVertexRuntime,
@@ -1224,7 +1260,12 @@ impl Embedder for VertexAIEmbedder {
     /// already-started attempts settle. A Vertex rejection (a complete HTTP 4xx
     /// response, settled `no_charge`) is not an ambiguous effect: it does not
     /// stop new inputs from being pulled, and the batch then fails with a
-    /// non-ambiguous error unless another input's effect is ambiguous.
+    /// non-ambiguous error unless another input's effect is ambiguous. That
+    /// error is retryable (a settled 429) only when every failed input's error
+    /// is retryable; any other failure is returned instead. When
+    /// `EmbedderRequest`'s back-off embeds the batch again, a document input
+    /// whose paid vector is retained is not dispatched again, and every other
+    /// input starts a new attempt.
     async fn embed_with_workspace(
         &self,
         text: Vec<&str>,
@@ -2320,7 +2361,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_rejection_settles_no_charge_and_a_retry_starts_a_new_attempt() {
-        for status in [400, 429] {
+        for status in [400, 403] {
             let dir = tempfile::tempdir().expect("test operation failed");
             let journal_path = dir.path().join("direct.sqlite");
             // One unsettled attempt would hold the whole daily limit.
@@ -2522,6 +2563,353 @@ mod tests {
             1
         );
         server.abort();
+    }
+
+    /// `EmbedderRequest::execute`'s retry loop, without its logging.
+    async fn with_back_off<F, O>(call: impl FnMut() -> F) -> Result<O>
+    where
+        F: Future<Output = Result<O>>,
+    {
+        crate::providers::provider::with_retryable_back_off(call, |_, _, _| {}, |_| {}).await
+    }
+
+    fn throttled_state() -> (String, Option<String>, String) {
+        (
+            "no_charge".to_string(),
+            Some("vertex:rejected:429:req-429".to_string()),
+            DIRECT_POC_ROUTE_ID.to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn throttled_input_is_retried_by_the_back_off_as_a_new_attempt() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        // One unsettled attempt would hold the whole daily limit, so the retry
+        // starts only because the throttled attempt released its reservation.
+        let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(429), Reply::Embedding(11)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let vectors = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect("the retry succeeds");
+        assert_eq!(vectors[0].vector, vec![0.5; DIMENSIONS]);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            attempt_states(&journal_path),
+            vec![
+                throttled_state(),
+                ("exact".to_string(), None, DIRECT_POC_ROUTE_ID.to_string())
+            ]
+        );
+        assert_eq!(input_reservations(&journal_path), 1);
+        server.abort();
+
+        // A signed retry is admitted again as a new attempt.
+        let journal_path = dir.path().join("signed.sqlite");
+        let journal = CoreUsageJournal::open(&journal_path).expect("test journal failed");
+        let route = signed_route("tenant-a");
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(429), Reply::Embedding(7)]).await;
+        let admissions = AtomicUsize::new(0);
+        let (admissions, endpoint) = (&admissions, endpoint.as_str());
+        with_back_off(|| {
+            run_guarded_attempt(
+                &journal,
+                &route,
+                MODEL_ID,
+                "embedding:workspace-a",
+                Some([1; 32]),
+                AttemptStart::Signed,
+                move |_, _, _| async move {
+                    admissions.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                move |_| async move {
+                    VertexAIEmbedder::request_one(
+                        &VertexAIEmbedder::new(MODEL_ID.to_owned()).client,
+                        endpoint,
+                        "test-token",
+                        "chunk",
+                        EmbeddingTaskType::RetrievalDocument,
+                    )
+                    .await
+                },
+            )
+        })
+        .await
+        .expect("the signed retry succeeds");
+        assert_eq!(admissions.load(Ordering::SeqCst), 2);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            attempt_states(&journal_path)
+                .into_iter()
+                .map(|(state, evidence, _)| (state, evidence))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "no_charge".to_string(),
+                    Some("vertex:rejected:429:req-429".to_string())
+                ),
+                ("exact".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            journal
+                .read_health("tenant-a")
+                .expect("test health failed")
+                .unresolved_count,
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn throttled_batch_retry_reuses_paid_inputs() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        // Whichever input arrives second is throttled once.
+        let (endpoint, provider_requests, server) = scripted_server(vec![
+            Reply::Embedding(11),
+            Reply::Status(429),
+            Reply::Embedding(11),
+        ])
+        .await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let vectors = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk a", "chunk b"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect("the retry succeeds");
+        assert_eq!(vectors.len(), 2);
+        // The paid input is served from the journal, not dispatched again.
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        let mut states = attempt_states(&journal_path)
+            .into_iter()
+            .map(|(state, _, _)| state)
+            .collect::<Vec<_>>();
+        states.sort();
+        assert_eq!(states, vec!["exact", "exact", "no_charge"]);
+        assert_eq!(input_reservations(&journal_path), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_fails_after_the_bounded_retries_holding_nothing() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let (endpoint, provider_requests, server) = scripted_server(vec![Reply::Status(429)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let error = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect_err("throttling persists");
+        assert!(error.downcast_ref::<AmbiguousVertexEffect>().is_none());
+        let message = error.to_string();
+        assert!(message.starts_with("Too many retries (2): "));
+        assert!(message.contains("request_id=req-429"));
+        assert!(!message.contains("provider-detail"));
+        // One request, then `VERTEX_RETRY_OPTIONS.retries` (2) retries.
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(attempt_states(&journal_path), vec![throttled_state(); 3]);
+        assert_eq!(input_reservations(&journal_path), 0);
+        // No reservation is held: a start that needs the whole limit fits.
+        let route = direct_poc_route(DIRECT_WORKSPACE);
+        let next = CoreUsageAttempt {
+            attempt_id: "next-attempt".into(),
+            provider_request_id: "next-request".into(),
+            tenant_id: route.tenant_id.clone(),
+            workspace_id: route.workspace_id.clone(),
+            conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
+            model: MODEL_ID.into(),
+        };
+        assert!(matches!(
+            runtime
+                .journal
+                .start_direct_within_limit(
+                    &next,
+                    None,
+                    utc_day_start_ms(chrono::Utc::now().timestamp_millis()),
+                    runtime.daily_token_limit,
+                    DIRECT_EMBEDDING_RESERVATION_TOKENS,
+                )
+                .expect("test start failed"),
+            DirectStartOutcome::Created(_)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejection_other_than_throttling_is_not_retried() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let journal_path = dir.path().join("direct.sqlite");
+        let runtime = direct_runtime(dir.path(), 500_000);
+        let (endpoint, provider_requests, server) =
+            scripted_server(vec![Reply::Status(400), Reply::Embedding(11)]).await;
+        let embedder = direct_embedder(endpoint, Arc::new(AtomicUsize::new(0)));
+        let workspace = verified_workspace(DIRECT_WORKSPACE);
+        let extras = Some(json!({"dust_poc_upsert_key": "document-a:version-1"}));
+        let error = with_back_off(|| {
+            embedder.embed_direct(
+                &runtime,
+                vec!["chunk"],
+                EmbeddingTaskType::RetrievalDocument,
+                extras.clone(),
+                &workspace,
+            )
+        })
+        .await
+        .expect_err("Vertex rejected the input");
+        assert_eq!(
+            error
+                .downcast_ref::<VertexRejectedRequest>()
+                .map(|rejection| rejection.status),
+            Some(400)
+        );
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt_states(&journal_path).len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn throttled_retry_checks_the_daily_limit_again() {
+        let dir = tempfile::tempdir().expect("test operation failed");
+        let runtime = direct_runtime(dir.path(), 2 * DIRECT_EMBEDDING_RESERVATION_TOKENS);
+        let route = direct_poc_route(DIRECT_WORKSPACE);
+        let since_ms = utc_day_start_ms(chrono::Utc::now().timestamp_millis());
+        let held = CoreUsageAttempt {
+            attempt_id: "held-attempt".into(),
+            provider_request_id: "held-request".into(),
+            tenant_id: route.tenant_id.clone(),
+            workspace_id: route.workspace_id.clone(),
+            conversation_id: format!("embedding:{DIRECT_WORKSPACE}"),
+            route_id: DIRECT_POC_ROUTE_ID.into(),
+            model: MODEL_ID.into(),
+        };
+        let provider_calls = AtomicUsize::new(0);
+        let (runtime, route, held, provider_calls) = (&runtime, &route, &held, &provider_calls);
+        let error = with_back_off(|| {
+            run_guarded_attempt(
+                &runtime.journal,
+                route,
+                MODEL_ID,
+                "embedding:workspace-direct",
+                None,
+                AttemptStart::DirectWithinLimit {
+                    daily_token_limit: runtime.daily_token_limit,
+                },
+                |_, _, _| async { Ok(()) },
+                move |_| async move {
+                    provider_calls.fetch_add(1, Ordering::SeqCst);
+                    // While this request is in flight, another one settles
+                    // more than the rest of the day's limit.
+                    assert!(matches!(
+                        runtime
+                            .journal
+                            .start_direct_within_limit(
+                                held,
+                                None,
+                                since_ms,
+                                runtime.daily_token_limit,
+                                DIRECT_EMBEDDING_RESERVATION_TOKENS,
+                            )
+                            .expect("test start failed"),
+                        DirectStartOutcome::Created(_)
+                    ));
+                    runtime
+                        .journal
+                        .settle_exact(
+                            held,
+                            "client:held-request",
+                            EmbeddingUsage {
+                                input_tokens: CONTEXT_SIZE as u32 + 1,
+                            },
+                        )
+                        .expect("test settlement failed");
+                    Err(VertexRejectedRequest {
+                        status: 429,
+                        request_id: None,
+                    }
+                    .into())
+                },
+            )
+        })
+        .await
+        .expect_err("the retry is over the limit");
+        assert_eq!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(&AdmissionError::Denied)
+        );
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt_rows(dir.path()), 2);
+    }
+
+    #[test]
+    fn batch_error_is_retryable_only_when_every_failure_is() {
+        let throttled = || -> anyhow::Error {
+            ModelError {
+                message: "throttled".into(),
+                retryable: Some(VERTEX_RETRY_OPTIONS),
+                request_id: None,
+            }
+            .into()
+        };
+        let rejected = || -> anyhow::Error {
+            VertexRejectedRequest {
+                status: 400,
+                request_id: None,
+            }
+            .into()
+        };
+        for results in [
+            vec![Err(throttled()), Err(rejected())],
+            vec![Err(rejected()), Err(throttled())],
+        ] {
+            let error = finish_embedding_batch(results, MODEL_ID).expect_err("failed batch");
+            assert_eq!(
+                error
+                    .downcast_ref::<VertexRejectedRequest>()
+                    .map(|rejection| rejection.status),
+                Some(400)
+            );
+        }
+        let error =
+            finish_embedding_batch(vec![Ok(vec![0.0; DIMENSIONS]), Err(throttled())], MODEL_ID)
+                .expect_err("throttled batch");
+        assert!(error
+            .downcast_ref::<ModelError>()
+            .is_some_and(|model_error| model_error.retryable.is_some()));
     }
 
     #[tokio::test]

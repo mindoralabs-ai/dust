@@ -33,6 +33,13 @@ pub const DIRECT_POC_TENANT_ID: &str = "poc-direct";
 /// carry this non-numeric revision.
 pub const DIRECT_POC_ROUTE_ID: &str = "poc-direct:direct";
 
+/// Route of direct rows written only by unreleased builds of direct provider
+/// mode, which were never deployed. The daily limit does not count it, so a
+/// journal holding it refuses direct starts. A signed tenant named
+/// `DIRECT_POC_TENANT_ID` at registry revision 0, which Core accepts when
+/// `DUST_CORE_REGISTRY_MIN_REVISION` is 0, writes the same route.
+const LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID: &str = "poc-direct:0";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreUsageAttempt {
     pub attempt_id: String,
@@ -307,7 +314,12 @@ impl CoreUsageJournal {
     /// `ENVELOPE_INPUT_TOKENS_MAX`. Any other value, including a JSON number,
     /// a missing field or an unparsable envelope, makes the exact total
     /// unreadable. An unreadable exact total is an error that writes nothing,
-    /// never zero or a partial sum.
+    /// never zero or a partial sum. When the journal holds any
+    /// `DIRECT_POC_TENANT_ID` row on `LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID`
+    /// (`poc-direct:0`), in any state, workspace or creation time, it returns
+    /// an error and writes nothing. That includes the rows of a signed
+    /// `DIRECT_POC_TENANT_ID` tenant at registry revision 0, which Core accepts
+    /// when `DUST_CORE_REGISTRY_MIN_REVISION` is 0.
     pub fn start_direct_within_limit(
         &self,
         attempt: &CoreUsageAttempt,
@@ -328,6 +340,16 @@ impl CoreUsageJournal {
         }
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let legacy_rows: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM dust_usage_attempts
+                            WHERE tenant_id = ?1 AND route_id = ?2)",
+            params![DIRECT_POC_TENANT_ID, LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID],
+            |row| row.get(0),
+        )?;
+        if legacy_rows {
+            // Dropping the transaction leaves the journal unchanged.
+            bail!("Core direct usage journal holds pre-release direct rows");
+        }
         // `build_envelope` stores `input_tokens` as a canonical decimal JSON
         // string. SQLite's CAST reads "12oops" as 12 and "oops" as 0, so only
         // text that equals its own integer rendering, within the envelope
@@ -1861,6 +1883,64 @@ mod tests {
             .expect("direct route has a tenant and a revision");
         assert_eq!(tenant, DIRECT_POC_TENANT_ID);
         assert!(revision.parse::<u64>().is_err());
+    }
+
+    #[test]
+    fn pre_release_direct_route_is_the_direct_tenant_at_revision_zero() {
+        assert_eq!(
+            LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID,
+            format!("{DIRECT_POC_TENANT_ID}:0")
+        );
+    }
+
+    #[test]
+    fn pre_release_direct_rows_refuse_direct_starts() {
+        let dir = tempdir().expect("test directory");
+        let journal = CoreUsageJournal::open(dir.path().join("usage.sqlite")).expect("journal");
+        // Without a pre-release row, a direct start is created as before.
+        assert!(matches!(
+            start_direct(&journal, &direct_attempt("before"), None, 0, 1_000),
+            DirectStartOutcome::Created(_)
+        ));
+        // The window would not count the row: it is settled no-charge, in
+        // another workspace, and created before the window start.
+        let mut legacy = direct_attempt("pre-release");
+        legacy.route_id = LEGACY_PRE_RELEASE_DIRECT_ROUTE_ID.into();
+        legacy.workspace_id = "workspace_B".into();
+        journal.start(&legacy).expect("pre-release route row");
+        journal
+            .settle_no_charge(&legacy.attempt_id, "provider/verified-no-charge")
+            .expect("no-charge settlement");
+        journal
+            .connection()
+            .expect("journal connection")
+            .execute(
+                "UPDATE dust_usage_attempts SET created_at_ms = 1 WHERE attempt_id = ?1",
+                [&legacy.attempt_id],
+            )
+            .expect("backdate pre-release row");
+        let counts = row_counts(&journal);
+        for input_hash in [None, Some(&[4_u8; 32])] {
+            let error = journal
+                .start_direct_within_limit(
+                    &direct_attempt("after"),
+                    input_hash,
+                    2,
+                    1_000,
+                    RESERVATION,
+                )
+                .expect_err("pre-release rows refuse direct starts");
+            assert_eq!(
+                error.to_string(),
+                "Core direct usage journal holds pre-release direct rows"
+            );
+            assert_eq!(row_counts(&journal), counts);
+        }
+        // Signed starts do not read the direct route.
+        assert!(matches!(
+            journal.start(&attempt("signed")).expect("signed start"),
+            StartOutcome::Created(_)
+        ));
     }
 
     #[test]
