@@ -6,13 +6,15 @@ import {
 } from "@connectors/lib/temporal";
 import { ActivityInboundLogInterceptor } from "@connectors/lib/temporal_monitoring";
 import logger from "@connectors/logger/logger";
-import { getWorkflowConfig } from "@connectors/temporal/bundle_helper";
+import {
+  createTemporalWorker,
+  getWorkflowConfig,
+} from "@connectors/temporal/bundle_helper";
 import type { Context } from "@temporalio/activity";
-import { Worker } from "@temporalio/worker";
 
 export async function runIntercomWorker() {
   const { connection, namespace } = await getTemporalWorkerConnection();
-  const worker = await Worker.create({
+  const worker = await createTemporalWorker({
     ...getWorkflowConfig({
       workerName: "intercom",
       getWorkflowsPath: () => require.resolve("./workflows"),

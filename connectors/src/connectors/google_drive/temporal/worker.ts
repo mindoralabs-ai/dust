@@ -4,9 +4,11 @@ import * as sync_status from "@connectors/lib/sync_status";
 import { getTemporalWorkerConnection } from "@connectors/lib/temporal";
 import { ActivityInboundLogInterceptor } from "@connectors/lib/temporal_monitoring";
 import logger from "@connectors/logger/logger";
-import { getWorkflowConfig } from "@connectors/temporal/bundle_helper";
+import {
+  createTemporalWorker,
+  getWorkflowConfig,
+} from "@connectors/temporal/bundle_helper";
 import type { Context } from "@temporalio/activity";
-import { Worker } from "@temporalio/worker";
 import TsconfigPathsPlugin from "tsconfig-paths-webpack-plugin";
 import {
   GDRIVE_FULL_SYNC_QUEUE_NAME,
@@ -20,7 +22,7 @@ export async function runGoogleWorkers() {
     getWorkflowsPath: () => require.resolve("./workflows"),
   });
 
-  const workerFullSync = await Worker.create({
+  const workerFullSync = await createTemporalWorker({
     ...workflowConfig,
     activities: { ...activities, ...sync_status },
     taskQueue: GDRIVE_FULL_SYNC_QUEUE_NAME,
@@ -54,7 +56,7 @@ export async function runGoogleWorkers() {
     },
   });
 
-  const workerIncrementalSync = await Worker.create({
+  const workerIncrementalSync = await createTemporalWorker({
     ...workflowConfig,
     activities: { ...activities, ...sync_status },
     taskQueue: GDRIVE_INCREMENTAL_SYNC_QUEUE_NAME,

@@ -1,4 +1,6 @@
 import { Worker } from "@temporalio/worker";
+import { readdirSync, readFileSync } from "fs";
+import path from "path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -118,5 +120,36 @@ describe("selected Temporal worker readiness", () => {
     ).rejects.toBe(error);
 
     expect(areTemporalWorkersRunning(["salesforce"])).toBe(false);
+  });
+});
+
+describe("connector worker sources", () => {
+  // Readiness only sees Workers made by createTemporalWorker, so a connector that calls
+  // Worker.create directly could never report ready once selected.
+  const connectorsDir = path.join(__dirname, "..", "connectors");
+  const workerSources = readdirSync(connectorsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) =>
+      path.join(connectorsDir, entry.name, "temporal", "worker.ts")
+    )
+    .filter((file) => {
+      try {
+        readFileSync(file);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+  it("finds the connector workers", () => {
+    expect(workerSources.length).toBeGreaterThan(10);
+  });
+
+  it.each(
+    workerSources.map((file) => [path.relative(connectorsDir, file), file])
+  )("%s creates its Temporal Workers with createTemporalWorker", (_name, file) => {
+    const source = readFileSync(file, "utf8");
+    expect(source).not.toMatch(/\bWorker\.create\(/);
+    expect(source).toMatch(/\bcreateTemporalWorker\(/);
   });
 });

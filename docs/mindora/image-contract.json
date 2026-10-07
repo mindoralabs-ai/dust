@@ -54,6 +54,12 @@
       "dockerfile": "dockerfiles/connectors.Dockerfile",
       "target": "connectors",
       "migration_command": null
+    },
+    "oauth": {
+      "enabled": true,
+      "dockerfile": "dockerfiles/oauth.Dockerfile",
+      "target": "oauth",
+      "migration_command": null
     }
   }
 }

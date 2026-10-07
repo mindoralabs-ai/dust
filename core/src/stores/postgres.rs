@@ -69,13 +69,15 @@ pub struct UpsertNode<'a> {
 /// A URI requesting `sslmode=require` must have a readable CA certificate and
 /// verify the PostgreSQL peer and hostname. Missing or invalid trust material
 /// must fail before connecting; legacy URIs without required TLS stay plaintext.
-fn postgres_manager(
+/// Core's store (`CORE_DATABASE_URI`, `CORE_DATABASE_CA_CERT`) and the OAuth
+/// store (`OAUTH_DATABASE_URI`, `OAUTH_DATABASE_CA_CERT`) both connect this way.
+pub(crate) fn tls_postgres_manager(
     db_uri: &str,
     ca_cert_path: Option<&Path>,
+    uri_env: &str,
+    ca_env: &str,
 ) -> Result<PostgresConnectionManager<MakeTlsConnector>> {
-    let mut config: Config = db_uri
-        .parse()
-        .map_err(|_| anyhow!("invalid CORE_DATABASE_URI"))?;
+    let mut config: Config = db_uri.parse().map_err(|_| anyhow!("invalid {uri_env}"))?;
     let mut tls = SslConnector::builder(SslMethod::tls())?;
 
     match (config.get_ssl_mode(), ca_cert_path) {
@@ -84,10 +86,10 @@ fn postgres_manager(
             tls.set_verify(SslVerifyMode::PEER);
         }
         (SslMode::Require, None) => {
-            return Err(anyhow!("CORE_DATABASE_CA_CERT is required for TLS"));
+            return Err(anyhow!("{ca_env} is required for TLS"));
         }
         (_, Some(_)) => {
-            return Err(anyhow!("CORE_DATABASE_CA_CERT requires sslmode=require"));
+            return Err(anyhow!("{ca_env} requires sslmode=require"));
         }
         (_, None) => {
             config.ssl_mode(SslMode::Disable);
@@ -98,6 +100,18 @@ fn postgres_manager(
         config,
         MakeTlsConnector::new(tls.build()),
     ))
+}
+
+fn postgres_manager(
+    db_uri: &str,
+    ca_cert_path: Option<&Path>,
+) -> Result<PostgresConnectionManager<MakeTlsConnector>> {
+    tls_postgres_manager(
+        db_uri,
+        ca_cert_path,
+        "CORE_DATABASE_URI",
+        "CORE_DATABASE_CA_CERT",
+    )
 }
 
 impl PostgresStore {
@@ -4180,7 +4194,7 @@ impl Store for PostgresStore {
 
 #[cfg(test)]
 mod tls_tests {
-    use super::postgres_manager;
+    use super::{postgres_manager, tls_postgres_manager};
     use anyhow::Result;
     use openssl::asn1::{Asn1Integer, Asn1Time};
     use openssl::bn::BigNum;
@@ -4189,6 +4203,7 @@ mod tls_tests {
     use openssl::rsa::Rsa;
     use openssl::x509::{X509Name, X509};
     use std::io::Write;
+    use std::path::Path;
 
     const URI: &str = "postgresql://dust_core:test@localhost:5432/dust_core";
 
@@ -4233,6 +4248,38 @@ mod tls_tests {
         assert!(postgres_manager(URI, None).is_ok());
         let ca = tempfile::NamedTempFile::new()?;
         assert!(postgres_manager(URI, Some(ca.path())).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn oauth_store_settings_follow_the_same_tls_rule() -> Result<()> {
+        let oauth = |uri: &str, ca: Option<&Path>| {
+            tls_postgres_manager(uri, ca, "OAUTH_DATABASE_URI", "OAUTH_DATABASE_CA_CERT")
+        };
+        let uri = "postgresql://dust_oauth:test@localhost:5432/dust_oauth";
+        let missing_ca = oauth(&format!("{uri}?sslmode=require"), None)
+            .err()
+            .expect("required TLS without a CA must fail");
+        assert_eq!(
+            missing_ca.to_string(),
+            "OAUTH_DATABASE_CA_CERT is required for TLS"
+        );
+        let ca = tempfile::NamedTempFile::new()?;
+        let stray_ca = oauth(uri, Some(ca.path()))
+            .err()
+            .expect("a CA without required TLS must fail");
+        assert_eq!(
+            stray_ca.to_string(),
+            "OAUTH_DATABASE_CA_CERT requires sslmode=require"
+        );
+        assert_eq!(
+            oauth("not a uri", None)
+                .err()
+                .expect("an invalid URI must fail")
+                .to_string(),
+            "invalid OAUTH_DATABASE_URI"
+        );
+        assert!(oauth(uri, None).is_ok());
         Ok(())
     }
 }

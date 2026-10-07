@@ -23,7 +23,8 @@ It enables these roles:
 | `viz_renderer` | `dockerfiles/viz.Dockerfile` / `viz` | `npm --silent run start` | none |
 | `egress_proxy` | `dockerfiles/egress-proxy.Dockerfile` / `egress-proxy` | `cargo run --release --bin egress-proxy` | none |
 | `connectors_api` | `dockerfiles/connectors.Dockerfile` / `connectors` | `node dist/start_server.js -p 3002` | connectors pre-deploy before rollout, as described below |
-| `connectors_workers` | `dockerfiles/connectors.Dockerfile` / `connectors` | `node dist/start_worker.js --workers dust_project` | none |
+| `connectors_workers` | `dockerfiles/connectors.Dockerfile` / `connectors` | `node dist/start_worker.js --workers <workers>` | none |
+| `oauth` | `dockerfiles/oauth.Dockerfile` / `oauth` | `oauth` | `init_db` from the Core image, as described below |
 
 Core API and SQLite worker intentionally share one image and select different
 commands at deployment. The connectors API and the connectors workers also share
@@ -47,8 +48,11 @@ docker run --rm \
 
 Provide `CORE_DATABASE_URI` to the invoking environment through the deployment's
 secret-aware mechanism; do not put database credentials directly on the command
-line. For this POC, do not set `OAUTH_DATABASE_URI`; the OAuth schema is outside
-the selected runtime scope. The command is an operator-controlled bootstrap
+line. A deployment that runs the OAuth service (see
+[Run the OAuth service](#run-the-oauth-service)) creates its schema with the same
+binary: run `init_db` with `OAUTH_DATABASE_URI`, and `OAUTH_DATABASE_CA_CERT` when
+that URI sets `sslmode=require`. It creates each schema whose URI is set and skips
+the other. The command is an operator-controlled bootstrap
 step. The image does not run it automatically at startup, and the normal
 `core-api` entry point remains unchanged.
 
@@ -182,13 +186,21 @@ settings that the selected TLS mode needs, as described in
 
 | Role | Command | Probe | Required environment |
 |---|---|---|---|
-| `connectors_api` | `node dist/start_server.js -p 3002` | `GET /` on port 3002 | `CONNECTORS_DATABASE_URI`, `DUST_CONNECTORS_SECRET`, `DUST_CONNECTORS_WEBHOOKS_SECRET`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*` |
-| `connectors_workers` | `node dist/start_worker.js --workers dust_project` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `TEXT_EXTRACTION_URL`, `CONNECTORS_ENABLED_PROVIDERS=dust_project`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
+| `connectors_api` | `node dist/start_server.js -p 3002` | `GET /` on port 3002 | `CONNECTORS_DATABASE_URI`, `DUST_CONNECTORS_SECRET`, `DUST_CONNECTORS_WEBHOOKS_SECRET`, `CONNECTORS_ENABLED_PROVIDERS`, `TEMPORAL_*` |
+| `connectors_workers` | `node dist/start_worker.js --workers <workers>` | `GET /readyz` on `127.0.0.1:$WORKER_HEALTH_PORT` | `CONNECTORS_DATABASE_URI`, `DUST_FRONT_API`, `TEXT_EXTRACTION_URL`, `CONNECTORS_ENABLED_PROVIDERS`, `TEMPORAL_*`, `WORKER_HEALTH_PORT` |
+
+The POC enables `dust_project`, and Google Drive adds `google_drive`: set
+`CONNECTORS_ENABLED_PROVIDERS=dust_project,google_drive` and
+`--workers dust_project google_drive`. Google Drive also needs, on both roles,
+`OAUTH_API` and `OAUTH_API_KEY` (the [OAuth service](#run-the-oauth-service) holds
+the Google tokens), and `REDIS_URI` and `REDIS_CACHE_URI` (its sync locks and
+API caches). Google Drive polls for changes every five minutes and needs no
+webhook route.
 
 The API's `GET /` returns 200 without authentication. It shows only that the HTTP
 server is listening, not that the database or Temporal is reachable. Set
-`CONNECTORS_ENABLED_PROVIDERS=dust_project` so the API refuses connectors whose
-workers this deployment does not run. Give the workers the same value: a workflow
+`CONNECTORS_ENABLED_PROVIDERS` to the providers whose workers this deployment runs,
+so the API refuses any other connector. Give the workers the same value: a workflow
 the API starts can reach another connector than the one the API checked, such as a
 Slack team's active bot, and the worker checks that connector against its own
 value.
@@ -221,9 +233,9 @@ that a selected worker does work for, the process logs `Error running workers` a
 exits with code 1. `WORKER_PROVIDERS` in `connectors/src/temporal/worker_registry.ts`
 lists the providers of each worker.
 
-The worker command must keep `--workers dust_project`. Without `--workers`, the
-process selects every registered connectors worker, which
-`CONNECTORS_ENABLED_PROVIDERS=dust_project` refuses. An empty or duplicated
+The worker command must name its workers. Without `--workers`, the process selects
+every registered connectors worker, which `CONNECTORS_ENABLED_PROVIDERS` refuses
+unless it enables every provider. An empty or duplicated
 `--workers` list fails startup. If a worker throws, or stops before the process
 receives SIGINT, SIGTERM, SIGQUIT or SIGUSR2, the process logs
 `Error running <worker> worker.` and exits with code 1, so the orchestrator
@@ -245,10 +257,11 @@ probe must run inside the container, for example as an exec probe:
 node -e 'fetch(`http://127.0.0.1:${process.env.WORKER_HEALTH_PORT}/readyz`).then((r) => process.exit(r.status === 200 ? 0 : 1), () => process.exit(1))'
 ```
 
-`/readyz` returns 200 only after the `dust_project` Temporal worker is `RUNNING`.
-It returns 503 while the worker connects or starts, after any of those four
-signals, and whenever the worker drains, stops or fails. Only `dust_project` reports its
-Temporal worker state, so readiness stays 503 if any other worker is selected.
+`/readyz` returns 200 only after every Temporal worker of every selected connectors
+worker is `RUNNING`. It returns 503 while a worker connects or starts, after any of
+those four signals, and whenever a worker drains, stops or fails. Each connector
+creates its Temporal workers through `createTemporalWorker`, which tracks them for
+readiness; a test fails if a connector calls `Worker.create` directly.
 
 ### Run connectors migrations around the rollout
 
@@ -266,6 +279,34 @@ database, the first pre-deploy migration creates the connectors schema. After
 every old connectors API and worker pod has been replaced, run the same command
 with `--command post-deploy`. As with Front, never combine the two phases into
 one job.
+
+### Run the OAuth service
+
+Connectors that act for a user, such as Google Drive, keep that user's OAuth tokens
+in the OAuth service: it creates connections, exchanges the authorization code,
+stores the tokens encrypted, and refreshes them when Front or connectors ask for an
+access token. It listens on port 3006 (`OAUTH_PORT`); `GET /` returns 200 without
+authentication and shows only that the server is listening.
+
+| Variable | Use |
+|---|---|
+| `OAUTH_DATABASE_URI` | Its own PostgreSQL database. With `sslmode=require`, also set `OAUTH_DATABASE_CA_CERT`; the rule is Core's (`core-postgres-tls`). |
+| `OAUTH_ENCRYPTION_KEY` | Standard Base64 of 32 random bytes, for example `openssl rand -base64 32`. It encrypts the stored tokens: losing it makes every stored connection unreadable. |
+| `REDIS_URI` | The lock that serialises token refreshes. |
+| `API_KEYS` | Path to a JSON file `[{"client_name": "...", "api_key": "..."}]`. Callers send `Authorization: Bearer <api_key>`; without the file every authenticated route answers 401. |
+| `OAUTH_GOOGLE_DRIVE_CLIENT_ID`, `OAUTH_GOOGLE_DRIVE_CLIENT_SECRET` | The Google OAuth client. Each provider's settings are read only when used. |
+
+Front calls it with `OAUTH_API` and `OAUTH_API_KEY`, and sends the user to Google
+with `OAUTH_GOOGLE_DRIVE_CLIENT_ID`; the client secret stays in the OAuth service.
+Google returns the user to `<app URL>/oauth/google_drive/finalize`
+(`DUST_OAUTH_REDIRECT_BASE_URL`, else `NEXT_PUBLIC_DUST_APP_URL`), and the SPA then
+calls `GET /api/oauth/google_drive/finalize` on the API host. Register that
+redirect URI on the Google client. The connectors API and workers call it with
+`OAUTH_API` and `OAUTH_API_KEY`.
+
+Create the schema before the first start, as in
+[Initialize a fresh Core database](#initialize-a-fresh-core-database), with
+`OAUTH_DATABASE_URI` set.
 
 ## Deterministic inputs and local builds
 
