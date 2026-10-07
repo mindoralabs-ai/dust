@@ -2,12 +2,14 @@ use std::str::FromStr;
 
 use crate::oauth::connection::{Connection, ConnectionProvider, ConnectionStatus};
 use crate::oauth::credential::{Credential, CredentialProvider};
+use crate::stores::postgres::tls_postgres_manager;
 use crate::utils;
 use anyhow::Result;
 use async_trait::async_trait;
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
-use tokio_postgres::NoTls;
+use postgres_openssl::MakeTlsConnector;
+use std::path::Path;
 
 use super::credential::CredentialMetadata;
 
@@ -50,12 +52,18 @@ impl Clone for Box<dyn OAuthStore + Sync + Send> {
 
 #[derive(Clone)]
 pub struct PostgresOAuthStore {
-    pool: Pool<PostgresConnectionManager<NoTls>>,
+    pool: Pool<PostgresConnectionManager<MakeTlsConnector>>,
 }
 
 impl PostgresOAuthStore {
     pub async fn new(db_uri: &str) -> Result<Self> {
-        let manager = PostgresConnectionManager::new_from_stringlike(db_uri, NoTls)?;
+        let ca_cert_path = std::env::var_os("OAUTH_DATABASE_CA_CERT");
+        let manager = tls_postgres_manager(
+            db_uri,
+            ca_cert_path.as_deref().map(Path::new),
+            "OAUTH_DATABASE_URI",
+            "OAUTH_DATABASE_CA_CERT",
+        )?;
         let pool = Pool::builder().max_size(16).build(manager).await?;
         Ok(Self { pool })
     }
